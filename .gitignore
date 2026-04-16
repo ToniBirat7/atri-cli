@@ -1,1 +1,72 @@
+# -----------------------------------------------------------------------------
+# Tarbar_AI - production gitignore
+# -----------------------------------------------------------------------------
+
+# Secrets and environment
+.env
 .env/
+.env.*
+!.env.example
+
+# Node / Next.js
+node_modules/
+apps/frontend/node_modules/
+.next/
+apps/frontend/.next/
+out/
+apps/frontend/out/
+dist/
+apps/frontend/dist/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# llama.cpp build outputs (keep source tracked)
+runtime/llm/llama.cpp/build/
+runtime/llm/llama.cpp/bin/
+runtime/llm/llama.cpp/CMakeCache.txt
+runtime/llm/llama.cpp/CMakeFiles/
+runtime/llm/llama.cpp/cmake_install.cmake
+runtime/llm/llama.cpp/CTestTestfile.cmake
+runtime/llm/llama.cpp/compile_commands.json
+
+# Models and large binary assets
+*.gguf
+*.ggml
+*.bin
+
+# Logs and runtime files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors and OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
