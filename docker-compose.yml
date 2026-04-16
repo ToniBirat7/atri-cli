@@ -1,0 +1,90 @@
+version: '3.9'
+
+services:
+  # llama.cpp LLM inference engine
+  llama:
+    build:
+      context: ./runtime/llm/llama.cpp
+      dockerfile: Dockerfile # Will need to create for Phase 9
+    container_name: tarbar-llama
+    restart: unless-stopped
+    ports:
+      - '8000:8000'
+    environment:
+      - LLAMA_MODEL=/models/gemma-4-e2b-it-Q4_K_M.gguf
+      - LLAMA_PORT=8000
+      - LLAMA_API_KEY=secret
+      - LLAMA_JINJA=1
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'curl',
+          '-f',
+          '-H',
+          'Authorization: Bearer secret',
+          'http://localhost:8000/v1/models',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tarbar-network
+
+  # Orchestrator service: coordinates LLM + MCP
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile # Will need to create for Phase 9
+    container_name: tarbar-orchestrator
+    restart: unless-stopped
+    ports:
+      - '8001:8001'
+    depends_on:
+      llama:
+        condition: service_healthy
+    environment:
+      - LLM_BASE_URL=http://llama:8000/v1
+      - LLM_API_KEY=secret
+      - LLM_MODEL=local-model
+      - LLM_TEMPERATURE=0.7
+      - LLM_MAX_TOKENS=2048
+      - MCP_TOOL_TIMEOUT_SECONDS=10
+      - AGENT_MAX_TURNS=10
+      - AGENT_MAX_TOOL_CALLS_PER_TURN=3
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8001/health']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tarbar-network
+
+  # Frontend service: Next.js chat UI
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile # Will need to create for Phase 9
+    container_name: tarbar-frontend
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    depends_on:
+      - orchestrator
+    environment:
+      - NEXT_PUBLIC_API_URL=http://orchestrator:8001
+      - NODE_ENV=development
+    networks:
+      - tarbar-network
+
+networks:
+  tarbar-network:
+    driver: bridge
+
+# Volume for model persistence
+volumes:
+  models:
+    driver: local
