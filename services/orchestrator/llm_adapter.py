@@ -13,10 +13,13 @@ import httpx
 import json
 import logging
 from dataclasses import dataclass
-from .config import LLMConfig
+
+try:
+    from .config import LLMConfig
+except ImportError:
+    from config import LLMConfig
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class ToolUse:

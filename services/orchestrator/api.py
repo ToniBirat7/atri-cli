@@ -15,13 +15,20 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import logging
-import asyncio
 
-from .config import OrchestratorConfig
-from .llm_adapter import LLMAdapter
-from .mcp_orchestrator import MCPOrchestrator, MCPServerConfig
-from .tool_registry import ToolRegistry
-from .agent_loop import AgentLoop
+try:
+    from .config import OrchestratorConfig
+    from .llm_adapter import LLMAdapter
+    from .mcp_orchestrator import MCPOrchestrator, MCPServerConfig
+    from .tool_registry import ToolRegistry
+    from .agent_loop import AgentLoop
+except ImportError:
+    # Fallback for `uvicorn api:app` when running from services/orchestrator.
+    from config import OrchestratorConfig
+    from llm_adapter import LLMAdapter
+    from mcp_orchestrator import MCPOrchestrator, MCPServerConfig
+    from tool_registry import ToolRegistry
+    from agent_loop import AgentLoop
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,10 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
     conversation_id: Optional[str] = Field(None, description="Conversation ID for multi-turn")
     max_turns: Optional[int] = Field(None, description="Override max turns")
+    allowed_directory: Optional[str] = Field(
+        None,
+        description="User-selected filesystem root for MCP tools",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -49,7 +60,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str = Field(..., description="Service status")
     llm_connected: bool = Field(..., description="LLM endpoint reachable")
-    mcp_servers: Dict[str, str] = Field(..., description="MCP server statuses")
+    mcp_servers: Dict[str, Dict[str, Any]] = Field(..., description="MCP server statuses")
 
 
 class ToolInfo(BaseModel):
@@ -136,7 +147,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
     
     Returns the final response after tool use if applicable.
     """
-    if not agent_loop or not llm_adapter or not mcp_orchestrator or not tool_registry:
+    if (
+        agent_loop is None
+        or llm_adapter is None
+        or mcp_orchestrator is None
+        or tool_registry is None
+    ):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
     
     try:
@@ -145,6 +161,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # Override max turns if provided
         if request.max_turns:
             agent_loop.max_turns = request.max_turns
+
+        # Apply user-selected filesystem root for MCP tools before execution.
+        if request.allowed_directory:
+            await mcp_orchestrator.execute_tool(
+                server_name="local-mcp",
+                tool_name="set_allowed_directory",
+                tool_input={"path": request.allowed_directory},
+            )
         
         # Run agent loop
         response, state = await agent_loop.run(

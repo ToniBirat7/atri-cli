@@ -1,6 +1,7 @@
-import { NextRequest } from "next/server";
+import { NextRequest } from 'next/server';
 
-const LLAMA_URL = process.env.LLAMA_URL || "http://localhost:8080";
+const ORCHESTRATOR_URL =
+  process.env.ORCHESTRATOR_URL || 'http://127.0.0.1:8001';
 
 const SYSTEM_PROMPT = `You are "Kanoon Box" (कानून बक्स), Nepal's official AI court information assistant under the UNDP Access to Justice (A2J) Project.
 
@@ -14,86 +15,64 @@ RULES:
 - For human help, direct to toll-free: 1660-01-333-55.`;
 
 interface Message {
-  role: "user" | "assistant" | "system";
+  role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
 export async function POST(req: NextRequest) {
-  const { messages }: { messages: Message[] } = await req.json();
+  const {
+    messages,
+    allowedDirectory,
+  }: { messages: Message[]; allowedDirectory?: string } = await req.json();
 
-  const fullMessages: Message[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    ...messages,
-  ];
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((m) => m.role === 'user')?.content;
 
-  const response = await fetch(`${LLAMA_URL}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "gemma-4-e2b-it-Q4_K_M.gguf",
-      messages: fullMessages,
-      stream: true,
-      temperature: 1.0,
-      top_k: 64,
-      top_p: 0.95,
-      max_tokens: -1,
-    }),
+  if (!lastUserMessage) {
+    return new Response(JSON.stringify({ error: 'No user message provided' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const orchestratorPayload = {
+    message: `${SYSTEM_PROMPT}\n\nUser: ${lastUserMessage}`,
+    allowed_directory: allowedDirectory,
+  };
+
+  const response = await fetch(`${ORCHESTRATOR_URL}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(orchestratorPayload),
   });
 
   if (!response.ok) {
     const error = await response.text();
-    return new Response(JSON.stringify({ error: `llama.cpp error: ${error}` }), {
-      status: response.status,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: `orchestrator error: ${error}` }),
+      {
+        status: response.status,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
   }
 
+  const json = await response.json();
+  const finalText = json?.response || '';
+
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
 
   const stream = new ReadableStream({
     async start(controller) {
-      const reader = response.body!.getReader();
-
-      let buffer = "";
-
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith("data: ")) continue;
-
-            const data = trimmed.slice(6);
-            if (data === "[DONE]") {
-              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-              continue;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content;
-              if (content) {
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ content })}\n\n`)
-                );
-              }
-            } catch {
-              // skip malformed chunks
-            }
-          }
-        }
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ content: finalText })}\n\n`),
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       } catch (err) {
         controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ error: String(err) })}\n\n`
-          )
+          encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`),
         );
       } finally {
         controller.close();
@@ -103,9 +82,9 @@ export async function POST(req: NextRequest) {
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
     },
   });
 }

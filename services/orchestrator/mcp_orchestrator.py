@@ -18,6 +18,9 @@ import json
 import logging
 from dataclasses import dataclass
 import asyncio
+import inspect
+import importlib.util
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,26 @@ class MCPOrchestrator:
         self._servers: Dict[str, Any] = {}  # server_name -> client
         self._server_configs: Dict[str, MCPServerConfig] = {}
 
+    def _try_load_local_module(self, config: MCPServerConfig) -> Optional[Any]:
+        """Load local MCP Python module for in-process tool execution fallback."""
+        command = config.command
+        if "services/mcp/main.py" not in command:
+            return None
+
+        module_path = (Path(__file__).resolve().parent.parent / "mcp" / "main.py").resolve()
+        if not module_path.exists():
+            logger.warning(f"Local MCP module not found at {module_path}")
+            return None
+
+        spec = importlib.util.spec_from_file_location("tarbar_local_mcp", str(module_path))
+        if spec is None or spec.loader is None:
+            logger.warning("Failed to create import spec for local MCP module")
+            return None
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     async def initialize_server(self, config: MCPServerConfig) -> None:
         """
         Initialize connection to an MCP server.
@@ -54,13 +77,25 @@ class MCPOrchestrator:
         """
         logger.info(f"Initializing MCP server: {config.name}")
         self._server_configs[config.name] = config
-        
-        # Phase 1: Placeholder for actual MCP client initialization
-        # In Phase 2, this will instantiate FastMCP client or SDK client
+
+        module = self._try_load_local_module(config)
+        if module is not None:
+            self._servers[config.name] = {
+                "status": "initialized",
+                "command": config.command,
+                "transport": config.transport,
+                "mode": "inprocess-module",
+                "module": module,
+            }
+            logger.info(f"MCP server {config.name} initialized in in-process mode")
+            return
+
+        # Placeholder metadata for future MCP SDK client mode
         self._servers[config.name] = {
             "status": "initialized",
             "command": config.command,
             "transport": config.transport,
+            "mode": "metadata-only",
         }
         logger.info(f"MCP server {config.name} initialized")
 
@@ -73,9 +108,26 @@ class MCPOrchestrator:
         """
         if server_name not in self._servers:
             raise ValueError(f"Server {server_name} not initialized")
-        
-        # Phase 1: Placeholder
-        # In Phase 2, this will call mcp_client.list_tools()
+        server = self._servers[server_name]
+        if server.get("mode") == "inprocess-module":
+            module = server["module"]
+            tools: list[dict[str, Any]] = []
+            for name, obj in inspect.getmembers(module, inspect.isfunction):
+                if name.startswith("_"):
+                    continue
+                tools.append(
+                    {
+                        "name": name,
+                        "description": (obj.__doc__ or "").strip(),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    }
+                )
+            return tools
+
+        # Placeholder for future MCP SDK mode
         logger.info(f"Discovering tools from {server_name}")
         return []
 
@@ -104,14 +156,27 @@ class MCPOrchestrator:
         """
         if server_name not in self._servers:
             raise ValueError(f"Server {server_name} not initialized")
-        
+
         logger.info(f"Executing {server_name}.{tool_name}({tool_input})")
-        
-        # Phase 1: Placeholder
-        # In Phase 2, this will call mcp_client.call_tool(tool_name, tool_input)
-        # with timeout wrapping and error handling
-        
-        # Phase 5: Add retry logic here
+
+        server = self._servers[server_name]
+        if server.get("mode") == "inprocess-module":
+            module = server["module"]
+            fn = getattr(module, tool_name, None)
+            if fn is None or not callable(fn):
+                raise ValueError(f"Tool not found: {tool_name}")
+
+            async def _invoke() -> Any:
+                if inspect.iscoroutinefunction(fn):
+                    return await fn(**tool_input)
+                return await asyncio.to_thread(fn, **tool_input)
+
+            result = await asyncio.wait_for(_invoke(), timeout=timeout_seconds)
+            if isinstance(result, (dict, list)):
+                return json.dumps(result, ensure_ascii=False)
+            return str(result)
+
+        # Placeholder for future MCP SDK mode
         return f"Tool {tool_name} executed"
 
     async def shutdown_server(self, server_name: str) -> None:
@@ -130,7 +195,10 @@ class MCPOrchestrator:
     def get_server_status(self) -> Dict[str, Any]:
         """Get status of all managed MCP servers."""
         return {
-            server_name: {"status": server_info.get("status", "unknown")}
+            server_name: {
+                "status": server_info.get("status", "unknown"),
+                "mode": server_info.get("mode", "unknown"),
+            }
             for server_name, server_info in self._servers.items()
         }
 

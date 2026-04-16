@@ -8,6 +8,9 @@ Loads from environment variables and config files.
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 class LLMConfig(BaseModel):
@@ -120,6 +123,9 @@ class OrchestratorConfig(BaseModel):
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
         """Load configuration from environment variables."""
+        env_path = Path(__file__).resolve().parent / ".env"
+        load_dotenv(dotenv_path=env_path, override=False)
+
         return cls(
             llm=LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
