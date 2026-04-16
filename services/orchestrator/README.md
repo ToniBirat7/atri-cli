@@ -2,6 +2,8 @@
 
 **Phase 1 of 10-phase architecture** — Core LLM + MCP orchestration for Tarbar_AI.
 
+For the production-oriented service reference, see [docs/services/orchestrator.md](../../docs/services/orchestrator.md).
+
 ## Overview
 
 The orchestrator service is the **brain** of Tarbar_AI. It coordinates:
@@ -80,6 +82,7 @@ FastAPI HTTP server exposing orchestrator:
 - `GET /live` — Liveness probe
 - `GET /ready` — Readiness probe
 - `GET /tools` — List available tools
+- `GET /conversations` — List stored conversations and prompt profiles
 - `GET /metrics` — Runtime counters and uptime
 - `GET /` — Service info
 
@@ -90,10 +93,27 @@ Operational defaults:
 - `POST /chat` responses include `request_id` for log correlation.
 
 Security policy:
-- If `ORCHESTRATOR_API_KEY` is set, `POST /chat`, `POST /chat/stream`, `GET /tools`, and `GET /metrics` require either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- `ORCHESTRATOR_AUTH_MODE` controls the auth strategy. Use `hybrid` during migration, `jwt` for strict service-to-service auth, or `api-key` for local-only bootstrap.
+- If `ORCHESTRATOR_JWT_SECRET` is set, `Authorization: Bearer <jwt>` tokens are validated with `iss`, `aud`, and `sub` claims.
+- If `ORCHESTRATOR_API_KEY` is set, the legacy API-key path remains available in `hybrid` or `api-key` mode.
+- If `ORCHESTRATOR_ADMIN_API_KEY` is set, it unlocks per-request prompt profile overrides for privileged clients.
 - If `ORCHESTRATOR_RATE_LIMIT_PER_MINUTE` is greater than zero, those same endpoints are rate-limited per client IP and path.
 - `GET /health` and `GET /` remain unauthenticated by default so local monitoring stays simple.
 
+Prompt policy:
+- `PROMPT_POLICY_DEFAULT_PROFILE` selects the default behavior (`general-purpose`, `legal-strict`, or `hybrid`).
+- `PROMPT_POLICY_FALLBACK_TEXT`, `PROMPT_POLICY_DISCLAIMER_TEXT`, and `PROMPT_POLICY_LEGAL_HELP_LINE` control the legal-safety messaging without editing code.
+- The Gemma 4 llama.cpp Jinja template accepts system content in the first system turn and injects tool declarations there, so prompts stay plain text and do not embed tool markup directly.
+
+Persistence:
+- `ORCHESTRATOR_DATABASE_URL` defaults to `sqlite:///orchestrator.db` for local persistence.
+- Production compose uses PostgreSQL through `postgresql://...`.
+- Set `ORCHESTRATOR_ENABLE_PERSISTENCE=false` to disable conversation and turn recording.
+- Each `/chat` or `/chat/stream` request stores the conversation metadata, turn history, and tool-call audit trail.
+
+Rate limiting and tracing:
+- `ORCHESTRATOR_REDIS_URL` and `ORCHESTRATOR_REDIS_ENABLED` enable distributed request limiting.
+- `ORCHESTRATOR_TELEMETRY_ENABLED` and `ORCHESTRATOR_OTLP_ENDPOINT` configure OpenTelemetry export.
 Multi-server routing:
 - Configure multiple MCP servers with `MCP_SERVERS_JSON` (JSON array of `{name, command, transport}` objects).
 - Tool registry always publishes namespaced aliases (`server.tool`) and uses plain aliases only when no collision exists.
@@ -183,6 +203,21 @@ MCP_MAX_TOOL_CALL_RETRIES=2
 AGENT_MAX_TURNS=10
 AGENT_MAX_TOOL_CALLS_PER_TURN=3
 AGENT_ENABLE_TOOL_USE=true
+
+# Prompt policy
+PROMPT_POLICY_DEFAULT_PROFILE=general-purpose
+PROMPT_POLICY_FALLBACK_TEXT=मलाई यस बारेमा जानकारी उपलब्ध छैन।
+PROMPT_POLICY_DISCLAIMER_TEXT=यो जानकारी मार्गदर्शनका लागि मात्र हो, कानूनी सल्लाह होइन।
+PROMPT_POLICY_LEGAL_HELP_LINE=For human help, call 1660-01-333-55.
+
+# Persistence and auth
+ORCHESTRATOR_DATABASE_URL=sqlite:///orchestrator.db
+ORCHESTRATOR_ENABLE_PERSISTENCE=true
+ORCHESTRATOR_AUTH_MODE=hybrid
+ORCHESTRATOR_JWT_SECRET=replace-with-a-long-random-secret
+ORCHESTRATOR_JWT_ISSUER=tarbar-ai
+ORCHESTRATOR_JWT_AUDIENCE=tarbar-ai-orchestrator
+ORCHESTRATOR_SERVICE_SUBJECT=orchestrator-service
 
 # Observability
 LOG_LEVEL=DEBUG

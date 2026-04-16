@@ -1,20 +1,63 @@
-version: '3.9'
-
 services:
-  # llama.cpp LLM inference engine
+  postgres:
+    image: postgres:16-alpine
+    container_name: tarbar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tarbar
+      POSTGRES_USER: tarbar
+      POSTGRES_PASSWORD: tarbar
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tarbar -d tarbar']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tarbar-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: tarbar-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tarbar-network
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: tarbar-tempo
+    restart: unless-stopped
+    command: ['-config.file=/etc/tempo.yaml']
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - '3200:3200'
+    networks:
+      - tarbar-network
+
   llama:
     build:
       context: ./runtime/llm/llama.cpp
-      dockerfile: Dockerfile # Will need to create for Phase 9
+      dockerfile: Dockerfile
     container_name: tarbar-llama
     restart: unless-stopped
     ports:
       - '8000:8000'
     environment:
-      - LLAMA_MODEL=/models/gemma-4-e2b-it-Q4_K_M.gguf
-      - LLAMA_PORT=8000
-      - LLAMA_API_KEY=secret
-      - LLAMA_JINJA=1
+      LLAMA_MODEL: /models/gemma-4-e2b-it-Q4_K_M.gguf
+      LLAMA_PORT: 8000
+      LLAMA_API_KEY: secret
+      LLAMA_JINJA: '1'
     volumes:
       - ./models:/models:ro
     healthcheck:
@@ -33,28 +76,45 @@ services:
     networks:
       - tarbar-network
 
-  # Orchestrator service: coordinates LLM + MCP
   orchestrator:
     build:
       context: ./services/orchestrator
-      dockerfile: Dockerfile # Will need to create for Phase 9
+      dockerfile: Dockerfile
     container_name: tarbar-orchestrator
     restart: unless-stopped
     ports:
       - '8001:8001'
     depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
       llama:
         condition: service_healthy
     environment:
-      - LLM_BASE_URL=http://llama:8000/v1
-      - LLM_API_KEY=secret
-      - LLM_MODEL=local-model
-      - LLM_TEMPERATURE=0.7
-      - LLM_MAX_TOKENS=2048
-      - MCP_TOOL_TIMEOUT_SECONDS=10
-      - AGENT_MAX_TURNS=10
-      - AGENT_MAX_TOOL_CALLS_PER_TURN=3
-      - LOG_LEVEL=INFO
+      LLM_BASE_URL: http://llama:8000/v1
+      LLM_API_KEY: secret
+      LLM_MODEL: local-model
+      LLM_TEMPERATURE: '0.7'
+      LLM_MAX_TOKENS: '2048'
+      MCP_TOOL_TIMEOUT_SECONDS: '10'
+      AGENT_MAX_TURNS: '10'
+      AGENT_MAX_TOOL_CALLS_PER_TURN: '3'
+      LOG_LEVEL: INFO
+      ENABLE_OBSERVABILITY: 'true'
+      ORCHESTRATOR_DATABASE_URL: postgresql://tarbar:tarbar@postgres:5432/tarbar
+      ORCHESTRATOR_ENABLE_PERSISTENCE: 'true'
+      ORCHESTRATOR_AUTH_MODE: jwt
+      ORCHESTRATOR_JWT_SECRET: replace-with-a-long-random-secret
+      ORCHESTRATOR_JWT_ISSUER: tarbar-ai
+      ORCHESTRATOR_JWT_AUDIENCE: tarbar-ai-orchestrator
+      ORCHESTRATOR_SERVICE_SUBJECT: orchestrator-service
+      ORCHESTRATOR_REDIS_URL: redis://redis:6379/0
+      ORCHESTRATOR_REDIS_ENABLED: 'true'
+      ORCHESTRATOR_RATE_LIMIT_PER_MINUTE: '60'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: tarbar-orchestrator
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:8001/health']
       interval: 10s
@@ -63,20 +123,21 @@ services:
     networks:
       - tarbar-network
 
-  # Frontend service: Next.js chat UI
   frontend:
     build:
       context: ./apps/frontend
-      dockerfile: Dockerfile # Will need to create for Phase 9
+      dockerfile: Dockerfile
     container_name: tarbar-frontend
     restart: unless-stopped
     ports:
       - '3000:3000'
     depends_on:
-      - orchestrator
+      orchestrator:
+        condition: service_healthy
     environment:
-      - NEXT_PUBLIC_API_URL=http://orchestrator:8001
-      - NODE_ENV=development
+      NEXT_PUBLIC_API_URL: http://orchestrator:8001
+      NEXT_PUBLIC_PROMPT_PROFILE: general-purpose
+      NODE_ENV: production
     networks:
       - tarbar-network
 
@@ -84,7 +145,7 @@ networks:
   tarbar-network:
     driver: bridge
 
-# Volume for model persistence
 volumes:
-  models:
-    driver: local
+  postgres-data:
+  redis-data:
+  tempo-data:

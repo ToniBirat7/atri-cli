@@ -2,18 +2,34 @@
 
 from collections import defaultdict, deque
 import pytest
+from types import SimpleNamespace
 
 import api
 
 
 class _FakeConfig:
-    class llm:
-        model = "test-model"
-
-    class security:
-        api_key = None
-        rate_limit_per_minute = 0
-        allow_unauthenticated_health = True
+    def __init__(self):
+        self.llm = SimpleNamespace(model="test-model")
+        self.agent_loop = SimpleNamespace(enable_thinking=False)
+        self.prompt_policy = SimpleNamespace(
+            default_profile="general-purpose",
+            fallback_text="fallback",
+            disclaimer_text="disclaimer",
+            legal_help_line="help line",
+        )
+        self.auth = SimpleNamespace(
+            mode="hybrid",
+            jwt_secret=None,
+            jwt_issuer="tarbar-ai",
+            jwt_audience="tarbar-ai-orchestrator",
+            service_subject="orchestrator-service",
+        )
+        self.security = SimpleNamespace(
+            api_key=None,
+            admin_api_key=None,
+            rate_limit_per_minute=0,
+            allow_unauthenticated_health=True,
+        )
 
 
 class _FakeLLMAdapter:
@@ -50,16 +66,20 @@ class _FakeToolRegistry:
 class _FakeAgentLoop:
     def __init__(self):
         self.max_turns = 10
+        self.last_system_prompt = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None):
+        self.last_system_prompt = system_prompt
         return "ok", type("State", (), {"turn": 1, "total_tool_calls": 1, "status": "completed"})()
 
 
 class _FakeAgentLoopLong:
     def __init__(self):
         self.max_turns = 10
+        self.last_system_prompt = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None):
+        self.last_system_prompt = system_prompt
         return "abcdefghij" * 40, type("State", (), {"turn": 2, "total_tool_calls": 2, "status": "completed"})()
 
 
@@ -94,7 +114,8 @@ async def test_chat_returns_request_id_and_default_directory(monkeypatch):
     monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
     monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
     monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
-    monkeypatch.setattr(api, "agent_loop", _FakeAgentLoop())
+    fake_loop = _FakeAgentLoop()
+    monkeypatch.setattr(api, "agent_loop", fake_loop)
 
     captured = {}
 
@@ -112,6 +133,47 @@ async def test_chat_returns_request_id_and_default_directory(monkeypatch):
     assert response.model == "test-model"
     assert captured["tool_name"] == "set_allowed_directory"
     assert captured["tool_input"]["path"]
+    assert fake_loop.last_system_prompt is not None
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_prompt_profile_override_without_admin(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
+    monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+    monkeypatch.setattr(api, "agent_loop", _FakeAgentLoop())
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.chat(api.ChatRequest(message="hello", prompt_profile="legal-strict"), _FakeRequest())
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_chat_accepts_admin_prompt_profile_override(monkeypatch):
+    config = _FakeConfig()
+    config.security.admin_api_key = "admin-secret"
+    monkeypatch.setattr(api, "config", config)
+    monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
+    monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+    fake_loop = _FakeAgentLoop()
+    monkeypatch.setattr(api, "agent_loop", fake_loop)
+
+    async def noop_execute_tool(server_name, tool_name, tool_input):
+        return "ok"
+
+    monkeypatch.setattr(api.mcp_orchestrator, "execute_tool", noop_execute_tool)
+
+    response = await api.chat(
+        api.ChatRequest(message="hello", prompt_profile="legal-strict"),
+        _FakeRequest(headers={"authorization": "Bearer admin-secret"}),
+    )
+
+    assert response.request_id
+    assert fake_loop.last_system_prompt is not None
+    assert "legal information assistant" in fake_loop.last_system_prompt.lower()
 
 
 @pytest.mark.asyncio

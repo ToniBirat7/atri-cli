@@ -121,12 +121,101 @@ class AgentLoopConfig(BaseModel):
         env_prefix = "AGENT_"
 
 
+class PromptPolicyConfig(BaseModel):
+    """Prompt policy and safety defaults."""
+
+    default_profile: str = Field(
+        default="general-purpose",
+        description="Default prompt profile used when no override is provided"
+    )
+    fallback_text: str = Field(
+        default="मलाई यस बारेमा जानकारी उपलब्ध छैन।",
+        description="Fallback text for unsupported or missing legal context"
+    )
+    disclaimer_text: str = Field(
+        default="यो जानकारी मार्गदर्शनका लागि मात्र हो, कानूनी सल्लाह होइन।",
+        description="Safety disclaimer appended to legal responses"
+    )
+    legal_help_line: str = Field(
+        default="For human help, call 1660-01-333-55.",
+        description="Human handoff line for legal-support responses"
+    )
+
+
+class DatabaseConfig(BaseModel):
+    """Conversation persistence configuration."""
+
+    url: str = Field(
+        default="sqlite:///orchestrator.db",
+        description="Database URL used for conversation persistence"
+    )
+    enable_persistence: bool = Field(
+        default=True,
+        description="Enable conversation/turn persistence"
+    )
+
+
+class AuthConfig(BaseModel):
+    """JWT and service-to-service authentication configuration."""
+
+    mode: str = Field(
+        default="hybrid",
+        description="Authentication mode (jwt, api-key, hybrid)"
+    )
+    jwt_secret: Optional[str] = Field(
+        default=None,
+        description="Shared secret for signing and validating HMAC JWTs"
+    )
+    jwt_issuer: str = Field(
+        default="tarbar-ai",
+        description="Expected JWT issuer"
+    )
+    jwt_audience: str = Field(
+        default="tarbar-ai-orchestrator",
+        description="Expected JWT audience"
+    )
+    service_subject: str = Field(
+        default="orchestrator-service",
+        description="Subject identifier for service-to-service requests"
+    )
+
+
+class RedisConfig(BaseModel):
+    """Redis configuration for distributed rate limiting and shared state."""
+
+    url: Optional[str] = Field(
+        default=None,
+        description="Redis URL used for distributed rate limiting"
+    )
+    enabled: bool = Field(
+        default=False,
+        description="Enable Redis-backed features when available"
+    )
+
+
+class TelemetryConfig(BaseModel):
+    """OpenTelemetry configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable OpenTelemetry bootstrap"
+    )
+    otlp_endpoint: Optional[str] = Field(
+        default=None,
+        description="OTLP HTTP collector endpoint"
+    )
+
+
 class SecurityConfig(BaseModel):
     """Orchestrator security and access policy."""
 
     api_key: Optional[str] = Field(
         default=None,
         description="Optional API key required for protected endpoints"
+    )
+    admin_api_key: Optional[str] = Field(
+        default=None,
+        description="Optional admin-only API key for privileged per-request overrides"
     )
     rate_limit_per_minute: int = Field(
         default=0,
@@ -145,6 +234,11 @@ class OrchestratorConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     agent_loop: AgentLoopConfig = Field(default_factory=AgentLoopConfig)
+    prompt_policy: PromptPolicyConfig = Field(default_factory=PromptPolicyConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     log_level: str = Field(
         default="INFO",
@@ -192,8 +286,34 @@ class OrchestratorConfig(BaseModel):
                 enable_thinking=os.getenv("AGENT_ENABLE_THINKING", "false").lower() == "true",
                 stream_responses=os.getenv("AGENT_STREAM_RESPONSES", "false").lower() == "true",
             ),
+            prompt_policy=PromptPolicyConfig(
+                default_profile=os.getenv("PROMPT_POLICY_DEFAULT_PROFILE", "general-purpose"),
+                fallback_text=os.getenv("PROMPT_POLICY_FALLBACK_TEXT", "मलाई यस बारेमा जानकारी उपलब्ध छैन।"),
+                disclaimer_text=os.getenv("PROMPT_POLICY_DISCLAIMER_TEXT", "यो जानकारी मार्गदर्शनका लागि मात्र हो, कानूनी सल्लाह होइन।"),
+                legal_help_line=os.getenv("PROMPT_POLICY_LEGAL_HELP_LINE", "For human help, call 1660-01-333-55."),
+            ),
+            database=DatabaseConfig(
+                url=os.getenv("ORCHESTRATOR_DATABASE_URL", "sqlite:///orchestrator.db"),
+                enable_persistence=os.getenv("ORCHESTRATOR_ENABLE_PERSISTENCE", "true").lower() == "true",
+            ),
+            auth=AuthConfig(
+                mode=os.getenv("ORCHESTRATOR_AUTH_MODE", "hybrid"),
+                jwt_secret=os.getenv("ORCHESTRATOR_JWT_SECRET"),
+                jwt_issuer=os.getenv("ORCHESTRATOR_JWT_ISSUER", "tarbar-ai"),
+                jwt_audience=os.getenv("ORCHESTRATOR_JWT_AUDIENCE", "tarbar-ai-orchestrator"),
+                service_subject=os.getenv("ORCHESTRATOR_SERVICE_SUBJECT", "orchestrator-service"),
+            ),
+            redis=RedisConfig(
+                url=os.getenv("ORCHESTRATOR_REDIS_URL"),
+                enabled=os.getenv("ORCHESTRATOR_REDIS_ENABLED", "false").lower() == "true",
+            ),
+            telemetry=TelemetryConfig(
+                enabled=os.getenv("ORCHESTRATOR_TELEMETRY_ENABLED", "true").lower() == "true",
+                otlp_endpoint=os.getenv("ORCHESTRATOR_OTLP_ENDPOINT"),
+            ),
             security=SecurityConfig(
                 api_key=os.getenv("ORCHESTRATOR_API_KEY"),
+                admin_api_key=os.getenv("ORCHESTRATOR_ADMIN_API_KEY"),
                 rate_limit_per_minute=int(os.getenv("ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", "0")),
                 allow_unauthenticated_health=os.getenv("ORCHESTRATOR_ALLOW_UNAUTHENTICATED_HEALTH", "true").lower() == "true",
             ),

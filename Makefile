@@ -1,5 +1,15 @@
 .PHONY: help dev-up dev-down logs clean install test build
 
+# Model runtime toggle
+ENABLE_THINKING ?= false
+LLAMA_CHAT_TEMPLATE_KWARGS := {"enable_thinking":$(ENABLE_THINKING)}
+
+# llama.cpp runtime/build knobs
+LLAMA_THREADS ?= 12
+LLAMA_N_GPU_LAYERS ?= 999
+LLAMA_CTX_SIZE ?= 16384
+LLAMA_CUDA_ARCH ?= 86
+
 # Colors for output
 BLUE := \033[0;34m
 GREEN := \033[0;32m
@@ -22,6 +32,7 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(YELLOW)Individual Services:$(NC)"
 	@echo "  make llama               Start llama.cpp server"
+	@echo "  make llama-build-gpu     Rebuild llama.cpp with CUDA support"
 	@echo "  make mcp                 Start MCP server (STDIO)"
 	@echo "  make orchestrator        Start orchestrator API"
 	@echo "  make frontend            Start frontend dev server"
@@ -41,7 +52,7 @@ help: ## Show this help message
 dev-up: env ## Start all services (llama + orchestrator + frontend)
 	@echo "$(GREEN)Starting Tarbar_AI services...$(NC)"
 	@echo "$(BLUE)1. Starting llama.cpp on port $(LLAMA_PORT)$(NC)"
-	@(cd runtime/llm/llama.cpp && ./build/bin/llama-server -m gemma-4-e2b-it-Q4_K_M.gguf --jinja --port $(LLAMA_PORT) --api-key secret > ../../../llama.log 2>&1 &)
+	@(cd runtime/llm/llama.cpp && ./build/bin/llama-server -m gemma-4-e2b-it-Q4_K_M.gguf --jinja --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --api-key secret > ../../../llama.log 2>&1 &)
 	@sleep 3
 	@echo "$(BLUE)2. Starting orchestrator on port $(ORCHESTRATOR_PORT)$(NC)"
 	@(cd services/orchestrator && \
@@ -60,6 +71,8 @@ dev-up: env ## Start all services (llama + orchestrator + frontend)
 	@echo "  llama.cpp:      http://127.0.0.1:$(LLAMA_PORT)"
 	@echo "  Orchestrator:   http://127.0.0.1:$(ORCHESTRATOR_PORT)"
 	@echo "  Frontend:       http://127.0.0.1:$(FRONTEND_PORT)"
+	@echo ""
+	@echo "Current llama.cpp settings: threads=$(LLAMA_THREADS), n-gpu-layers=$(LLAMA_N_GPU_LAYERS), ctx=$(LLAMA_CTX_SIZE), cuda-arch=$(LLAMA_CUDA_ARCH)"
 	@echo ""
 	@echo "$(YELLOW)Logs:$(NC)"
 	@echo "  make logs                View all logs"
@@ -89,8 +102,7 @@ llama: env ## Start llama.cpp server only
 		echo "$(RED)Error: Model not found at runtime/llm/llama.cpp/gemma-4-e2b-it-Q4_K_M.gguf$(NC)"; \
 		exit 1; \
 	fi
-	@cd runtime/llm/llama.cpp && ./build/bin/llama-server -m gemma-4-e2b-it-Q4_K_M.gguf --jinja --port $(LLAMA_PORT) --api-key secret
-
+	@cd runtime/llm/llama.cpp && ./build/bin/llama-server -m gemma-4-e2b-it-Q4_K_M.gguf --jinja --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --api-key secret
 orchestrator: ## Start orchestrator API only (requires llama.cpp running)
 	@echo "$(GREEN)Starting orchestrator...$(NC)"
 	@cd services/orchestrator && \
@@ -132,9 +144,12 @@ env: ## Create .env files with defaults
 			"LLM_BASE_URL=http://127.0.0.1:$(LLAMA_PORT)/v1" \
 			"LLM_API_KEY=secret" \
 			"LLM_MODEL=local-model" \
-			"LLM_TEMPERATURE=0.7" \
+			"LLM_TEMPERATURE=1.0" \
+			"LLM_TOP_P=0.95" \
+			"LLM_TOP_K=64" \
 			"LLM_MAX_TOKENS=2048" \
 			"LLM_TIMEOUT_SECONDS=30" \
+			"LLM_PARALLEL_TOOL_CALLS=true" \
 			"" \
 			"MCP_DEFAULT_TRANSPORT=stdio" \
 			"MCP_TOOL_TIMEOUT_SECONDS=10" \
@@ -143,6 +158,7 @@ env: ## Create .env files with defaults
 			"AGENT_MAX_TURNS=10" \
 			"AGENT_MAX_TOOL_CALLS_PER_TURN=3" \
 			"AGENT_ENABLE_TOOL_USE=true" \
+			"AGENT_ENABLE_THINKING=$(ENABLE_THINKING)" \
 			"AGENT_STREAM_RESPONSES=false" \
 			"" \
 			"LOG_LEVEL=INFO" \
@@ -199,6 +215,12 @@ clean: dev-down ## Clean build artifacts and temporary files
 	@rm -rf apps/frontend/node_modules
 	@rm -rf services/orchestrator/__pycache__ services/orchestrator/.pytest_cache
 	@echo "$(GREEN)✓ Cleanup complete$(NC)"
+
+llama-build-gpu: ## Rebuild llama.cpp with CUDA support for NVIDIA GPUs
+	@echo "$(BLUE)Configuring llama.cpp with CUDA backend...$(NC)"
+	@cd runtime/llm/llama.cpp && \
+		cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$(LLAMA_CUDA_ARCH) && \
+		cmake --build build --config Release -j $$(nproc) --target llama-server llama-cli
 
 # ===== Internal Targets =====
 

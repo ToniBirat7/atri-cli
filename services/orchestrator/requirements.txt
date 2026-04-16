@@ -17,9 +17,16 @@ pydantic-settings>=2.7.0,<3.0.0
 
 # Async support
 asyncio-contextmanager==1.0.1
+redis==5.0.8
+psycopg[binary]==3.2.3
 
 # Logging and observability (Phase 7)
 structlog==23.2.0
+opentelemetry-api==1.27.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp==1.27.0
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-instrumentation-httpx==0.48b0
 
 # Testing (Phase 3+)
 pytest==7.4.3

@@ -2,28 +2,26 @@ import { NextRequest } from 'next/server';
 
 const ORCHESTRATOR_URL =
   process.env.ORCHESTRATOR_URL || 'http://127.0.0.1:8001';
-
-const SYSTEM_PROMPT = `You are "Kanoon Box" (कानून बक्स), Nepal's official AI court information assistant under the UNDP Access to Justice (A2J) Project.
-
-RULES:
-- Answer ONLY from the <context> provided in the user message. Never use external knowledge.
-- If the context lacks the answer, say: "मलाई यस बारेमा जानकारी उपलब्ध छैन।"
-- Match the user's language (Nepali, English, or mixed).
-- Use bullet points for clarity. Be complete but concise.
-- Never give legal opinions, predict case outcomes, or give case-specific advice.
-- End every answer with: "यो जानकारी मार्गदर्शनका लागि मात्र हो, कानूनी सल्लाह होइन।"
-- For human help, direct to toll-free: 1660-01-333-55.`;
+const PROMPT_PROFILE =
+  process.env.NEXT_PUBLIC_PROMPT_PROFILE || 'general-purpose';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
+interface ChatRequestBody {
+  messages: Message[];
+  allowedDirectory?: string;
+  promptProfile?: string;
+}
+
 export async function POST(req: NextRequest) {
   const {
     messages,
     allowedDirectory,
-  }: { messages: Message[]; allowedDirectory?: string } = await req.json();
+    promptProfile,
+  }: ChatRequestBody = await req.json();
 
   const lastUserMessage = [...messages]
     .reverse()
@@ -37,11 +35,12 @@ export async function POST(req: NextRequest) {
   }
 
   const orchestratorPayload = {
-    message: `${SYSTEM_PROMPT}\n\nUser: ${lastUserMessage}`,
+    message: lastUserMessage,
     allowed_directory: allowedDirectory,
+    prompt_profile: promptProfile || PROMPT_PROFILE,
   };
 
-  const response = await fetch(`${ORCHESTRATOR_URL}/chat`, {
+  const response = await fetch(`${ORCHESTRATOR_URL}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(orchestratorPayload),
@@ -58,17 +57,54 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const json = await response.json();
-  const finalText = json?.response || '';
-
   const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
 
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ content: finalText })}\n\n`),
-        );
+        const upstream = response.body?.getReader();
+        if (!upstream) {
+          throw new Error('Empty stream from orchestrator');
+        }
+
+        let buffer = '';
+        while (true) {
+          const { done, value } = await upstream.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6);
+
+            if (data === '[DONE]') {
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              continue;
+            }
+
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.content) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ content: parsed.content })}\n\n`),
+                );
+              }
+              if (parsed.error) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify({ error: parsed.error })}\n\n`),
+                );
+              }
+            } catch {
+              // Skip malformed chunks and continue streaming.
+            }
+          }
+        }
+
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       } catch (err) {
         controller.enqueue(

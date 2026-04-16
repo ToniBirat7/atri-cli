@@ -25,16 +25,26 @@ import asyncio
 
 try:
     from .config import OrchestratorConfig
+    from .database import OrchestratorDatabase
+    from .auth import AuthContext, JwtAuth, RequestAuthenticator
+    from .redis_rate_limit import DistributedRateLimiter
+    from .tracing import instrument_fastapi, setup_tracing
     from .llm_adapter import LLMAdapter
     from .mcp_orchestrator import MCPOrchestrator, MCPServerConfig
+    from .prompt_policy import build_system_prompt, normalize_prompt_profile
     from .tool_registry import ToolRegistry
     from .agent_loop import AgentLoop
     from .logging_context import set_request_id, get_request_id
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
+    from database import OrchestratorDatabase
+    from auth import AuthContext, JwtAuth, RequestAuthenticator
+    from redis_rate_limit import DistributedRateLimiter
+    from tracing import instrument_fastapi, setup_tracing
     from llm_adapter import LLMAdapter
     from mcp_orchestrator import MCPOrchestrator, MCPServerConfig
+    from prompt_policy import build_system_prompt, normalize_prompt_profile
     from tool_registry import ToolRegistry
     from agent_loop import AgentLoop
     from logging_context import set_request_id, get_request_id
@@ -64,6 +74,10 @@ class ChatRequest(BaseModel):
     allowed_directory: Optional[str] = Field(
         None,
         description="User-selected filesystem root for MCP tools",
+    )
+    prompt_profile: Optional[str] = Field(
+        None,
+        description="Prompt profile to use for this request; requires admin authentication",
     )
 
 
@@ -108,6 +122,18 @@ class MetricsResponse(BaseModel):
     active_mcp_servers: int
 
 
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    prompt_profile: str
+    created_at: str
+    updated_at: str
+
+
+class ConversationsResponse(BaseModel):
+    conversations: List[ConversationSummary]
+    total: int
+
+
 # Global state (Phase 1)
 # In production (Phase 9), move to database/session management
 app = FastAPI(
@@ -121,6 +147,9 @@ llm_adapter: Optional[LLMAdapter] = None
 mcp_orchestrator: Optional[MCPOrchestrator] = None
 tool_registry: Optional[ToolRegistry] = None
 agent_loop: Optional[AgentLoop] = None
+conversation_store: Optional[OrchestratorDatabase] = None
+request_authenticator: Optional[RequestAuthenticator] = None
+rate_limiter: Optional[DistributedRateLimiter] = None
 service_started_at = time.monotonic()
 chat_requests_total = 0
 chat_requests_succeeded = 0
@@ -149,13 +178,110 @@ def _extract_api_key(http_request: Request) -> Optional[str]:
     return None
 
 
-def _require_api_key(http_request: Request) -> None:
-    if config is None or not config.security.api_key:
-        return
+def _anonymous_auth_context() -> AuthContext:
+    return AuthContext(
+        subject="anonymous",
+        issuer="local",
+        audience="orchestrator",
+        scopes=["chat:read", "chat:write"],
+        is_admin=False,
+    )
 
-    provided_key = _extract_api_key(http_request)
-    if provided_key != config.security.api_key:
+
+def _authenticate_request(http_request: Request) -> AuthContext:
+    if config is None:
+        return _anonymous_auth_context()
+
+    auth_config = getattr(config, "auth", None)
+    security_config = getattr(config, "security", None)
+    jwt_secret = getattr(auth_config, "jwt_secret", None)
+    api_key = getattr(security_config, "api_key", None)
+    admin_api_key = getattr(security_config, "admin_api_key", None)
+
+    auth_material_enabled = bool(jwt_secret or api_key or admin_api_key)
+    if not auth_material_enabled:
+        return _anonymous_auth_context()
+
+    if request_authenticator is not None:
+        return request_authenticator.authenticate(http_request)
+
+    token = _extract_api_key(http_request)
+    if token and token in {api_key, admin_api_key}:
+        return AuthContext(
+            subject="api-key-client",
+            issuer="legacy",
+            audience="orchestrator",
+            scopes=["chat:read", "chat:write"],
+            is_admin=token == admin_api_key,
+        )
+
+    if jwt_secret and token:
+        try:
+            return JwtAuth(
+                jwt_secret,
+                issuer=getattr(auth_config, "jwt_issuer", "tarbar-ai"),
+                audience=getattr(auth_config, "jwt_audience", "tarbar-ai-orchestrator"),
+            ).verify(token)
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    if auth_material_enabled:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return _anonymous_auth_context()
+
+
+def _require_api_key(http_request: Request) -> None:
+    _authenticate_request(http_request)
+
+
+def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[str, str]:
+    if config is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+
+    selected_profile = config.prompt_policy.default_profile
+    if request.prompt_profile:
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="Prompt profile override requires admin authentication")
+        selected_profile = request.prompt_profile
+
+    try:
+        normalized_profile = normalize_prompt_profile(selected_profile)
+        system_prompt = build_system_prompt(
+            normalized_profile,
+            assistant_name="Tarbar_AI",
+            model_name=config.llm.model,
+            enable_thinking=config.agent_loop.enable_thinking,
+            fallback_text=config.prompt_policy.fallback_text,
+            disclaimer_text=config.prompt_policy.disclaimer_text,
+            legal_help_line=config.prompt_policy.legal_help_line,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return normalized_profile, system_prompt
+
+
+def _resolve_conversation_id(request: ChatRequest) -> str:
+    return request.conversation_id or f"conv_{uuid.uuid4().hex[:12]}"
+
+
+def _serialize_turn_history(state: Any) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for turn in getattr(state, "turns_history", []):
+        history.append(
+            {
+                "turn_number": turn.turn_number,
+                "user_input": turn.user_input,
+                "llm_response": turn.llm_response,
+                "tool_calls_requested": turn.tool_calls_requested,
+                "tool_calls_executed": turn.tool_calls_executed,
+                "outcome": turn.outcome.value if getattr(turn, "outcome", None) else None,
+                "error": turn.error,
+                "metadata": turn.metadata,
+            }
+        )
+    return history
 
 
 async def _enforce_rate_limit(http_request: Request) -> None:
@@ -163,6 +289,11 @@ async def _enforce_rate_limit(http_request: Request) -> None:
         return
 
     client_key = f"{_extract_client_ip(http_request)}:{http_request.url.path}"
+
+    if rate_limiter is not None:
+        await rate_limiter.enforce(client_key)
+        return
+
     now = time.monotonic()
     window_start = now - 60.0
 
@@ -188,7 +319,14 @@ def _chunk_text(text: str, chunk_size: int = 96) -> List[str]:
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatResponse:
+async def _run_agent_request(
+    request: ChatRequest,
+    request_id: str,
+    conversation_id: str,
+    prompt_profile: str,
+    *,
+    system_prompt: Optional[str] = None,
+) -> ChatResponse:
     global chat_requests_succeeded, chat_requests_failed, total_tool_calls
 
     if (
@@ -199,6 +337,9 @@ async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatRespo
         or config is None
     ):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+
+    if conversation_store is not None:
+        await conversation_store.ensure_conversation(conversation_id, prompt_profile)
 
     original_max_turns = agent_loop.max_turns
     try:
@@ -238,11 +379,31 @@ async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatRespo
             llm_adapter=llm_adapter,
             mcp_orchestrator=mcp_orchestrator,
             tool_registry=tool_registry,
+            system_prompt=system_prompt,
         )
+
+        if conversation_store is not None:
+            tool_events: list[dict[str, Any]] = []
+            for turn in state.turns_history:
+                tool_events.extend(turn.metadata.get("tool_events", []))
+
+            await conversation_store.record_turn(
+                conversation_id=conversation_id,
+                request_id=request_id,
+                turn_index=state.turn,
+                user_message=request.message,
+                assistant_response=response,
+                status=state.status,
+                total_tool_calls=state.total_tool_calls,
+                model=config.llm.model,
+                system_prompt=system_prompt,
+                turn_history=_serialize_turn_history(state),
+                tool_events=tool_events,
+            )
 
         _log_event(
             "chat.request.completed",
-            conversation_id=request.conversation_id or "default",
+            conversation_id=conversation_id,
             turns=state.turn,
             tool_calls=state.total_tool_calls,
             status=state.status,
@@ -253,7 +414,7 @@ async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatRespo
 
         return ChatResponse(
             response=response,
-            conversation_id=request.conversation_id or "default",
+            conversation_id=conversation_id,
             turns=state.turn,
             tool_calls=state.total_tool_calls,
             model=config.llm.model,
@@ -282,11 +443,36 @@ async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatRespo
 @app.on_event("startup")
 async def startup():
     """Initialize orchestrator on server startup."""
-    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop
+    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter
     
     _log_event("orchestrator.startup.begin")
     
     config = OrchestratorConfig.from_env()
+    conversation_store = OrchestratorDatabase(
+        config.database.url,
+        enabled=config.database.enable_persistence,
+    )
+    await conversation_store.initialize()
+    request_authenticator = RequestAuthenticator(
+        jwt_auth=JwtAuth(
+            config.auth.jwt_secret,
+            issuer=config.auth.jwt_issuer,
+            audience=config.auth.jwt_audience,
+        ),
+        api_key=config.security.api_key,
+        admin_api_key=config.security.admin_api_key,
+        mode=config.auth.mode,
+    )
+    rate_limiter = DistributedRateLimiter(
+        redis_url=config.redis.url if config.redis.enabled else None,
+        limit_per_minute=config.security.rate_limit_per_minute,
+    )
+    await rate_limiter.initialize()
+    setup_tracing(
+        service_name="tarbar-orchestrator",
+        otlp_endpoint=config.telemetry.otlp_endpoint,
+        enabled=config.telemetry.enabled,
+    )
     llm_adapter = LLMAdapter(config.llm)
     mcp_orchestrator = MCPOrchestrator()
     tool_registry = ToolRegistry()
@@ -341,7 +527,7 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     """Cleanup on server shutdown."""
-    global llm_adapter, mcp_orchestrator
+    global llm_adapter, mcp_orchestrator, rate_limiter
     
     _log_event("orchestrator.shutdown.begin")
     
@@ -350,8 +536,14 @@ async def shutdown():
     
     if llm_adapter:
         await llm_adapter.close()
+
+    if rate_limiter:
+        await rate_limiter.close()
     
     _log_event("orchestrator.shutdown.complete")
+
+
+instrument_fastapi(app)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -371,15 +563,25 @@ async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
 
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
+    auth_context = _authenticate_request(http_request)
     
     global chat_requests_total, chat_requests_succeeded, chat_requests_failed, total_tool_calls
 
     request_id = uuid.uuid4().hex[:12]
+    conversation_id = _resolve_conversation_id(request)
     set_request_id(request_id)
     chat_requests_total += 1
 
     try:
-        return await _run_agent_request(request, request_id)
+        selected_profile, system_prompt = _build_request_system_prompt(request, auth_context.is_admin)
+        _log_event("chat.prompt_profile.selected", profile=selected_profile)
+        return await _run_agent_request(
+            request,
+            request_id,
+            conversation_id,
+            selected_profile,
+            system_prompt=system_prompt,
+        )
     finally:
         set_request_id(None)
 
@@ -397,17 +599,27 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
 
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
+    auth_context = _authenticate_request(http_request)
 
     global chat_requests_total
     chat_requests_total += 1
 
     request_id = uuid.uuid4().hex[:12]
+    conversation_id = _resolve_conversation_id(request)
 
     async def event_stream():
         set_request_id(request_id)
         try:
             yield f"data: {json.dumps({'request_id': request_id})}\n\n"
-            result = await _run_agent_request(request, request_id)
+            selected_profile, system_prompt = _build_request_system_prompt(request, auth_context.is_admin)
+            _log_event("chat.prompt_profile.selected", profile=selected_profile)
+            result = await _run_agent_request(
+                request,
+                request_id,
+                conversation_id,
+                selected_profile,
+                system_prompt=system_prompt,
+            )
             for chunk in _chunk_text(result.response):
                 yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
@@ -478,6 +690,7 @@ async def list_tools(http_request: Request) -> ToolsResponse:
 
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
+    _authenticate_request(http_request)
     
     tools = tool_registry.list_all_tools()
     _log_event("tools.listed", total=len(tools))
@@ -496,11 +709,38 @@ async def list_tools(http_request: Request) -> ToolsResponse:
     )
 
 
+@app.get("/conversations", response_model=ConversationsResponse)
+async def list_conversations(http_request: Request) -> ConversationsResponse:
+    if conversation_store is None:
+        raise HTTPException(status_code=500, detail="Conversation store not initialized")
+
+    await _enforce_rate_limit(http_request)
+    auth_context = _authenticate_request(http_request)
+    if config is not None and (config.security.api_key or config.security.admin_api_key or config.auth.jwt_secret):
+        if not auth_context.is_admin:
+            raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conversations = await conversation_store.list_conversations()
+    return ConversationsResponse(
+        conversations=[
+            ConversationSummary(
+                conversation_id=item.conversation_id,
+                prompt_profile=item.prompt_profile,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in conversations
+        ],
+        total=len(conversations),
+    )
+
+
 @app.get("/metrics", response_model=MetricsResponse)
 async def metrics(http_request: Request) -> MetricsResponse:
     """Runtime metrics for the orchestrator."""
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
+    _authenticate_request(http_request)
 
     return MetricsResponse(
         uptime_seconds=round(time.monotonic() - service_started_at, 3),
@@ -525,6 +765,7 @@ async def root():
             "GET /live — Liveness probe",
             "GET /ready — Readiness probe",
             "GET /tools — List available tools",
+            "GET /conversations — List stored conversations",
             "GET /metrics — Runtime metrics",
         ]
     }

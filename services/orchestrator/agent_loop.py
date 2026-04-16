@@ -108,6 +108,7 @@ class AgentLoop:
         llm_adapter: "LLMAdapter",  # type: ignore
         mcp_orchestrator: "MCPOrchestrator",  # type: ignore
         tool_registry: "ToolRegistry",  # type: ignore
+        system_prompt: Optional[str] = None,
     ) -> Tuple[str, AgentState]:
         """
         Run the agent loop.
@@ -124,10 +125,11 @@ class AgentLoop:
         # Ensure each /chat request starts from a clean state.
         self.state = AgentState()
         self.state.status = "running"
+        selected_system_prompt = system_prompt or self._build_system_prompt()
         self.state.messages = [
             {
                 "role": "system",
-                "content": self._build_system_prompt(),
+                "content": selected_system_prompt,
             },
             {
                 "role": "user",
@@ -227,6 +229,17 @@ class AgentLoop:
                                 tool_input=tool_call.tool_input,
                             )
 
+                            turn.metadata.setdefault("tool_events", []).append(
+                                {
+                                    "tool_name": tool_call.tool_name,
+                                    "routed_server": routed_server,
+                                    "routed_tool_name": routed_tool_name,
+                                    "input": tool_call.tool_input,
+                                    "output": result,
+                                    "status": "ok",
+                                }
+                            )
+
                             self.state.messages.append(
                                 llm_adapter.format_tool_result(
                                     tool_call.tool_name,
@@ -255,6 +268,16 @@ class AgentLoop:
                                     },
                                     ensure_ascii=True,
                                 )
+                            )
+                            turn.metadata.setdefault("tool_events", []).append(
+                                {
+                                    "tool_name": tool_call.tool_name,
+                                    "routed_server": routed_server,
+                                    "routed_tool_name": routed_tool_name,
+                                    "input": tool_call.tool_input,
+                                    "output": f"Error: {str(e)}",
+                                    "status": "error",
+                                }
                             )
                             self.state.messages.append(
                                 llm_adapter.format_tool_result(

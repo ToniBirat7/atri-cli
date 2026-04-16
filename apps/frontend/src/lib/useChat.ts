@@ -15,7 +15,11 @@ export function useChat() {
   const abortRef = useRef<AbortController | null>(null);
 
   const sendMessage = useCallback(
-    async (content: string, allowedDirectory?: string) => {
+    async (
+      content: string,
+      allowedDirectory?: string,
+      promptProfile?: string,
+    ) => {
       const userMsg: Message = {
         id: crypto.randomUUID(),
         role: 'user',
@@ -47,6 +51,7 @@ export function useChat() {
           body: JSON.stringify({
             messages: chatHistory,
             allowedDirectory: allowedDirectory?.trim() || undefined,
+            promptProfile: promptProfile?.trim() || undefined,
           }),
           signal: abortRef.current.signal,
         });
