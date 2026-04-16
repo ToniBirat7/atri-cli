@@ -8,6 +8,7 @@ Loads from environment variables and config files.
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
+import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,10 +30,21 @@ class LLMConfig(BaseModel):
         description="Model identifier"
     )
     temperature: float = Field(
-        default=0.7,
+        default=1.0,
         ge=0.0,
         le=2.0,
         description="Sampling temperature"
+    )
+    top_p: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus sampling probability"
+    )
+    top_k: int = Field(
+        default=64,
+        ge=1,
+        description="Top-k sampling cutoff"
     )
     max_tokens: int = Field(
         default=2048,
@@ -43,6 +55,10 @@ class LLMConfig(BaseModel):
         default=30,
         ge=1,
         description="Request timeout in seconds"
+    )
+    parallel_tool_calls: bool = Field(
+        default=True,
+        description="Allow multiple independent tool calls in a single turn"
     )
 
     class Config:
@@ -92,6 +108,10 @@ class AgentLoopConfig(BaseModel):
         default=True,
         description="Enable tool-calling mode"
     )
+    enable_thinking: bool = Field(
+        default=False,
+        description="Enable Gemma 4 reasoning mode"
+    )
     stream_responses: bool = Field(
         default=False,
         description="Stream LLM responses (Phase 3+)"
@@ -101,12 +121,31 @@ class AgentLoopConfig(BaseModel):
         env_prefix = "AGENT_"
 
 
+class SecurityConfig(BaseModel):
+    """Orchestrator security and access policy."""
+
+    api_key: Optional[str] = Field(
+        default=None,
+        description="Optional API key required for protected endpoints"
+    )
+    rate_limit_per_minute: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum requests per minute per client IP; 0 disables rate limiting"
+    )
+    allow_unauthenticated_health: bool = Field(
+        default=True,
+        description="Allow /health and / endpoints without authentication"
+    )
+
+
 class OrchestratorConfig(BaseModel):
     """Root orchestrator configuration."""
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     agent_loop: AgentLoopConfig = Field(default_factory=AgentLoopConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR)"
@@ -126,16 +165,22 @@ class OrchestratorConfig(BaseModel):
         env_path = Path(__file__).resolve().parent / ".env"
         load_dotenv(dotenv_path=env_path, override=False)
 
+        mcp_servers = _safe_parse_json_array(os.getenv("MCP_SERVERS_JSON", "[]"))
+
         return cls(
             llm=LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
                 api_key=os.getenv("LLM_API_KEY"),
                 model=os.getenv("LLM_MODEL", "local-model"),
-                temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
+                temperature=float(os.getenv("LLM_TEMPERATURE", "1.0")),
+                top_p=float(os.getenv("LLM_TOP_P", "0.95")),
+                top_k=int(os.getenv("LLM_TOP_K", "64")),
                 max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
                 timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+                parallel_tool_calls=os.getenv("LLM_PARALLEL_TOOL_CALLS", "true").lower() == "true",
             ),
             mcp=MCPConfig(
+                servers=mcp_servers,
                 default_transport=os.getenv("MCP_DEFAULT_TRANSPORT", "stdio"),
                 tool_timeout_seconds=int(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "10")),
                 max_tool_call_retries=int(os.getenv("MCP_MAX_TOOL_CALL_RETRIES", "2")),
@@ -144,8 +189,25 @@ class OrchestratorConfig(BaseModel):
                 max_turns=int(os.getenv("AGENT_MAX_TURNS", "10")),
                 max_tool_calls_per_turn=int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "3")),
                 enable_tool_use=os.getenv("AGENT_ENABLE_TOOL_USE", "true").lower() == "true",
+                enable_thinking=os.getenv("AGENT_ENABLE_THINKING", "false").lower() == "true",
                 stream_responses=os.getenv("AGENT_STREAM_RESPONSES", "false").lower() == "true",
+            ),
+            security=SecurityConfig(
+                api_key=os.getenv("ORCHESTRATOR_API_KEY"),
+                rate_limit_per_minute=int(os.getenv("ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", "0")),
+                allow_unauthenticated_health=os.getenv("ORCHESTRATOR_ALLOW_UNAUTHENTICATED_HEALTH", "true").lower() == "true",
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             enable_observability=os.getenv("ENABLE_OBSERVABILITY", "true").lower() == "true",
         )
+
+
+def _safe_parse_json_array(raw_value: str) -> List[dict]:
+    """Parse a JSON array environment variable into a list of dicts."""
+    try:
+        parsed = json.loads(raw_value)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    except json.JSONDecodeError:
+        pass
+    return []

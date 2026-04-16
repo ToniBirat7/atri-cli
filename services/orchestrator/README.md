@@ -51,6 +51,7 @@ Central registry of all available tools:
 - Registers tools from MCP server discovery
 - Translates MCP schemas to OpenAI format
 - Provides tool lookup and filtering
+- Supports namespaced tool aliases (`server_name.tool_name`) for multi-server routing
 
 **Phase 1:** Basic registry.  
 **Phase 6:** Access control and risk tiers (green/yellow/red).
@@ -74,9 +75,29 @@ FastAPI HTTP server exposing orchestrator:
 
 **Endpoints:**
 - `POST /chat` — Execute agent loop
+- `POST /chat/stream` — Stream chat response as SSE
 - `GET /health` — Health check (LLM + MCP servers)
+- `GET /live` — Liveness probe
+- `GET /ready` — Readiness probe
 - `GET /tools` — List available tools
+- `GET /metrics` — Runtime counters and uptime
 - `GET /` — Service info
+
+Operational defaults:
+- If `allowed_directory` is omitted in `POST /chat`, the orchestrator sets a safe default root to the workspace directory.
+- If `allowed_directory` is provided, that value is applied for the request before tool execution.
+- Request logs are emitted as JSON events with `request_id`; turn-level events include `turn_id`.
+- `POST /chat` responses include `request_id` for log correlation.
+
+Security policy:
+- If `ORCHESTRATOR_API_KEY` is set, `POST /chat`, `POST /chat/stream`, `GET /tools`, and `GET /metrics` require either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- If `ORCHESTRATOR_RATE_LIMIT_PER_MINUTE` is greater than zero, those same endpoints are rate-limited per client IP and path.
+- `GET /health` and `GET /` remain unauthenticated by default so local monitoring stays simple.
+
+Multi-server routing:
+- Configure multiple MCP servers with `MCP_SERVERS_JSON` (JSON array of `{name, command, transport}` objects).
+- Tool registry always publishes namespaced aliases (`server.tool`) and uses plain aliases only when no collision exists.
+- Agent loop resolves tool calls through the registry, then routes execution to the correct MCP server.
 
 ## Running the Orchestrator
 
@@ -112,6 +133,11 @@ curl http://127.0.0.1:8001/tools
 curl -X POST http://127.0.0.1:8001/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello, what tools do you have?"}'
+
+# Chat request with explicit tool sandbox root
+curl -X POST http://127.0.0.1:8001/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "List files in /tmp", "allowed_directory": "/tmp"}'
 ```
 
 ## Architecture Roadmap

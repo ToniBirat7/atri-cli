@@ -2,9 +2,9 @@
 Deterministic Agent Loop.
 
 Implements the core agentic AI loop:
-1. User message → LLM
-2. LLM response with tool calls → Tool execution
-3. Tool results → LLM context
+1. User message -> LLM
+2. LLM response with tool calls -> Tool execution
+3. Tool results -> LLM context
 4. Repeat until max turns or no more tool calls
 
 Supports budget controls:
@@ -22,15 +22,33 @@ Phase 7: Full observability with structured logging and tracing.
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+import asyncio
+import json
+import ast
 import logging
+
+try:
+    from .logging_context import get_request_id, set_turn_id, get_turn_id
+except ImportError:
+    from logging_context import get_request_id, set_turn_id, get_turn_id
 
 logger = logging.getLogger(__name__)
 
 
+def _log_event(event: str, **fields: Any) -> None:
+    payload: Dict[str, Any] = {
+        "event": event,
+        "request_id": get_request_id(),
+        "turn_id": get_turn_id(),
+    }
+    payload.update(fields)
+    logger.info(json.dumps(payload, ensure_ascii=True))
+
+
 class TurnOutcome(str, Enum):
     """Outcome of a single agent loop turn."""
-    TOOL_CALLS = "tool_calls"  # LLM issued tool calls
-    NO_TOOL_CALLS = "no_tool_calls"  # LLM responded without tools
+    TOOL_CALLS = "tool_calls"
+    NO_TOOL_CALLS = "no_tool_calls"
     MAX_TURNS_REACHED = "max_turns_reached"
     ERROR = "error"
 
@@ -56,13 +74,13 @@ class AgentState:
     turns_history: List[Turn] = field(default_factory=list)
     total_tool_calls: int = 0
     final_response: Optional[str] = None
-    status: str = "initialized"  # initialized, running, completed, error
+    status: str = "initialized"
 
 
 class AgentLoop:
     """
     Deterministic agent loop with budget controls.
-    
+
     Phase 1 responsibilities:
     - Message history management
     - Tool call extraction from LLM responses
@@ -76,10 +94,12 @@ class AgentLoop:
         max_turns: int = 10,
         max_tool_calls_per_turn: int = 3,
         enable_tool_use: bool = True,
+        enable_thinking: bool = False,
     ):
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.enable_tool_use = enable_tool_use
+        self.enable_thinking = enable_thinking
         self.state = AgentState()
 
     async def run(
@@ -101,6 +121,8 @@ class AgentLoop:
         Returns:
             Tuple of (final_response, agent_state)
         """
+        # Ensure each /chat request starts from a clean state.
+        self.state = AgentState()
         self.state.status = "running"
         self.state.messages = [
             {
@@ -113,142 +135,255 @@ class AgentLoop:
             }
         ]
 
-        logger.info(f"Starting agent loop with user message: {user_message[:100]}...")
+        _log_event("agent_loop.start", message_preview=user_message[:100])
 
-        while self.state.turn < self.max_turns:
-            self.state.turn += 1
-            turn = Turn(turn_number=self.state.turn, user_input=user_message)
+        try:
+            while self.state.turn < self.max_turns:
+                self.state.turn += 1
+                set_turn_id(self.state.turn)
+                turn = Turn(turn_number=self.state.turn, user_input=user_message)
 
-            try:
-                # Call LLM
-                available_tools = (
-                    tool_registry.to_openai_format()
-                    if self.enable_tool_use
-                    else None
-                )
-                
-                completion = await llm_adapter.chat_completion(
-                    messages=self.state.messages,
-                    tools=available_tools,
-                )
+                try:
+                    available_tools = tool_registry.to_openai_format() if self.enable_tool_use else None
 
-                # Extract response and tool calls
-                choice = completion.get("choices", [{}])[0]
-                content = choice.get("message", {}).get("content", "")
-                turn.llm_response = content
-
-                # Check for tool calls
-                tool_calls = await llm_adapter.extract_tool_calls(completion)
-                turn.tool_calls_requested = len(tool_calls)
-
-                if not tool_calls:
-                    # No tool calls, agent is done
-                    self.state.final_response = content
-                    turn.outcome = TurnOutcome.NO_TOOL_CALLS
-                    self.state.turns_history.append(turn)
-                    logger.info(f"Turn {self.state.turn}: Agent issued final response")
-                    break
-
-                # Enforce max tool calls per turn
-                if len(tool_calls) > self.max_tool_calls_per_turn:
-                    logger.warning(
-                        f"Turn {self.state.turn}: "
-                        f"LLM requested {len(tool_calls)} tools, "
-                        f"exceeds max {self.max_tool_calls_per_turn}"
-                    )
-                    tool_calls = tool_calls[:self.max_tool_calls_per_turn]
-
-                # Execute tools
-                self.state.messages.append({
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": call.id or f"call_{i}",
-                            "function": {
-                                "name": call.tool_name,
-                                "arguments": str(call.tool_input),
-                            }
-                        }
-                        for i, call in enumerate(tool_calls)
-                    ]
-                })
-
-                for tool_call in tool_calls:
                     try:
-                        # In Phase 4+, route to correct server based on tool_name
-                        result = await mcp_orchestrator.execute_tool(
-                            server_name="local-mcp",  # Phase 1: hardcoded
-                            tool_name=tool_call.tool_name,
-                            tool_input=tool_call.tool_input,
-                        )
-                        
-                        self.state.messages.append(
-                            llm_adapter.format_tool_result(
-                                tool_call.tool_name,
-                                result,
-                                tool_call.id,
-                            )
-                        )
-                        turn.tool_calls_executed += 1
-                        self.state.total_tool_calls += 1
-                        
-                        logger.debug(
-                            f"Turn {self.state.turn}: "
-                            f"Executed {tool_call.tool_name}"
+                        completion = await llm_adapter.chat_completion(
+                            messages=self.state.messages,
+                            tools=available_tools,
                         )
                     except Exception as e:
-                        logger.error(
-                            f"Turn {self.state.turn}: "
-                            f"Tool execution failed: {e}"
-                        )
-                        self.state.messages.append(
-                            llm_adapter.format_tool_result(
-                                tool_call.tool_name,
-                                f"Error: {str(e)}",
-                                tool_call.id,
+                        # Gemma/llama.cpp can occasionally fail on the follow-up turn after a tool result.
+                        # If we already executed at least one tool, return a deterministic fallback.
+                        if self.state.total_tool_calls > 0:
+                            fallback = self._fallback_from_latest_tool_result()
+                            if fallback:
+                                self.state.final_response = fallback
+                                turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                                self.state.turns_history.append(turn)
+                                logger.warning(
+                                    "Turn %s: LLM follow-up failed after tool execution; returning fallback response: %s",
+                                    self.state.turn,
+                                    e,
+                                )
+                                break
+                        raise
+
+                    choice = completion.get("choices", [{}])[0]
+                    content = choice.get("message", {}).get("content", "")
+                    turn.llm_response = content
+
+                    tool_calls = await llm_adapter.extract_tool_calls(completion)
+                    turn.tool_calls_requested = len(tool_calls)
+
+                    if not tool_calls:
+                        self.state.final_response = content
+                        turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                        self.state.turns_history.append(turn)
+                        _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                        break
+
+                    if len(tool_calls) > self.max_tool_calls_per_turn:
+                        logger.warning(
+                            json.dumps(
+                                {
+                                    "event": "agent_loop.turn.tool_calls_capped",
+                                    "request_id": get_request_id(),
+                                    "turn_id": get_turn_id(),
+                                    "requested": len(tool_calls),
+                                    "max_allowed": self.max_tool_calls_per_turn,
+                                },
+                                ensure_ascii=True,
                             )
                         )
+                        tool_calls = tool_calls[:self.max_tool_calls_per_turn]
 
-                turn.outcome = TurnOutcome.TOOL_CALLS
+                    self.state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": [
+                                {
+                                    "id": call.id or f"call_{i}",
+                                    "function": {
+                                        "name": call.tool_name,
+                                        "arguments": json.dumps(call.tool_input, ensure_ascii=False),
+                                    },
+                                }
+                                for i, call in enumerate(tool_calls)
+                            ],
+                        }
+                    )
+
+                    for tool_call in tool_calls:
+                        try:
+                            routed_server = "local-mcp"
+                            routed_tool_name = tool_call.tool_name
+                            if hasattr(tool_registry, "resolve_tool_call"):
+                                routed_server, routed_tool_name = tool_registry.resolve_tool_call(tool_call.tool_name)
+
+                            result = await mcp_orchestrator.execute_tool(
+                                server_name=routed_server,
+                                tool_name=routed_tool_name,
+                                tool_input=tool_call.tool_input,
+                            )
+
+                            self.state.messages.append(
+                                llm_adapter.format_tool_result(
+                                    tool_call.tool_name,
+                                    result,
+                                    tool_call.id,
+                                )
+                            )
+                            turn.tool_calls_executed += 1
+                            self.state.total_tool_calls += 1
+                            _log_event(
+                                "agent_loop.turn.tool_executed",
+                                tool_name=tool_call.tool_name,
+                                tool_calls_executed_in_turn=turn.tool_calls_executed,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                json.dumps(
+                                    {
+                                        "event": "agent_loop.turn.tool_failed",
+                                        "request_id": get_request_id(),
+                                        "turn_id": get_turn_id(),
+                                        "tool_name": tool_call.tool_name,
+                                        "routed_server": routed_server,
+                                        "routed_tool_name": routed_tool_name,
+                                        "error": str(e),
+                                    },
+                                    ensure_ascii=True,
+                                )
+                            )
+                            self.state.messages.append(
+                                llm_adapter.format_tool_result(
+                                    tool_call.tool_name,
+                                    f"Error: {str(e)}",
+                                    tool_call.id,
+                                )
+                            )
+
+                    turn.outcome = TurnOutcome.TOOL_CALLS
+                    self.state.turns_history.append(turn)
+                    _log_event(
+                        "agent_loop.turn.complete",
+                        tool_calls_requested=turn.tool_calls_requested,
+                        tool_calls_executed=turn.tool_calls_executed,
+                    )
+
+                except asyncio.CancelledError:
+                    self.state.status = "cancelled"
+                    turn.outcome = TurnOutcome.ERROR
+                    turn.error = "cancelled"
+                    self.state.turns_history.append(turn)
+                    raise
+
+                except Exception as e:
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "agent_loop.turn.error",
+                                "request_id": get_request_id(),
+                                "turn_id": get_turn_id(),
+                                "error": str(e),
+                            },
+                            ensure_ascii=True,
+                        )
+                    )
+                    turn.outcome = TurnOutcome.ERROR
+                    turn.error = str(e)
+                    self.state.turns_history.append(turn)
+                    self.state.status = "error"
+                    raise
+
+            if self.state.turn >= self.max_turns:
+                if self.state.messages:
+                    last_msg = self.state.messages[-1]
+                    if last_msg.get("role") == "assistant":
+                        self.state.final_response = last_msg.get("content", "")
+                turn = Turn(turn_number=self.state.turn, outcome=TurnOutcome.MAX_TURNS_REACHED)
                 self.state.turns_history.append(turn)
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "agent_loop.max_turns_reached",
+                            "request_id": get_request_id(),
+                            "turn_id": get_turn_id(),
+                            "max_turns": self.max_turns,
+                        },
+                        ensure_ascii=True,
+                    )
+                )
 
-            except Exception as e:
-                logger.error(f"Turn {self.state.turn}: Error in agent loop: {e}")
-                turn.outcome = TurnOutcome.ERROR
-                turn.error = str(e)
-                self.state.turns_history.append(turn)
-                self.state.status = "error"
-                raise
-
-        if self.state.turn >= self.max_turns:
-            # Extract final response from last message
-            if self.state.messages:
-                last_msg = self.state.messages[-1]
-                if last_msg.get("role") == "assistant":
-                    self.state.final_response = last_msg.get("content", "")
-            turn = Turn(
-                turn_number=self.state.turn,
-                outcome=TurnOutcome.MAX_TURNS_REACHED
+            self.state.status = "completed"
+            _log_event(
+                "agent_loop.complete",
+                turns=self.state.turn,
+                total_tool_calls=self.state.total_tool_calls,
+                status=self.state.status,
             )
-            self.state.turns_history.append(turn)
-            logger.warning(f"Reached max turns limit: {self.max_turns}")
+            return self.state.final_response or "", self.state
+        finally:
+            set_turn_id(None)
 
-        self.state.status = "completed"
-        logger.info(
-            f"Agent loop completed: {self.state.turn} turns, "
-            f"{self.state.total_tool_calls} tool calls"
-        )
+    def _fallback_from_latest_tool_result(self) -> Optional[str]:
+        """Build a deterministic user-facing response from the most recent tool result."""
+        latest_tool_msg: Optional[Dict[str, Any]] = None
+        for msg in reversed(self.state.messages):
+            if msg.get("role") == "tool":
+                latest_tool_msg = msg
+                break
 
-        return self.state.final_response or "", self.state
+        if not latest_tool_msg:
+            return None
+
+        tool_name = latest_tool_msg.get("name", "tool")
+        content = str(latest_tool_msg.get("content", "")).strip()
+
+        if tool_name == "list_directory":
+            entries: List[str] = []
+            parsed: Any = None
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(content)
+                except Exception:
+                    parsed = None
+
+            if isinstance(parsed, list):
+                for item in parsed[:5]:
+                    if isinstance(item, dict):
+                        entries.append(str(item.get("name") or item.get("path") or item))
+                    else:
+                        entries.append(str(item))
+
+            if entries:
+                bullets = "\n".join(f"- {entry}" for entry in entries)
+                return f"I executed list_directory and found these entries:\n{bullets}"
+
+        return f"I executed {tool_name} successfully.\n\nResult:\n{content[:2000]}"
 
     def _build_system_prompt(self) -> str:
         """Build system prompt for the agent."""
-        return (
-            "You are a helpful AI assistant. "
-            "You can use tools to help answer user questions. "
-            "Be concise and direct in your responses."
+        prompt = (
+            "You are Tarbar_AI, a general-purpose assistant for local and remote tasks.\n"
+            "Follow these rules:\n"
+            "- Be accurate, concise, and useful.\n"
+            "- Use tools whenever they materially improve correctness, freshness, or access to local state.\n"
+            "- Prefer the minimum number of tool calls needed. If multiple independent tool calls are useful, request them in the same turn.\n"
+            "- Never reveal hidden reasoning, chain-of-thought, or internal scratch work.\n"
+            "- If a request is ambiguous, ask one focused clarifying question before acting.\n"
+            "- For file edits, destructive actions, or state-changing operations, be careful and prefer reversible steps.\n"
+            "- If a tool fails, report the failure plainly and continue only if another safe path is available.\n"
+            "- Format responses cleanly in Markdown when it improves readability, but avoid unnecessary verbosity."
         )
+
+        if self.enable_thinking:
+            return "<|think|>\n" + prompt
+
+        return prompt
 
     def reset(self) -> None:
         """Reset agent state for a new conversation."""

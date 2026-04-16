@@ -25,6 +25,26 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+class MCPOrchestratorError(Exception):
+    """Base error for MCP orchestration failures."""
+
+
+class MCPServerNotInitializedError(MCPOrchestratorError):
+    """Raised when a requested server has not been initialized."""
+
+
+class MCPToolNotFoundError(MCPOrchestratorError):
+    """Raised when a requested tool does not exist on a server."""
+
+
+class MCPToolExecutionTimeoutError(MCPOrchestratorError):
+    """Raised when a tool execution exceeds its timeout."""
+
+
+class MCPToolExecutionError(MCPOrchestratorError):
+    """Raised when a tool execution fails."""
+
+
 @dataclass
 class MCPServerConfig:
     """Configuration for a single MCP server."""
@@ -137,6 +157,7 @@ class MCPOrchestrator:
         tool_name: str,
         tool_input: Dict[str, Any],
         timeout_seconds: int = 10,
+        max_retries: int = 2,
     ) -> str:
         """
         Execute a tool on an MCP server.
@@ -155,7 +176,7 @@ class MCPOrchestrator:
             ValueError: If server or tool not found
         """
         if server_name not in self._servers:
-            raise ValueError(f"Server {server_name} not initialized")
+            raise MCPServerNotInitializedError(f"Server {server_name} not initialized")
 
         logger.info(f"Executing {server_name}.{tool_name}({tool_input})")
 
@@ -164,17 +185,40 @@ class MCPOrchestrator:
             module = server["module"]
             fn = getattr(module, tool_name, None)
             if fn is None or not callable(fn):
-                raise ValueError(f"Tool not found: {tool_name}")
+                raise MCPToolNotFoundError(f"Tool not found: {tool_name}")
 
             async def _invoke() -> Any:
                 if inspect.iscoroutinefunction(fn):
                     return await fn(**tool_input)
                 return await asyncio.to_thread(fn, **tool_input)
 
-            result = await asyncio.wait_for(_invoke(), timeout=timeout_seconds)
-            if isinstance(result, (dict, list)):
-                return json.dumps(result, ensure_ascii=False)
-            return str(result)
+            last_error: Optional[BaseException] = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = await asyncio.wait_for(_invoke(), timeout=timeout_seconds)
+                    if isinstance(result, (dict, list)):
+                        return json.dumps(result, ensure_ascii=False)
+                    return str(result)
+                except asyncio.TimeoutError as exc:
+                    last_error = exc
+                    if attempt >= max_retries:
+                        raise MCPToolExecutionTimeoutError(
+                            f"Tool {server_name}.{tool_name} timed out after {timeout_seconds}s"
+                        ) from exc
+                    await asyncio.sleep(0.1 * attempt)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= max_retries:
+                        raise MCPToolExecutionError(
+                            f"Tool {server_name}.{tool_name} failed: {exc}"
+                        ) from exc
+                    await asyncio.sleep(0.1 * attempt)
+
+            raise MCPToolExecutionError(
+                f"Tool {server_name}.{tool_name} failed after {max_retries} attempts"
+            ) from last_error
 
         # Placeholder for future MCP SDK mode
         return f"Tool {tool_name} executed"

@@ -3,23 +3,37 @@ LLM Adapter for llama.cpp OpenAI-compatible API.
 
 Abstracts away llama.cpp-specific details. Implements:
 - Tool-calling with non-streamed responses for reliability
-- Automatic tool schema injection into system prompt
+- OpenAI-compatible and native Gemma 4 tool-call parsing
 - Response parsing for tool calls
 - Error handling and retries (Phase 5)
 """
 
 from typing import Optional, List, Dict, Any
+import asyncio
 import httpx
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 try:
     from .config import LLMConfig
+    from .logging_context import get_request_id, get_turn_id
 except ImportError:
     from config import LLMConfig
+    from logging_context import get_request_id, get_turn_id
 
 logger = logging.getLogger(__name__)
+
+
+def _log_event(event: str, **fields: Any) -> None:
+    payload: Dict[str, Any] = {
+        "event": event,
+        "request_id": get_request_id(),
+        "turn_id": get_turn_id(),
+    }
+    payload.update(fields)
+    logger.info(json.dumps(payload, ensure_ascii=True))
 
 @dataclass
 class ToolUse:
@@ -27,6 +41,10 @@ class ToolUse:
     tool_name: str
     tool_input: Dict[str, Any]
     id: Optional[str] = None
+
+
+# Alias for backward compatibility
+ToolCall = ToolUse
 
 
 class LLMAdapter:
@@ -57,6 +75,7 @@ class LLMAdapter:
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Make a chat completion request to llama.cpp.
@@ -77,6 +96,8 @@ class LLMAdapter:
             "model": self.config.model,
             "messages": messages,
             "temperature": temp,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
             "max_tokens": tokens,
         }
 
@@ -84,22 +105,78 @@ class LLMAdapter:
         if tools:
             request_body["tools"] = tools
             request_body["tool_choice"] = "auto"
+            request_body["parallel_tool_calls"] = (
+                self.config.parallel_tool_calls if parallel_tool_calls is None else parallel_tool_calls
+            )
+
+        has_tool_result_context = any(message.get("role") == "tool" for message in messages)
+        max_attempts = 2 if has_tool_result_context else 1
 
         try:
-            logger.debug(f"Calling llama.cpp with {len(messages)} messages")
-            response = await self.client.post(
-                "/chat/completions",
-                json=request_body
-            )
-            response.raise_for_status()
-            result = response.json()
-            logger.debug(f"LLM response: {result.get('choices', [{}])[0].get('finish_reason')}")
-            return result
+            for attempt in range(1, max_attempts + 1):
+                _log_event(
+                    "llm.request.start",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    message_count=len(messages),
+                    tool_schema_count=len(tools) if tools else 0,
+                    has_tool_result_context=has_tool_result_context,
+                )
+                response = await self.client.post(
+                    "/chat/completions",
+                    json=request_body
+                )
+
+                if response.status_code >= 500 and attempt < max_attempts:
+                    _log_event(
+                        "llm.request.retry",
+                        attempt=attempt,
+                        status_code=response.status_code,
+                    )
+                    await asyncio.sleep(0.15 * attempt)
+                    continue
+
+                response.raise_for_status()
+                result = response.json()
+                _log_event(
+                    "llm.request.success",
+                    attempt=attempt,
+                    finish_reason=result.get("choices", [{}])[0].get("finish_reason"),
+                )
+                return result
+        except httpx.HTTPStatusError as e:
+            response_text = ""
+            try:
+                response_text = e.response.text
+            except Exception:
+                response_text = "<unavailable>"
+
+            logger.error(json.dumps({
+                "event": "llm.request.status_error",
+                "request_id": get_request_id(),
+                "turn_id": get_turn_id(),
+                "error": str(e),
+                "status_code": getattr(e.response, "status_code", "unknown"),
+                "body": response_text[:2000],
+                "message_count": len(messages),
+                "tool_schema_count": len(tools) if tools else 0,
+            }, ensure_ascii=True))
+            raise
         except httpx.HTTPError as e:
-            logger.error(f"LLM adapter HTTP error: {e}")
+            logger.error(json.dumps({
+                "event": "llm.request.http_error",
+                "request_id": get_request_id(),
+                "turn_id": get_turn_id(),
+                "error": str(e),
+            }, ensure_ascii=True))
             raise
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response: {e}")
+            logger.error(json.dumps({
+                "event": "llm.response.decode_error",
+                "request_id": get_request_id(),
+                "turn_id": get_turn_id(),
+                "error": str(e),
+            }, ensure_ascii=True))
             raise
 
     async def extract_tool_calls(self, completion: Dict[str, Any]) -> List[ToolUse]:
@@ -111,10 +188,11 @@ class LLMAdapter:
         """
         tool_calls = []
         choice = completion.get("choices", [{}])[0]
+        message = choice.get("message", {}) or {}
         
         # Check for tool_calls in response
-        if "tool_calls" in choice:
-            for call in choice["tool_calls"]:
+        if "tool_calls" in message and message["tool_calls"] is not None:
+            for call in message["tool_calls"]:
                 try:
                     tool_calls.append(
                         ToolUse(
@@ -125,8 +203,61 @@ class LLMAdapter:
                     )
                 except (KeyError, json.JSONDecodeError) as e:
                     logger.warning(f"Failed to parse tool call: {e}")
-        
-        return tool_calls
+
+        if tool_calls:
+            return tool_calls
+
+        content = message.get("content") or ""
+        return self._extract_native_tool_calls(content)
+
+    def _extract_native_tool_calls(self, text: str) -> List[ToolUse]:
+        """Fallback parser for Gemma 4 native tool-call tokens in assistant text."""
+        if not text:
+            return []
+
+        tool_call_pattern = re.compile(
+            r"<\|tool_call\>call:(?P<name>[A-Za-z_][\w\-]*)\{(?P<args>.*?)\}<tool_call\|>",
+            re.DOTALL,
+        )
+
+        parsed_calls: List[ToolUse] = []
+        for match in tool_call_pattern.finditer(text):
+            parsed_calls.append(
+                ToolUse(
+                    tool_name=match.group("name"),
+                    tool_input=self._parse_native_arguments(match.group("args")),
+                )
+            )
+
+        return parsed_calls
+
+    def _parse_native_arguments(self, argument_block: str) -> Dict[str, Any]:
+        """Parse Gemma 4 native key/value arguments into Python types."""
+        argument_pattern = re.compile(
+            r"(?P<key>[A-Za-z_][\w\-]*)\s*:\s*(?:<\|\"\|>(?P<quoted>.*?)<\|\"\|>|(?P<raw>[^,}]*))",
+            re.DOTALL,
+        )
+
+        arguments: Dict[str, Any] = {}
+        for match in argument_pattern.finditer(argument_block):
+            raw_value = match.group("quoted") if match.group("quoted") is not None else match.group("raw")
+            arguments[match.group("key")] = self._coerce_native_value(raw_value.strip())
+
+        return arguments
+
+    def _coerce_native_value(self, value: str) -> Any:
+        """Best-effort conversion of native Gemma string values."""
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value.strip("\"'")
 
     def format_tool_result(
         self,

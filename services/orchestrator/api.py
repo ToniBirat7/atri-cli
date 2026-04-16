@@ -11,10 +11,17 @@ Phase 2: Streaming responses via Server-Sent Events.
 Phase 7: Full observability with request/response logging and tracing.
 """
 
-from fastapi import FastAPI, HTTPException
+from collections import defaultdict, deque
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import logging
+import json
+import uuid
+import time
+from pathlib import Path
+import asyncio
 
 try:
     from .config import OrchestratorConfig
@@ -22,6 +29,7 @@ try:
     from .mcp_orchestrator import MCPOrchestrator, MCPServerConfig
     from .tool_registry import ToolRegistry
     from .agent_loop import AgentLoop
+    from .logging_context import set_request_id, get_request_id
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
@@ -29,11 +37,23 @@ except ImportError:
     from mcp_orchestrator import MCPOrchestrator, MCPServerConfig
     from tool_registry import ToolRegistry
     from agent_loop import AgentLoop
+    from logging_context import set_request_id, get_request_id
 
 logger = logging.getLogger(__name__)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+
+DEFAULT_ALLOWED_DIRECTORY = str(Path(__file__).resolve().parents[2])
+
+
+def _log_event(event: str, **fields: Any) -> None:
+    payload: Dict[str, Any] = {
+        "event": event,
+        "request_id": get_request_id(),
+    }
+    payload.update(fields)
+    logger.info(json.dumps(payload, ensure_ascii=True))
 
 
 class ChatRequest(BaseModel):
@@ -54,6 +74,7 @@ class ChatResponse(BaseModel):
     turns: int = Field(..., description="Number of agent loop turns")
     tool_calls: int = Field(..., description="Total tool calls executed")
     model: str = Field(..., description="LLM model used")
+    request_id: str = Field(..., description="Request correlation ID")
 
 
 class HealthResponse(BaseModel):
@@ -77,6 +98,16 @@ class ToolsResponse(BaseModel):
     total: int
 
 
+class MetricsResponse(BaseModel):
+    """Runtime metrics for the orchestrator."""
+    uptime_seconds: float
+    chat_requests_total: int
+    chat_requests_succeeded: int
+    chat_requests_failed: int
+    total_tool_calls: int
+    active_mcp_servers: int
+
+
 # Global state (Phase 1)
 # In production (Phase 9), move to database/session management
 app = FastAPI(
@@ -90,6 +121,162 @@ llm_adapter: Optional[LLMAdapter] = None
 mcp_orchestrator: Optional[MCPOrchestrator] = None
 tool_registry: Optional[ToolRegistry] = None
 agent_loop: Optional[AgentLoop] = None
+service_started_at = time.monotonic()
+chat_requests_total = 0
+chat_requests_succeeded = 0
+chat_requests_failed = 0
+total_tool_calls = 0
+rate_limit_windows: Dict[str, deque[float]] = defaultdict(deque)
+rate_limit_lock = __import__("asyncio").Lock()
+
+
+def _extract_client_ip(http_request: Request) -> str:
+    if http_request.client and http_request.client.host:
+        return http_request.client.host
+    return "unknown"
+
+
+def _extract_api_key(http_request: Request) -> Optional[str]:
+    authorization = http_request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization.split(None, 1)[1].strip()
+        return token or None
+
+    header_key = http_request.headers.get("x-api-key")
+    if header_key:
+        return header_key.strip() or None
+
+    return None
+
+
+def _require_api_key(http_request: Request) -> None:
+    if config is None or not config.security.api_key:
+        return
+
+    provided_key = _extract_api_key(http_request)
+    if provided_key != config.security.api_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+async def _enforce_rate_limit(http_request: Request) -> None:
+    if config is None or config.security.rate_limit_per_minute <= 0:
+        return
+
+    client_key = f"{_extract_client_ip(http_request)}:{http_request.url.path}"
+    now = time.monotonic()
+    window_start = now - 60.0
+
+    async with rate_limit_lock:
+        bucket = rate_limit_windows[client_key]
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+
+        if len(bucket) >= config.security.rate_limit_per_minute:
+            retry_after = max(1, int(60 - (now - bucket[0])))
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        bucket.append(now)
+
+
+def _chunk_text(text: str, chunk_size: int = 96) -> List[str]:
+    if not text:
+        return []
+    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+
+async def _run_agent_request(request: ChatRequest, request_id: str) -> ChatResponse:
+    global chat_requests_succeeded, chat_requests_failed, total_tool_calls
+
+    if (
+        agent_loop is None
+        or llm_adapter is None
+        or mcp_orchestrator is None
+        or tool_registry is None
+        or config is None
+    ):
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+
+    original_max_turns = agent_loop.max_turns
+    try:
+        _log_event(
+            "chat.request.received",
+            conversation_id=request.conversation_id or "default",
+            message_preview=request.message[:80],
+            requested_max_turns=request.max_turns,
+            user_allowed_directory=request.allowed_directory,
+        )
+
+        if request.max_turns:
+            agent_loop.max_turns = request.max_turns
+
+        selected_allowed_directory = request.allowed_directory or DEFAULT_ALLOWED_DIRECTORY
+        selected_server = "local-mcp"
+        selected_tool = "set_allowed_directory"
+        if hasattr(tool_registry, "resolve_tool_call"):
+            try:
+                selected_server, selected_tool = tool_registry.resolve_tool_call("set_allowed_directory")
+            except Exception:
+                pass
+
+        await mcp_orchestrator.execute_tool(
+            server_name=selected_server,
+            tool_name=selected_tool,
+            tool_input={"path": selected_allowed_directory},
+        )
+        _log_event(
+            "chat.allowed_directory.set",
+            selected_allowed_directory=selected_allowed_directory,
+            used_default=(request.allowed_directory is None),
+        )
+
+        response, state = await agent_loop.run(
+            user_message=request.message,
+            llm_adapter=llm_adapter,
+            mcp_orchestrator=mcp_orchestrator,
+            tool_registry=tool_registry,
+        )
+
+        _log_event(
+            "chat.request.completed",
+            conversation_id=request.conversation_id or "default",
+            turns=state.turn,
+            tool_calls=state.total_tool_calls,
+            status=state.status,
+        )
+
+        chat_requests_succeeded += 1
+        total_tool_calls += state.total_tool_calls
+
+        return ChatResponse(
+            response=response,
+            conversation_id=request.conversation_id or "default",
+            turns=state.turn,
+            tool_calls=state.total_tool_calls,
+            model=config.llm.model,
+            request_id=request_id,
+        )
+    except asyncio.CancelledError:
+        chat_requests_failed += 1
+        raise
+    except Exception as e:
+        chat_requests_failed += 1
+        logger.error(
+            json.dumps(
+                {
+                    "event": "chat.request.failed",
+                    "request_id": request_id,
+                    "error": str(e),
+                },
+                ensure_ascii=True,
+            )
+        )
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    finally:
+        agent_loop.max_turns = original_max_turns
 
 
 @app.on_event("startup")
@@ -97,7 +284,7 @@ async def startup():
     """Initialize orchestrator on server startup."""
     global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop
     
-    logger.info("Initializing Tarbar_AI Orchestrator...")
+    _log_event("orchestrator.startup.begin")
     
     config = OrchestratorConfig.from_env()
     llm_adapter = LLMAdapter(config.llm)
@@ -107,21 +294,48 @@ async def startup():
         max_turns=config.agent_loop.max_turns,
         max_tool_calls_per_turn=config.agent_loop.max_tool_calls_per_turn,
         enable_tool_use=config.agent_loop.enable_tool_use,
+        enable_thinking=config.agent_loop.enable_thinking,
     )
     
-    # Initialize MCP server (Phase 1: single hardcoded server)
+    # Initialize MCP servers (single default or configured multi-server set).
     try:
-        mcp_config = MCPServerConfig(
-            name="local-mcp",
-            command="fastmcp run services/mcp/main.py:mcp",
-            transport="stdio",
-        )
-        await mcp_orchestrator.initialize_server(mcp_config)
-        logger.info("MCP server initialized")
+        configured_servers = config.mcp.servers or [
+            {
+                "name": "local-mcp",
+                "command": "fastmcp run services/mcp/main.py:mcp",
+                "transport": config.mcp.default_transport,
+            }
+        ]
+
+        for server_entry in configured_servers:
+            server_name = server_entry.get("name")
+            command = server_entry.get("command")
+            if not server_name or not command:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "mcp.server.invalid_config",
+                            "config": server_entry,
+                        },
+                        ensure_ascii=True,
+                    )
+                )
+                continue
+
+            mcp_config = MCPServerConfig(
+                name=server_name,
+                command=command,
+                transport=server_entry.get("transport", config.mcp.default_transport),
+            )
+            await mcp_orchestrator.initialize_server(mcp_config)
+            discovered_tools = await mcp_orchestrator.discover_tools(server_name)
+            tool_registry.register_tools_from_mcp_discovery(server_name, discovered_tools)
+            _log_event("mcp.tools.registered", tool_count=len(discovered_tools), server=server_name)
+            _log_event("mcp.server.initialized", server=server_name)
     except Exception as e:
-        logger.warning(f"Failed to initialize MCP server: {e}")
+        logger.warning(json.dumps({"event": "mcp.server.init_failed", "error": str(e)}, ensure_ascii=True))
     
-    logger.info("Orchestrator initialization complete")
+    _log_event("orchestrator.startup.complete")
 
 
 @app.on_event("shutdown")
@@ -129,7 +343,7 @@ async def shutdown():
     """Cleanup on server shutdown."""
     global llm_adapter, mcp_orchestrator
     
-    logger.info("Shutting down orchestrator...")
+    _log_event("orchestrator.shutdown.begin")
     
     if mcp_orchestrator:
         await mcp_orchestrator.shutdown_all()
@@ -137,11 +351,11 @@ async def shutdown():
     if llm_adapter:
         await llm_adapter.close()
     
-    logger.info("Orchestrator shutdown complete")
+    _log_event("orchestrator.shutdown.complete")
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
     """
     Execute agent loop for a user message.
     
@@ -154,40 +368,68 @@ async def chat(request: ChatRequest) -> ChatResponse:
         or tool_registry is None
     ):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
-    
-    try:
-        logger.info(f"Chat request: {request.message[:50]}...")
-        
-        # Override max turns if provided
-        if request.max_turns:
-            agent_loop.max_turns = request.max_turns
 
-        # Apply user-selected filesystem root for MCP tools before execution.
-        if request.allowed_directory:
-            await mcp_orchestrator.execute_tool(
-                server_name="local-mcp",
-                tool_name="set_allowed_directory",
-                tool_input={"path": request.allowed_directory},
-            )
-        
-        # Run agent loop
-        response, state = await agent_loop.run(
-            user_message=request.message,
-            llm_adapter=llm_adapter,
-            mcp_orchestrator=mcp_orchestrator,
-            tool_registry=tool_registry,
-        )
-        
-        return ChatResponse(
-            response=response,
-            conversation_id=request.conversation_id or "default",
-            turns=state.turn,
-            tool_calls=state.total_tool_calls,
-            model=config.llm.model,
-        )
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+    
+    global chat_requests_total, chat_requests_succeeded, chat_requests_failed, total_tool_calls
+
+    request_id = uuid.uuid4().hex[:12]
+    set_request_id(request_id)
+    chat_requests_total += 1
+
+    try:
+        return await _run_agent_request(request, request_id)
+    finally:
+        set_request_id(None)
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingResponse:
+    """Execute chat request and stream the final response as SSE chunks."""
+    if (
+        agent_loop is None
+        or llm_adapter is None
+        or mcp_orchestrator is None
+        or tool_registry is None
+    ):
+        raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+
+    global chat_requests_total
+    chat_requests_total += 1
+
+    request_id = uuid.uuid4().hex[:12]
+
+    async def event_stream():
+        set_request_id(request_id)
+        try:
+            yield f"data: {json.dumps({'request_id': request_id})}\n\n"
+            result = await _run_agent_request(request, request_id)
+            for chunk in _chunk_text(result.response):
+                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except HTTPException as e:
+            yield f"data: {json.dumps({'error': str(e.detail)})}\n\n"
+            yield "data: [DONE]\n\n"
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            set_request_id(None)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -214,13 +456,31 @@ async def health() -> HealthResponse:
     )
 
 
+@app.get("/live")
+async def live() -> Dict[str, str]:
+    """Liveness probe endpoint for container/platform health checks."""
+    return {"status": "alive"}
+
+
+@app.get("/ready")
+async def ready() -> Dict[str, str]:
+    """Readiness probe endpoint for deployment rollouts."""
+    if config is None or llm_adapter is None or mcp_orchestrator is None or tool_registry is None:
+        raise HTTPException(status_code=503, detail="orchestrator_not_initialized")
+    return {"status": "ready"}
+
+
 @app.get("/tools", response_model=ToolsResponse)
-async def list_tools() -> ToolsResponse:
+async def list_tools(http_request: Request) -> ToolsResponse:
     """List available tools."""
-    if not tool_registry:
+    if tool_registry is None:
         raise HTTPException(status_code=500, detail="Tool registry not initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
     
     tools = tool_registry.list_all_tools()
+    _log_event("tools.listed", total=len(tools))
     
     return ToolsResponse(
         tools=[
@@ -236,6 +496,22 @@ async def list_tools() -> ToolsResponse:
     )
 
 
+@app.get("/metrics", response_model=MetricsResponse)
+async def metrics(http_request: Request) -> MetricsResponse:
+    """Runtime metrics for the orchestrator."""
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+
+    return MetricsResponse(
+        uptime_seconds=round(time.monotonic() - service_started_at, 3),
+        chat_requests_total=chat_requests_total,
+        chat_requests_succeeded=chat_requests_succeeded,
+        chat_requests_failed=chat_requests_failed,
+        total_tool_calls=total_tool_calls,
+        active_mcp_servers=len(mcp_orchestrator.get_server_status()) if mcp_orchestrator else 0,
+    )
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -244,8 +520,12 @@ async def root():
         "version": "0.1.0",
         "endpoints": [
             "POST /chat — Execute agent loop",
+            "POST /chat/stream — Stream chat response",
             "GET /health — Health check",
+            "GET /live — Liveness probe",
+            "GET /ready — Readiness probe",
             "GET /tools — List available tools",
+            "GET /metrics — Runtime metrics",
         ]
     }
 

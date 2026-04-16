@@ -1,0 +1,18 @@
+# Testing requirements for orchestrator service
+
+# Core testing framework
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-timeout==2.1.0
+
+# Mocking and fixtures
+pytest-mock==3.12.0
+
+# Code quality
+black==23.12.0
+pylint==3.0.3
+mypy==1.7.1
+
+# Coverage reporting
+coverage==7.3.2

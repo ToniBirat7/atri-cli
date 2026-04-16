@@ -9,7 +9,7 @@ Phase 1: Basic registry with schema translation.
 Phase 6: Tool access control and risk tiers.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 import json
 import logging
@@ -24,6 +24,7 @@ class Tool:
     description: str
     input_schema: Dict[str, Any]
     server_name: str
+    source_name: Optional[str] = None
     category: Optional[str] = None
     risk_tier: str = "green"  # green, yellow, red (Phase 6+)
 
@@ -43,6 +44,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
         self._server_tools: Dict[str, List[str]] = {}  # server_name -> [tool_names]
+        self._tool_routes: Dict[str, Tuple[str, str]] = {}  # exposed_name -> (server_name, source_name)
 
     def register_tool(self, tool: Tool) -> None:
         """Register a tool in the registry."""
@@ -50,6 +52,7 @@ class ToolRegistry:
             logger.warning(f"Tool {tool.name} already registered, updating")
         
         self._tools[tool.name] = tool
+        self._tool_routes[tool.name] = (tool.server_name, tool.source_name or tool.name)
         
         if tool.server_name not in self._server_tools:
             self._server_tools[tool.server_name] = []
@@ -58,6 +61,19 @@ class ToolRegistry:
             self._server_tools[tool.server_name].append(tool.name)
         
         logger.info(f"Registered tool: {tool.name} from {tool.server_name}")
+
+    def _register_alias(self, alias_name: str, tool: Tool) -> None:
+        """Register an additional alias for a tool route without duplicating source metadata."""
+        alias_tool = Tool(
+            name=alias_name,
+            description=tool.description,
+            input_schema=tool.input_schema,
+            server_name=tool.server_name,
+            source_name=tool.source_name,
+            category=tool.category,
+            risk_tier=tool.risk_tier,
+        )
+        self.register_tool(alias_tool)
 
     def register_tools_from_mcp_discovery(
         self,
@@ -72,8 +88,22 @@ class ToolRegistry:
             mcp_tools: List of tools from MCP ListTools response
         """
         for mcp_tool in mcp_tools:
-            tool = self._translate_mcp_tool(mcp_tool, server_name)
-            self.register_tool(tool)
+            base_tool = self._translate_mcp_tool(mcp_tool, server_name)
+            namespaced_name = f"{server_name}.{base_tool.source_name or base_tool.name}"
+
+            # Always register namespaced form to avoid collisions across servers.
+            self._register_alias(namespaced_name, base_tool)
+
+            # Register plain alias only when unique to preserve backward compatibility.
+            plain_name = base_tool.source_name or base_tool.name
+            if plain_name not in self._tools:
+                self._register_alias(plain_name, base_tool)
+            else:
+                logger.info(
+                    "Skipping plain tool alias due to name collision: %s (server=%s)",
+                    plain_name,
+                    server_name,
+                )
 
     def _translate_mcp_tool(self, mcp_tool: Dict[str, Any], server_name: str) -> Tool:
         """
@@ -93,15 +123,43 @@ class ToolRegistry:
         Returns:
             Normalized Tool object
         """
+        tool_name = mcp_tool.get("name", "unknown")
         return Tool(
-            name=mcp_tool.get("name", "unknown"),
+            name=tool_name,
             description=mcp_tool.get("description", ""),
             input_schema=mcp_tool.get("inputSchema", {
                 "type": "object",
                 "properties": {}
             }),
             server_name=server_name,
+            source_name=tool_name,
+            risk_tier=self._infer_risk_tier(tool_name),
         )
+
+    def _infer_risk_tier(self, tool_name: str) -> str:
+        """Infer a coarse risk tier from tool name semantics."""
+        lowered = tool_name.lower()
+        red_signals = ("delete", "remove", "destroy", "shutdown", "exec", "shell", "format")
+        yellow_signals = ("write", "edit", "move", "rename", "set_", "create")
+
+        if any(signal in lowered for signal in red_signals):
+            return "red"
+        if any(signal in lowered for signal in yellow_signals):
+            return "yellow"
+        return "green"
+
+    def resolve_tool_call(self, tool_name: str) -> Tuple[str, str]:
+        """Resolve an exposed tool name to (server_name, source_tool_name)."""
+        route = self._tool_routes.get(tool_name)
+        if route:
+            return route
+
+        if "." in tool_name:
+            server_name, source_name = tool_name.split(".", 1)
+            if server_name in self._server_tools:
+                return server_name, source_name
+
+        raise ValueError(f"Tool not found in registry: {tool_name}")
 
     def get_tool(self, name: str) -> Optional[Tool]:
         """Get tool by name."""
@@ -159,6 +217,7 @@ class ToolRegistry:
         """Clear all registered tools."""
         self._tools.clear()
         self._server_tools.clear()
+        self._tool_routes.clear()
         logger.info("Tool registry cleared")
 
     def __len__(self) -> int:
