@@ -21,6 +21,7 @@ import asyncio
 import inspect
 import importlib.util
 from pathlib import Path
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +72,9 @@ class MCPOrchestrator:
         if "services/mcp/main.py" not in command:
             return None
 
-        module_path = (Path(__file__).resolve().parent.parent / "mcp" / "main.py").resolve()
-        if not module_path.exists():
-            logger.warning(f"Local MCP module not found at {module_path}")
+        module_path = self._resolve_local_module_path(command)
+        if module_path is None:
+            logger.warning("Local MCP module not found for command: %s", command)
             return None
 
         spec = importlib.util.spec_from_file_location("tarbar_local_mcp", str(module_path))
@@ -84,6 +85,51 @@ class MCPOrchestrator:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def _resolve_local_module_path(self, command: str) -> Optional[Path]:
+        """Resolve services/mcp/main.py path for both container and local executions."""
+        try:
+            tokens = shlex.split(command)
+        except Exception:
+            tokens = command.split()
+
+        command_path: Optional[str] = None
+        for token in tokens:
+            if "services/mcp/main.py" in token:
+                command_path = token.split(":", 1)[0]
+                break
+
+        if command_path is None:
+            command_path = "services/mcp/main.py"
+
+        path_candidate = Path(command_path)
+        candidates: list[Path] = []
+        if path_candidate.is_absolute():
+            candidates.append(path_candidate)
+        else:
+            candidates.extend(
+                [
+                    Path.cwd() / path_candidate,
+                    Path("/app") / path_candidate,
+                    Path(__file__).resolve().parent.parent / "mcp" / "main.py",
+                ]
+            )
+
+        # Preserve candidate order while deduplicating.
+        seen: set[Path] = set()
+        ordered_candidates: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            ordered_candidates.append(resolved)
+
+        for resolved in ordered_candidates:
+            if resolved.exists() and resolved.is_file():
+                return resolved
+
+        return None
 
     async def initialize_server(self, config: MCPServerConfig) -> None:
         """

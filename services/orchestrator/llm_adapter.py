@@ -64,6 +64,15 @@ class LLMAdapter:
         )
         if config.api_key:
             self.client.headers["Authorization"] = f"Bearer {config.api_key}"
+        self._max_retry_attempts = 3
+        self._retryable_status_codes = {408, 409, 425, 429}
+
+    def _is_retryable_status(self, status_code: int) -> bool:
+        return status_code >= 500 or status_code in self._retryable_status_codes
+
+    def _is_retryable_transport_error(self, error: Exception) -> bool:
+        # These error classes represent transient network/transport failures.
+        return isinstance(error, (httpx.TimeoutException, httpx.TransportError))
 
     async def close(self):
         """Clean up HTTP client."""
@@ -110,7 +119,7 @@ class LLMAdapter:
             )
 
         has_tool_result_context = any(message.get("role") == "tool" for message in messages)
-        max_attempts = 2 if has_tool_result_context else 1
+        max_attempts = self._max_retry_attempts
 
         try:
             for attempt in range(1, max_attempts + 1):
@@ -122,18 +131,45 @@ class LLMAdapter:
                     tool_schema_count=len(tools) if tools else 0,
                     has_tool_result_context=has_tool_result_context,
                 )
-                response = await self.client.post(
-                    "/chat/completions",
-                    json=request_body
-                )
+                try:
+                    response = await self.client.post(
+                        "/chat/completions",
+                        json=request_body
+                    )
+                except Exception as e:
+                    retryable = self._is_retryable_transport_error(e)
+                    will_retry = retryable and attempt < max_attempts
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "llm.request.transport_error",
+                                "request_id": get_request_id(),
+                                "turn_id": get_turn_id(),
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "retryable": retryable,
+                                "will_retry": will_retry,
+                                "error_type": type(e).__name__,
+                                "error": str(e),
+                                "error_repr": repr(e),
+                                "message_count": len(messages),
+                                "tool_schema_count": len(tools) if tools else 0,
+                            },
+                            ensure_ascii=True,
+                        )
+                    )
+                    if will_retry:
+                        await asyncio.sleep(0.25 * attempt)
+                        continue
+                    raise
 
-                if response.status_code >= 500 and attempt < max_attempts:
+                if self._is_retryable_status(response.status_code) and attempt < max_attempts:
                     _log_event(
                         "llm.request.retry",
                         attempt=attempt,
                         status_code=response.status_code,
                     )
-                    await asyncio.sleep(0.15 * attempt)
+                    await asyncio.sleep(0.25 * attempt)
                     continue
 
                 response.raise_for_status()
@@ -151,12 +187,25 @@ class LLMAdapter:
             except Exception:
                 response_text = "<unavailable>"
 
+            request_url = ""
+            request_method = ""
+            try:
+                request_url = str(e.request.url)
+                request_method = e.request.method
+            except Exception:
+                request_url = "<unavailable>"
+                request_method = "<unavailable>"
+
             logger.error(json.dumps({
                 "event": "llm.request.status_error",
                 "request_id": get_request_id(),
                 "turn_id": get_turn_id(),
                 "error": str(e),
+                "error_repr": repr(e),
+                "error_type": type(e).__name__,
                 "status_code": getattr(e.response, "status_code", "unknown"),
+                "request_url": request_url,
+                "request_method": request_method,
                 "body": response_text[:2000],
                 "message_count": len(messages),
                 "tool_schema_count": len(tools) if tools else 0,
@@ -168,6 +217,10 @@ class LLMAdapter:
                 "request_id": get_request_id(),
                 "turn_id": get_turn_id(),
                 "error": str(e),
+                "error_repr": repr(e),
+                "error_type": type(e).__name__,
+                "message_count": len(messages),
+                "tool_schema_count": len(tools) if tools else 0,
             }, ensure_ascii=True))
             raise
         except json.JSONDecodeError as e:

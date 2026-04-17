@@ -26,6 +26,7 @@ import asyncio
 import json
 import ast
 import logging
+import re
 
 try:
     from .logging_context import get_request_id, set_turn_id, get_turn_id
@@ -246,6 +247,43 @@ class AgentLoop:
                     turn.tool_calls_requested = len(tool_calls)
 
                     if not tool_calls:
+                        if self.state.total_tool_calls == 0:
+                            forced_listing_response = await self._try_force_directory_listing_response(
+                                user_message=user_message,
+                                content=content,
+                                mcp_orchestrator=mcp_orchestrator,
+                                tool_registry=tool_registry,
+                            )
+                            if forced_listing_response is not None:
+                                self.state.final_response = forced_listing_response
+                                turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                                self.state.turns_history.append(turn)
+                                _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                                await self._emit_event(
+                                    event_callback,
+                                    {
+                                        "type": "turn_final_response",
+                                        "turn": self.state.turn,
+                                    },
+                                )
+                                break
+
+                        if self.state.total_tool_calls > 0:
+                            replacement = self._normalize_tool_summary_response(content)
+                            if replacement is not None:
+                                self.state.final_response = replacement
+                                turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                                self.state.turns_history.append(turn)
+                                _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                                await self._emit_event(
+                                    event_callback,
+                                    {
+                                        "type": "turn_final_response",
+                                        "turn": self.state.turn,
+                                    },
+                                )
+                                break
+
                         self.state.final_response = content
                         turn.outcome = TurnOutcome.NO_TOOL_CALLS
                         self.state.turns_history.append(turn)
@@ -281,6 +319,7 @@ class AgentLoop:
                             "tool_calls": [
                                 {
                                     "id": call.id or f"call_{i}",
+                                    "type": "function",
                                     "function": {
                                         "name": call.tool_name,
                                         "arguments": json.dumps(call.tool_input, ensure_ascii=False),
@@ -292,14 +331,16 @@ class AgentLoop:
                     )
 
                     for tool_call in tool_calls:
+                        routed_server = "local-mcp"
+                        routed_tool_name = tool_call.tool_name
+                        validated_input = tool_call.tool_input
+
                         try:
                             validated_input = self._validate_tool_input(
                                 tool_name=tool_call.tool_name,
                                 tool_input=tool_call.tool_input,
                                 tool_registry=tool_registry,
                             )
-                            routed_server = "local-mcp"
-                            routed_tool_name = tool_call.tool_name
                             if hasattr(tool_registry, "resolve_tool_call"):
                                 routed_server, routed_tool_name = tool_registry.resolve_tool_call(tool_call.tool_name)
 
@@ -502,28 +543,243 @@ class AgentLoop:
         content = str(latest_tool_msg.get("content", "")).strip()
 
         if tool_name == "list_directory":
-            entries: List[str] = []
-            parsed: Any = None
-            try:
-                parsed = json.loads(content)
-            except Exception:
-                try:
-                    parsed = ast.literal_eval(content)
-                except Exception:
-                    parsed = None
+            summary = self._summarize_list_directory_result(
+                content,
+                requested_path=self._latest_requested_directory_path(),
+            )
+            if summary:
+                return summary
 
-            if isinstance(parsed, list):
-                for item in parsed[:5]:
+        return f"I executed {tool_name} successfully.\n\nResult:\n{content[:2000]}"
+
+    def _normalize_tool_summary_response(self, content: str) -> Optional[str]:
+        """Replace shell-style directory answers with the actual directory summary."""
+        if not content.strip():
+            return self._fallback_from_latest_tool_result()
+
+        normalized = content.strip().lower()
+        if not self._looks_like_shell_directory_response(normalized):
+            return None
+
+        return self._fallback_from_latest_tool_result()
+
+    async def _try_force_directory_listing_response(
+        self,
+        *,
+        user_message: str,
+        content: str,
+        mcp_orchestrator: "MCPOrchestrator",  # type: ignore
+        tool_registry: "ToolRegistry",  # type: ignore
+    ) -> Optional[str]:
+        """Force a real directory listing when a directory request got a shell snippet reply."""
+        normalized_content = content.strip().lower()
+        if not self._looks_like_shell_directory_response(normalized_content):
+            return None
+
+        if not self._looks_like_directory_request(user_message):
+            return None
+
+        target_path = self._extract_path_for_directory_listing(content, user_message)
+        resolved_route = self._resolve_directory_listing_tool(tool_registry)
+        if resolved_route is None:
+            return None
+
+        exposed_tool_name, routed_server, routed_tool_name = resolved_route
+
+        try:
+            result = await mcp_orchestrator.execute_tool(
+                server_name=routed_server,
+                tool_name=routed_tool_name,
+                tool_input={"path": target_path},
+                timeout_seconds=self.tool_timeout_seconds,
+                max_retries=self.max_tool_call_retries,
+            )
+        except Exception:
+            return None
+
+        summary = self._summarize_list_directory_result(result, requested_path=target_path)
+        if summary is None:
+            return None
+
+        self.state.messages.append(
+            {
+                "role": "tool",
+                "name": exposed_tool_name,
+                "content": json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result),
+            }
+        )
+        self.state.total_tool_calls += 1
+        return summary
+
+    def _resolve_directory_listing_tool(
+        self,
+        tool_registry: "ToolRegistry",  # type: ignore
+    ) -> Optional[Tuple[str, str, str]]:
+        """Resolve a directory-listing tool name even when only namespaced aliases are present."""
+        preferred_names = (
+            "list_directory",
+            "local-mcp.list_directory",
+            "filesystem.list_directory",
+        )
+
+        for candidate in preferred_names:
+            try:
+                if hasattr(tool_registry, "resolve_tool_call"):
+                    server_name, source_name = tool_registry.resolve_tool_call(candidate)
+                    return candidate, server_name, source_name
+            except Exception:
+                continue
+
+        if hasattr(tool_registry, "list_all_tools") and hasattr(tool_registry, "resolve_tool_call"):
+            try:
+                for tool in tool_registry.list_all_tools():
+                    name = getattr(tool, "name", "")
+                    if not isinstance(name, str):
+                        continue
+                    if name == "list_directory" or name.endswith(".list_directory"):
+                        try:
+                            server_name, source_name = tool_registry.resolve_tool_call(name)
+                            return name, server_name, source_name
+                        except Exception:
+                            continue
+            except Exception:
+                return None
+
+        return None
+
+    def _summarize_list_directory_result(self, result: Any, requested_path: Optional[str] = None) -> Optional[str]:
+        """Build a short user-facing list from a list_directory tool result."""
+        entries: List[str] = []
+        directory_path = ""
+
+        parsed: Any = result
+        if isinstance(result, str):
+            text = result.strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    try:
+                        parsed = ast.literal_eval(text)
+                    except Exception:
+                        parsed = text
+
+        if isinstance(parsed, list):
+            for item in parsed[:3]:
+                if isinstance(item, dict):
+                    entries.append(str(item.get("name") or item.get("path") or item))
+                else:
+                    entries.append(str(item))
+        elif isinstance(parsed, dict):
+            directory_path = str(parsed.get("path") or parsed.get("directory") or "").strip()
+            raw_entries = parsed.get("entries")
+            if isinstance(raw_entries, list):
+                for item in raw_entries[:3]:
                     if isinstance(item, dict):
                         entries.append(str(item.get("name") or item.get("path") or item))
                     else:
                         entries.append(str(item))
 
-            if entries:
-                bullets = "\n".join(f"- {entry}" for entry in entries)
-                return f"I executed list_directory and found these entries:\n{bullets}"
+        if not entries:
+            return None
 
-        return f"I executed {tool_name} successfully.\n\nResult:\n{content[:2000]}"
+        bullets = "\n".join(f"- {entry}" for entry in entries)
+
+        effective_path = self._resolve_directory_display_path(
+            directory_path,
+            requested_path or self._latest_requested_directory_path(),
+        )
+        if effective_path:
+            return f"Top entries in {effective_path}:\n{bullets}"
+        return f"Top entries in the directory:\n{bullets}"
+
+    def _latest_requested_directory_path(self) -> Optional[str]:
+        """Best-effort extraction of the latest path requested for list_directory."""
+        for msg in reversed(self.state.messages):
+            if msg.get("role") == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                if not isinstance(tool_calls, list):
+                    continue
+                for call in reversed(tool_calls):
+                    try:
+                        function_payload = call.get("function") or {}
+                        if function_payload.get("name") != "list_directory":
+                            continue
+                        arguments = function_payload.get("arguments") or "{}"
+                        parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments
+                        path = str((parsed_args or {}).get("path") or "").strip()
+                        if path:
+                            return path
+                    except Exception:
+                        continue
+
+        for msg in reversed(self.state.messages):
+            if msg.get("role") != "user":
+                continue
+            text = str(msg.get("content") or "")
+            match = re.search(r"(/[^\s,;:]+)", text)
+            if match:
+                return match.group(1)
+
+        return None
+
+    def _resolve_directory_display_path(self, tool_path: str, requested_path: Optional[str]) -> str:
+        """Prefer user-requested path when tool returns ambiguous current-directory markers."""
+        normalized_tool_path = tool_path.strip()
+        if normalized_tool_path and normalized_tool_path not in {".", "./"}:
+            return normalized_tool_path
+
+        normalized_requested = (requested_path or "").strip()
+        if normalized_requested and normalized_requested not in {".", "./"}:
+            return normalized_requested
+
+        if normalized_tool_path in {".", "./"}:
+            return "current directory"
+
+        return ""
+
+    def _looks_like_directory_request(self, user_message: str) -> bool:
+        """Detect user intent to list or inspect directory entries."""
+        normalized = user_message.lower()
+        patterns = (
+            r"\blist\b.*\b(directory|folder|files?|items?|entries)\b",
+            r"\bshow\b.*\b(directory|folder|files?|items?|entries)\b",
+            r"\btop\s+\d+\b.*\b(files?|items?|entries|directory)\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    def _extract_path_for_directory_listing(self, content: str, user_message: str) -> str:
+        """Extract the best candidate directory path from assistant/user text."""
+        content_match = re.search(r"\bls(?:\s+-\S+)*\s+([^\s|;&]+)", content)
+        if content_match:
+            return content_match.group(1)
+
+        user_match = re.search(r"(/[^\s,;:]+)", user_message)
+        if user_match:
+            return user_match.group(1)
+
+        return "."
+
+    def _looks_like_shell_directory_response(self, normalized_content: str) -> bool:
+        """Detect when the model echoed a shell command instead of summarizing files."""
+        shell_markers = (
+            r"```(?:bash|sh|shell)?",
+            r"\bls\s+-",
+            r"\bls\b",
+            r"\bfind\b",
+            r"\btree\b",
+            r"\bdir\b",
+        )
+        if not any(re.search(pattern, normalized_content) for pattern in shell_markers):
+            return False
+
+        if "/" not in normalized_content and "." not in normalized_content:
+            return False
+
+        if any(marker in normalized_content for marker in ("top 3", "files are", "entries are", "directory contains")):
+            return False
+
+        return True
 
     def _build_system_prompt(self) -> str:
         """Build system prompt for the agent."""
@@ -533,6 +789,8 @@ class AgentLoop:
             "- Be accurate, concise, and useful.\n"
             "- Use tools whenever they materially improve correctness, freshness, or access to local state.\n"
             "- Prefer the minimum number of tool calls needed. If multiple independent tool calls are useful, request them in the same turn.\n"
+            "- When a filesystem listing is requested, return the actual entries in plain text or bullets.\n"
+            "- Do not echo the shell command used to inspect a directory, and do not wrap directory listings in code fences unless the user explicitly asks for code.\n"
             "- Never reveal hidden reasoning, chain-of-thought, or internal scratch work.\n"
             "- If a request is ambiguous, ask one focused clarifying question before acting.\n"
             "- For file edits, destructive actions, or state-changing operations, be careful and prefer reversible steps.\n"

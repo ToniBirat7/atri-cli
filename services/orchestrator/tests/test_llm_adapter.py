@@ -7,6 +7,8 @@ Tests both OpenAI format and native Gemma 4 format parsing.
 import pytest
 import json
 from typing import List
+from unittest.mock import AsyncMock
+import httpx
 
 from llm_adapter import LLMAdapter, ToolCall
 
@@ -368,3 +370,62 @@ class TestToolCallFormatConsistency:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-m", "openai_parsing or native_parsing"])
+
+
+class TestChatCompletionRetries:
+    """Test retry behavior for transient LLM request failures."""
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_retries_transport_error_then_succeeds(self, llm_config):
+        adapter = LLMAdapter(llm_config)
+        success_payload = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "ok"},
+                }
+            ]
+        }
+
+        class _SuccessResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return success_payload
+
+        adapter.client.post = AsyncMock(
+            side_effect=[
+                httpx.ReadTimeout("simulated timeout"),
+                _SuccessResponse(),
+            ]
+        )
+
+        result = await adapter.chat_completion(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+        )
+
+        assert result == success_payload
+        assert adapter.client.post.await_count == 2
+        await adapter.close()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_does_not_retry_non_retryable_status(self, llm_config):
+        adapter = LLMAdapter(llm_config)
+
+        request = httpx.Request("POST", "http://127.0.0.1:8000/v1/chat/completions")
+        bad_response = httpx.Response(400, request=request, json={"error": "bad request"})
+
+        adapter.client.post = AsyncMock(return_value=bad_response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.chat_completion(
+                messages=[{"role": "user", "content": "hello"}],
+                tools=None,
+            )
+
+        assert adapter.client.post.await_count == 1
+        await adapter.close()

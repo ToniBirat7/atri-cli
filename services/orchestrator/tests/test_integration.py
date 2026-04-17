@@ -14,6 +14,7 @@ import json
 import asyncio
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from typing import Dict, Any
+from types import SimpleNamespace
 
 from agent_loop import AgentLoop, AgentState, TurnOutcome
 from llm_adapter import LLMAdapter, ToolCall
@@ -28,10 +29,12 @@ class MockLLMAdapter:
         self.call_count = 0
         self.responses = []
         self.extracted_calls = []
+        self.messages_seen = []
 
     async def chat_completion(self, messages, tools=None):
         """Mock chat completion."""
         self.call_count += 1
+        self.messages_seen.append(json.loads(json.dumps(messages)))
         if self.call_count <= len(self.responses):
             return self.responses[self.call_count - 1]
         return {
@@ -68,7 +71,7 @@ class MockMCPOrchestrator:
         self.executed_tools = []
         self.tool_results = {}
 
-    async def execute_tool(self, server_name, tool_name, tool_input):
+    async def execute_tool(self, server_name, tool_name, tool_input, **kwargs):
         """Mock tool execution."""
         self.executed_tools.append({
             "server": server_name,
@@ -114,6 +117,19 @@ class MockToolRegistry:
                 }
             }
         ]
+
+    def get_tool(self, tool_name):
+        """Return a mock tool definition when needed by validation."""
+        return None
+
+    def resolve_tool_call(self, tool_name):
+        """Resolve tool name to a fixed mock MCP route."""
+        normalized = tool_name.split(".")[-1]
+        return ("local-mcp", normalized)
+
+    def list_all_tools(self):
+        """Return mock tool entries used by dynamic fallback resolution."""
+        return [SimpleNamespace(name="local-mcp.list_directory")]
 
 
 class TestAgentLoopBasics:
@@ -210,6 +226,211 @@ class TestAgentLoopBasics:
         assert state.total_tool_calls == 1
         assert len(mcp.executed_tools) == 1
         assert mcp.executed_tools[0]["tool"] == "read_file"
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_adds_tool_call_type_in_follow_up_context(self):
+        """Tool calls sent back to the model must include type=function for llama.cpp compatibility."""
+        loop = AgentLoop(max_turns=5)
+        llm = MockLLMAdapter()
+        mcp = MockMCPOrchestrator()
+        tools = MockToolRegistry()
+
+        mcp.tool_results["read_file"] = {"content": "Hello, World!"}
+
+        tool_call = ToolCall(
+            id="call_1",
+            tool_name="read_file",
+            tool_input={"path": "/tmp/test.txt"},
+        )
+
+        llm.responses = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Let me read that file.",
+                            "tool_calls": [tool_call],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "The file contains: Hello, World!",
+                            "tool_calls": [],
+                        }
+                    }
+                ]
+            },
+        ]
+
+        llm.extracted_calls = [[tool_call], []]
+
+        await loop.run(
+            "Read /tmp/test.txt",
+            llm,
+            mcp,
+            tools,
+        )
+
+        second_request_messages = llm.messages_seen[1]
+        assistant_with_tool_calls = next(
+            message for message in second_request_messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+        assert assistant_with_tool_calls["tool_calls"][0]["type"] == "function"
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_rewrites_shell_style_directory_answer(self):
+        """Test that directory queries return the actual entries instead of a shell snippet."""
+        loop = AgentLoop(max_turns=5)
+        llm = MockLLMAdapter()
+        mcp = MockMCPOrchestrator()
+        tools = MockToolRegistry()
+
+        mcp.tool_results["list_directory"] = {
+            "path": "/app",
+            "entries": [
+                {"name": "alpha"},
+                {"name": "beta"},
+                {"name": "gamma"},
+            ],
+        }
+
+        tool_call = ToolCall(
+            id="call_1",
+            tool_name="list_directory",
+            tool_input={"path": "/app"},
+        )
+
+        llm.responses = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Let me inspect that directory.",
+                            "tool_calls": [tool_call],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "```bash\nls -F /app | head -n 3\n```",
+                            "tool_calls": [],
+                        }
+                    }
+                ]
+            },
+        ]
+
+        llm.extracted_calls = [[tool_call], []]
+
+        final_response, state = await loop.run(
+            "List the top 3 items in /app directory",
+            llm,
+            mcp,
+            tools,
+        )
+
+        assert "alpha" in final_response
+        assert "beta" in final_response
+        assert "gamma" in final_response
+        assert "ls -F /app" not in final_response
+        assert state.turn == 2
+        assert state.total_tool_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_forces_directory_listing_when_model_skips_tool_calls(self):
+        """Test that directory requests are recovered when the model replies with a shell command only."""
+        loop = AgentLoop(max_turns=5)
+        llm = MockLLMAdapter()
+        mcp = MockMCPOrchestrator()
+        tools = MockToolRegistry()
+
+        mcp.tool_results["list_directory"] = {
+            "path": "/app",
+            "entries": [
+                {"name": "alpha"},
+                {"name": "beta"},
+                {"name": "gamma"},
+            ],
+        }
+
+        llm.responses = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "```bash\nls -F /app | head -n 3\n```",
+                            "tool_calls": [],
+                        }
+                    }
+                ]
+            }
+        ]
+        llm.extracted_calls = [[]]
+
+        final_response, state = await loop.run(
+            "List the top 3 items in /app directory.",
+            llm,
+            mcp,
+            tools,
+        )
+
+        assert "alpha" in final_response
+        assert "beta" in final_response
+        assert "gamma" in final_response
+        assert "ls -F /app" not in final_response
+        assert state.turn == 1
+        assert state.total_tool_calls == 1
+        assert len(mcp.executed_tools) == 1
+        assert mcp.executed_tools[0]["tool"] == "list_directory"
+
+    @pytest.mark.asyncio
+    async def test_agent_loop_normalizes_dot_directory_label_to_requested_path(self):
+        """Directory summaries should use requested path when tool returns '.' as path."""
+        loop = AgentLoop(max_turns=5)
+        llm = MockLLMAdapter()
+        mcp = MockMCPOrchestrator()
+        tools = MockToolRegistry()
+
+        mcp.tool_results["list_directory"] = {
+            "path": ".",
+            "entries": [
+                {"name": "alpha"},
+                {"name": "beta"},
+                {"name": "gamma"},
+            ],
+        }
+
+        llm.responses = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "```bash\nls -F /app | head -n 3\n```",
+                            "tool_calls": [],
+                        }
+                    }
+                ]
+            }
+        ]
+        llm.extracted_calls = [[]]
+
+        final_response, _ = await loop.run(
+            "List the top 3 items in /app directory.",
+            llm,
+            mcp,
+            tools,
+        )
+
+        assert "Top entries in /app:" in final_response
+        assert "Top entries in .:" not in final_response
 
     @pytest.mark.asyncio
     async def test_agent_loop_parallel_tool_calls(self):

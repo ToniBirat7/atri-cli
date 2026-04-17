@@ -78,6 +78,9 @@ services:
     restart: unless-stopped
     ports:
       - '8001:8001'
+    volumes:
+      - '${PWD}:${PWD}'
+      - './services/mcp:/app/services/mcp:ro'
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,6 +129,8 @@ services:
     restart: unless-stopped
     ports:
       - '3000:3000'
+    volumes:
+      - '${PWD}:${PWD}'
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -133,6 +138,7 @@ services:
       NEXT_PUBLIC_API_URL: http://orchestrator:8001
       ORCHESTRATOR_URL: http://orchestrator:8001
       ORCHESTRATOR_API_KEY: secret
+      NEXT_PUBLIC_DEFAULT_ALLOWED_DIRECTORY: ${PWD}
       NODE_ENV: production
     networks:
       - tarbar-network

@@ -10,6 +10,9 @@ COPY next-env.d.ts next.config.ts postcss.config.mjs tsconfig.json ./
 COPY public ./public
 COPY src ./src
 RUN npm run build
+RUN mkdir -p .next/standalone/.next \
+	&& cp -r .next/static .next/standalone/.next/ \
+	&& cp -r public .next/standalone/
 
 EXPOSE 3000
 
