@@ -160,13 +160,14 @@ class MCPOrchestrator:
         max_retries: int = 2,
     ) -> str:
         """
-        Execute a tool on an MCP server.
+        Execute a tool on an MCP server with retry logic.
 
         Args:
             server_name: Name of the MCP server
             tool_name: Name of the tool to execute
             tool_input: Input arguments for the tool
             timeout_seconds: Execution timeout
+            max_retries: Maximum retry attempts on failure
 
         Returns:
             Tool execution result as string
@@ -197,24 +198,42 @@ class MCPOrchestrator:
                 try:
                     result = await asyncio.wait_for(_invoke(), timeout=timeout_seconds)
                     if isinstance(result, (dict, list)):
-                        return json.dumps(result, ensure_ascii=False)
-                    return str(result)
+                        json_result = json.dumps(result, ensure_ascii=False)
+                        logger.info(f"Tool {server_name}.{tool_name} succeeded on attempt {attempt}")
+                        return json_result
+                    str_result = str(result)
+                    logger.info(f"Tool {server_name}.{tool_name} succeeded on attempt {attempt}")
+                    return str_result
                 except asyncio.TimeoutError as exc:
                     last_error = exc
                     if attempt >= max_retries:
+                        logger.error(
+                            f"Tool {server_name}.{tool_name} timed out after {timeout_seconds}s on attempt {attempt}/{max_retries}"
+                        )
                         raise MCPToolExecutionTimeoutError(
                             f"Tool {server_name}.{tool_name} timed out after {timeout_seconds}s"
                         ) from exc
-                    await asyncio.sleep(0.1 * attempt)
+                    backoff = 0.1 * attempt
+                    logger.warning(
+                        f"Tool {server_name}.{tool_name} timed out on attempt {attempt}/{max_retries}, retrying in {backoff}s"
+                    )
+                    await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     last_error = exc
                     if attempt >= max_retries:
+                        logger.error(
+                            f"Tool {server_name}.{tool_name} failed on attempt {attempt}/{max_retries}: {type(exc).__name__}: {exc}"
+                        )
                         raise MCPToolExecutionError(
                             f"Tool {server_name}.{tool_name} failed: {exc}"
                         ) from exc
-                    await asyncio.sleep(0.1 * attempt)
+                    backoff = 0.1 * attempt
+                    logger.warning(
+                        f"Tool {server_name}.{tool_name} failed on attempt {attempt}/{max_retries} ({type(exc).__name__}), retrying in {backoff}s"
+                    )
+                    await asyncio.sleep(backoff)
 
             raise MCPToolExecutionError(
                 f"Tool {server_name}.{tool_name} failed after {max_retries} attempts"

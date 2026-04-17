@@ -9,10 +9,79 @@ export interface Message {
   timestamp: number;
 }
 
+export interface StreamStatus {
+  phase: 'idle' | 'thinking' | 'tool' | 'finalizing' | 'error';
+  detail: string;
+}
+
+function describeStreamEvent(event: Record<string, unknown>): StreamStatus {
+  const type = String(event.type ?? '');
+  switch (type) {
+    case 'turn_start':
+      return {
+        phase: 'thinking',
+        detail: `Turn ${String(event.turn ?? '')} started`,
+      };
+    case 'llm_response':
+      return {
+        phase: 'thinking',
+        detail: event.has_content
+          ? 'Model responded'
+          : 'Model is still reasoning',
+      };
+    case 'tool_call_start':
+      return {
+        phase: 'tool',
+        detail: `Calling ${String(event.tool_name ?? 'tool')}`,
+      };
+    case 'tool_call_result':
+      return {
+        phase: String(event.status ?? '') === 'error' ? 'error' : 'tool',
+        detail:
+          String(event.status ?? '') === 'error'
+            ? `Tool ${String(event.tool_name ?? 'tool')} failed`
+            : `Tool ${String(event.tool_name ?? 'tool')} completed`,
+      };
+    case 'turn_complete':
+      return {
+        phase: 'thinking',
+        detail: `Turn ${String(event.turn ?? '')} complete`,
+      };
+    case 'turn_final_response':
+      return {
+        phase: 'finalizing',
+        detail: 'Preparing final answer',
+      };
+    case 'agent_complete':
+      return {
+        phase: 'idle',
+        detail: 'Response complete',
+      };
+    default:
+      return {
+        phase: 'thinking',
+        detail: type ? `Event: ${type}` : 'Working',
+      };
+  }
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>({
+    phase: 'idle',
+    detail: 'Ready for a new message',
+  });
+  const [activityFeed, setActivityFeed] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+
+  const pushActivity = useCallback(
+    (line: string, phase: StreamStatus['phase']) => {
+      setStreamStatus({ phase, detail: line });
+      setActivityFeed((prev) => [line, ...prev].slice(0, 5));
+    },
+    [],
+  );
 
   const sendMessage = useCallback(
     async (
@@ -40,6 +109,70 @@ export function useChat() {
       abortRef.current = new AbortController();
 
       try {
+        // Validate directory if provided
+        if (allowedDirectory?.trim()) {
+          try {
+            const validateRes = await fetch('/api/validate-directory', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: allowedDirectory.trim() }),
+              signal: abortRef.current.signal,
+            });
+
+            if (!validateRes.ok) {
+              const err = await validateRes.json();
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsg.id
+                    ? {
+                        ...m,
+                        content: `Validation Error: ${err.error || 'Failed to validate directory'}`,
+                      }
+                    : m,
+                ),
+              );
+              setIsStreaming(false);
+              pushActivity(
+                `Directory validation failed: ${err.message || err.error}`,
+                'error',
+              );
+              return;
+            }
+
+            const validation = await validateRes.json();
+            if (!validation.ok) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsg.id
+                    ? {
+                        ...m,
+                        content: `Path Error: ${validation.message || validation.error}`,
+                      }
+                    : m,
+                ),
+              );
+              setIsStreaming(false);
+              pushActivity(`Invalid directory: ${validation.message}`, 'error');
+              return;
+            }
+
+            pushActivity(`Directory validated: ${validation.path}`, 'thinking');
+          } catch (validateErr) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsg.id
+                  ? {
+                      ...m,
+                      content: `Validation Error: ${validateErr instanceof Error ? validateErr.message : 'Failed to validate directory'}`,
+                    }
+                  : m,
+              ),
+            );
+            setIsStreaming(false);
+            return;
+          }
+        }
+
         const chatHistory = [...messages, userMsg].map((m) => ({
           role: m.role,
           content: m.content,
@@ -93,6 +226,12 @@ export function useChat() {
 
             try {
               const parsed = JSON.parse(data);
+              if (parsed.event) {
+                const eventStatus = describeStreamEvent(
+                  parsed.event as Record<string, unknown>,
+                );
+                pushActivity(eventStatus.detail, eventStatus.phase);
+              }
               if (parsed.content) {
                 setMessages((prev) =>
                   prev.map((m) =>
@@ -113,12 +252,14 @@ export function useChat() {
                       : m,
                   ),
                 );
+                pushActivity(`Error: ${parsed.error}`, 'error');
               }
             } catch {
               // skip
             }
           }
         }
+        setStreamStatus({ phase: 'idle', detail: 'Ready for a new message' });
       } catch (err) {
         if ((err as Error).name !== 'AbortError') {
           setMessages((prev) =>
@@ -131,6 +272,7 @@ export function useChat() {
                 : m,
             ),
           );
+          pushActivity('Connection error while streaming response', 'error');
         }
       } finally {
         setIsStreaming(false);
@@ -149,7 +291,20 @@ export function useChat() {
     abortRef.current?.abort();
     setMessages([]);
     setIsStreaming(false);
+    setActivityFeed([]);
+    setStreamStatus({
+      phase: 'idle',
+      detail: 'Ready for a new message',
+    });
   }, []);
 
-  return { messages, isStreaming, sendMessage, stopStreaming, clearChat };
+  return {
+    messages,
+    isStreaming,
+    sendMessage,
+    stopStreaming,
+    clearChat,
+    streamStatus,
+    activityFeed,
+  };
 }

@@ -2,8 +2,7 @@ import { NextRequest } from 'next/server';
 
 const ORCHESTRATOR_URL =
   process.env.ORCHESTRATOR_URL || 'http://127.0.0.1:8001';
-const PROMPT_PROFILE =
-  process.env.NEXT_PUBLIC_PROMPT_PROFILE || 'general-purpose';
+const ORCHESTRATOR_API_KEY = process.env.ORCHESTRATOR_API_KEY;
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -17,11 +16,8 @@ interface ChatRequestBody {
 }
 
 export async function POST(req: NextRequest) {
-  const {
-    messages,
-    allowedDirectory,
-    promptProfile,
-  }: ChatRequestBody = await req.json();
+  const { messages, allowedDirectory, promptProfile }: ChatRequestBody =
+    await req.json();
 
   const lastUserMessage = [...messages]
     .reverse()
@@ -37,12 +33,15 @@ export async function POST(req: NextRequest) {
   const orchestratorPayload = {
     message: lastUserMessage,
     allowed_directory: allowedDirectory,
-    prompt_profile: promptProfile || PROMPT_PROFILE,
+    ...(promptProfile ? { prompt_profile: promptProfile } : {}),
   };
 
   const response = await fetch(`${ORCHESTRATOR_URL}/chat/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(ORCHESTRATOR_API_KEY ? { 'x-api-key': ORCHESTRATOR_API_KEY } : {}),
+    },
     body: JSON.stringify(orchestratorPayload),
   });
 
@@ -89,16 +88,9 @@ export async function POST(req: NextRequest) {
 
             try {
               const parsed = JSON.parse(data);
-              if (parsed.content) {
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ content: parsed.content })}\n\n`),
-                );
-              }
-              if (parsed.error) {
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify({ error: parsed.error })}\n\n`),
-                );
-              }
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`),
+              );
             } catch {
               // Skip malformed chunks and continue streaming.
             }

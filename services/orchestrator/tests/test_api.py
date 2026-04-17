@@ -68,8 +68,10 @@ class _FakeAgentLoop:
         self.max_turns = 10
         self.last_system_prompt = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, event_callback=None):
         self.last_system_prompt = system_prompt
+        if event_callback is not None:
+            await event_callback({"type": "turn_start", "turn": 1})
         return "ok", type("State", (), {"turn": 1, "total_tool_calls": 1, "status": "completed"})()
 
 
@@ -78,8 +80,11 @@ class _FakeAgentLoopLong:
         self.max_turns = 10
         self.last_system_prompt = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, event_callback=None):
         self.last_system_prompt = system_prompt
+        if event_callback is not None:
+            await event_callback({"type": "turn_start", "turn": 1})
+            await event_callback({"type": "tool_call_start", "turn": 1, "tool_name": "list_directory"})
         return "abcdefghij" * 40, type("State", (), {"turn": 2, "total_tool_calls": 2, "status": "completed"})()
 
 
@@ -283,6 +288,7 @@ async def test_chat_stream_emits_chunks_and_done(monkeypatch):
 
     body = "".join(chunks)
     assert "request_id" in body
+    assert '"event"' in body
     assert "content" in body
     assert "[DONE]" in body
 

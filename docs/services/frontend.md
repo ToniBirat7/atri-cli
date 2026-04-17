@@ -11,8 +11,7 @@ The frontend accepts chat input from the user, keeps local chat state, and forwa
 ### `apps/frontend/src/app/page.tsx`
 The main chat screen. It renders:
 - the conversation view
-- the filesystem sandbox input
-- the prompt-profile selector
+- the workspace access selector
 - the chat composer and streaming controls
 
 ### `apps/frontend/src/lib/useChat.ts`
@@ -31,7 +30,7 @@ The backend-for-frontend route. It forwards the latest user message, allowed dir
 
 1. The user types a question in the browser.
 2. The user can optionally set an allowed filesystem root.
-3. The user can choose a prompt profile such as general purpose or legal strict.
+3. The frontend persists that choice locally and forwards it with each chat request.
 4. The frontend submits the request through its API route.
 5. The route forwards the request to the orchestrator stream endpoint.
 6. The UI renders streamed assistant output as it arrives.

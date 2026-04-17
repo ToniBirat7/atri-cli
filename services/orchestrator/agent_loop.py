@@ -19,7 +19,7 @@ Phase 5: Circuit-breaker, retry logic, observability.
 Phase 7: Full observability with structured logging and tracing.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable
 from dataclasses import dataclass, field
 from enum import Enum
 import asyncio
@@ -95,12 +95,62 @@ class AgentLoop:
         max_tool_calls_per_turn: int = 3,
         enable_tool_use: bool = True,
         enable_thinking: bool = False,
+        tool_timeout_seconds: int = 10,
+        max_tool_call_retries: int = 2,
     ):
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.enable_tool_use = enable_tool_use
         self.enable_thinking = enable_thinking
+        self.tool_timeout_seconds = tool_timeout_seconds
+        self.max_tool_call_retries = max_tool_call_retries
         self.state = AgentState()
+
+    async def _emit_event(
+        self,
+        event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]],
+        payload: Dict[str, Any],
+    ) -> None:
+        if event_callback is None:
+            return
+        try:
+            maybe = event_callback(payload)
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        except Exception:
+            # Keep loop progress resilient even if telemetry/event sink fails.
+            return
+
+    def _validate_tool_input(self, tool_name: str, tool_input: Any, tool_registry: "ToolRegistry") -> Dict[str, Any]:  # type: ignore
+        if not isinstance(tool_input, dict):
+            raise ValueError(f"Tool input must be an object for {tool_name}")
+
+        tool = tool_registry.get_tool(tool_name)
+        if tool is None and hasattr(tool_registry, "resolve_tool_call"):
+            try:
+                _, routed_name = tool_registry.resolve_tool_call(tool_name)
+                tool = tool_registry.get_tool(routed_name)
+            except Exception:
+                tool = None
+
+        if tool is None:
+            return tool_input
+
+        schema = tool.input_schema or {}
+        required = schema.get("required", [])
+        if isinstance(required, list):
+            missing = [key for key in required if key not in tool_input]
+            if missing:
+                raise ValueError(f"Missing required fields for {tool_name}: {', '.join(missing)}")
+
+        properties = schema.get("properties", {})
+        additional_props = schema.get("additionalProperties", True)
+        if additional_props is False and isinstance(properties, dict):
+            unknown = [key for key in tool_input.keys() if key not in properties]
+            if unknown:
+                raise ValueError(f"Unexpected fields for {tool_name}: {', '.join(unknown)}")
+
+        return tool_input
 
     async def run(
         self,
@@ -109,6 +159,7 @@ class AgentLoop:
         mcp_orchestrator: "MCPOrchestrator",  # type: ignore
         tool_registry: "ToolRegistry",  # type: ignore
         system_prompt: Optional[str] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> Tuple[str, AgentState]:
         """
         Run the agent loop.
@@ -144,6 +195,14 @@ class AgentLoop:
                 self.state.turn += 1
                 set_turn_id(self.state.turn)
                 turn = Turn(turn_number=self.state.turn, user_input=user_message)
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "turn_start",
+                        "turn": self.state.turn,
+                        "max_turns": self.max_turns,
+                    },
+                )
 
                 try:
                     available_tools = tool_registry.to_openai_format() if self.enable_tool_use else None
@@ -173,6 +232,15 @@ class AgentLoop:
                     choice = completion.get("choices", [{}])[0]
                     content = choice.get("message", {}).get("content", "")
                     turn.llm_response = content
+                    await self._emit_event(
+                        event_callback,
+                        {
+                            "type": "llm_response",
+                            "turn": self.state.turn,
+                            "has_content": bool(content),
+                            "content_preview": content[:160],
+                        },
+                    )
 
                     tool_calls = await llm_adapter.extract_tool_calls(completion)
                     turn.tool_calls_requested = len(tool_calls)
@@ -182,6 +250,13 @@ class AgentLoop:
                         turn.outcome = TurnOutcome.NO_TOOL_CALLS
                         self.state.turns_history.append(turn)
                         _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                        await self._emit_event(
+                            event_callback,
+                            {
+                                "type": "turn_final_response",
+                                "turn": self.state.turn,
+                            },
+                        )
                         break
 
                     if len(tool_calls) > self.max_tool_calls_per_turn:
@@ -218,15 +293,33 @@ class AgentLoop:
 
                     for tool_call in tool_calls:
                         try:
+                            validated_input = self._validate_tool_input(
+                                tool_name=tool_call.tool_name,
+                                tool_input=tool_call.tool_input,
+                                tool_registry=tool_registry,
+                            )
                             routed_server = "local-mcp"
                             routed_tool_name = tool_call.tool_name
                             if hasattr(tool_registry, "resolve_tool_call"):
                                 routed_server, routed_tool_name = tool_registry.resolve_tool_call(tool_call.tool_name)
 
+                            await self._emit_event(
+                                event_callback,
+                                {
+                                    "type": "tool_call_start",
+                                    "turn": self.state.turn,
+                                    "tool_name": tool_call.tool_name,
+                                    "routed_server": routed_server,
+                                    "routed_tool_name": routed_tool_name,
+                                },
+                            )
+
                             result = await mcp_orchestrator.execute_tool(
                                 server_name=routed_server,
                                 tool_name=routed_tool_name,
-                                tool_input=tool_call.tool_input,
+                                tool_input=validated_input,
+                                timeout_seconds=self.tool_timeout_seconds,
+                                max_retries=self.max_tool_call_retries,
                             )
 
                             turn.metadata.setdefault("tool_events", []).append(
@@ -254,7 +347,18 @@ class AgentLoop:
                                 tool_name=tool_call.tool_name,
                                 tool_calls_executed_in_turn=turn.tool_calls_executed,
                             )
+                            await self._emit_event(
+                                event_callback,
+                                {
+                                    "type": "tool_call_result",
+                                    "turn": self.state.turn,
+                                    "tool_name": tool_call.tool_name,
+                                    "status": "ok",
+                                },
+                            )
                         except Exception as e:
+                            import traceback
+                            error_traceback = traceback.format_exc()
                             logger.error(
                                 json.dumps(
                                     {
@@ -264,7 +368,10 @@ class AgentLoop:
                                         "tool_name": tool_call.tool_name,
                                         "routed_server": routed_server,
                                         "routed_tool_name": routed_tool_name,
-                                        "error": str(e),
+                                        "error_type": type(e).__name__,
+                                        "error_message": str(e),
+                                        "error_traceback": error_traceback,
+                                        "tool_input_keys": list(validated_input.keys()) if isinstance(validated_input, dict) else None,
                                     },
                                     ensure_ascii=True,
                                 )
@@ -276,6 +383,7 @@ class AgentLoop:
                                     "routed_tool_name": routed_tool_name,
                                     "input": tool_call.tool_input,
                                     "output": f"Error: {str(e)}",
+                                    "error_type": type(e).__name__,
                                     "status": "error",
                                 }
                             )
@@ -286,6 +394,17 @@ class AgentLoop:
                                     tool_call.id,
                                 )
                             )
+                            await self._emit_event(
+                                event_callback,
+                                {
+                                    "type": "tool_call_result",
+                                    "turn": self.state.turn,
+                                    "tool_name": tool_call.tool_name,
+                                    "status": "error",
+                                    "error": str(e),
+                                    "error_type": type(e).__name__,
+                                },
+                            )
 
                     turn.outcome = TurnOutcome.TOOL_CALLS
                     self.state.turns_history.append(turn)
@@ -293,6 +412,15 @@ class AgentLoop:
                         "agent_loop.turn.complete",
                         tool_calls_requested=turn.tool_calls_requested,
                         tool_calls_executed=turn.tool_calls_executed,
+                    )
+                    await self._emit_event(
+                        event_callback,
+                        {
+                            "type": "turn_complete",
+                            "turn": self.state.turn,
+                            "tool_calls_requested": turn.tool_calls_requested,
+                            "tool_calls_executed": turn.tool_calls_executed,
+                        },
                     )
 
                 except asyncio.CancelledError:
@@ -345,6 +473,15 @@ class AgentLoop:
                 turns=self.state.turn,
                 total_tool_calls=self.state.total_tool_calls,
                 status=self.state.status,
+            )
+            await self._emit_event(
+                event_callback,
+                {
+                    "type": "agent_complete",
+                    "turns": self.state.turn,
+                    "total_tool_calls": self.state.total_tool_calls,
+                    "status": self.state.status,
+                },
             )
             return self.state.final_response or "", self.state
         finally:

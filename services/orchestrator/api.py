@@ -54,7 +54,8 @@ logger = logging.getLogger(__name__)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-DEFAULT_ALLOWED_DIRECTORY = str(Path(__file__).resolve().parents[2])
+_resolved_api_path = Path(__file__).resolve()
+DEFAULT_ALLOWED_DIRECTORY = str(_resolved_api_path.parents[2] if len(_resolved_api_path.parents) > 2 else _resolved_api_path.parent)
 
 
 def _log_event(event: str, **fields: Any) -> None:
@@ -120,6 +121,21 @@ class MetricsResponse(BaseModel):
     chat_requests_failed: int
     total_tool_calls: int
     active_mcp_servers: int
+    allowed_directory_custom: int
+    allowed_directory_default: int
+
+
+class ValidateDirectoryRequest(BaseModel):
+    """Request to validate a directory path."""
+    path: str = Field(..., description="Directory path to validate")
+
+
+class ValidateDirectoryResponse(BaseModel):
+    """Response from directory validation."""
+    ok: bool = Field(..., description="Whether the directory is valid and accessible")
+    path: str = Field(..., description="The validated path")
+    error: Optional[str] = Field(None, description="Error message if validation failed")
+    message: Optional[str] = Field(None, description="Human-readable status message")
 
 
 class ConversationSummary(BaseModel):
@@ -155,6 +171,11 @@ chat_requests_total = 0
 chat_requests_succeeded = 0
 chat_requests_failed = 0
 total_tool_calls = 0
+# Telemetry for allowed_directory feature
+allowed_directory_requests_with_custom = 0
+allowed_directory_requests_with_default = 0
+allowed_directory_validation_passed = 0
+allowed_directory_validation_failed = 0
 rate_limit_windows: Dict[str, deque[float]] = defaultdict(deque)
 rate_limit_lock = __import__("asyncio").Lock()
 
@@ -326,8 +347,10 @@ async def _run_agent_request(
     prompt_profile: str,
     *,
     system_prompt: Optional[str] = None,
+    event_callback: Optional[Any] = None,
 ) -> ChatResponse:
     global chat_requests_succeeded, chat_requests_failed, total_tool_calls
+    global allowed_directory_requests_with_custom, allowed_directory_requests_with_default
 
     if (
         agent_loop is None
@@ -374,13 +397,30 @@ async def _run_agent_request(
             used_default=(request.allowed_directory is None),
         )
 
-        response, state = await agent_loop.run(
-            user_message=request.message,
-            llm_adapter=llm_adapter,
-            mcp_orchestrator=mcp_orchestrator,
-            tool_registry=tool_registry,
-            system_prompt=system_prompt,
-        )
+        # Track allowed_directory telemetry
+        if request.allowed_directory:
+            allowed_directory_requests_with_custom += 1
+        else:
+            allowed_directory_requests_with_default += 1
+
+        try:
+            response, state = await agent_loop.run(
+                user_message=request.message,
+                llm_adapter=llm_adapter,
+                mcp_orchestrator=mcp_orchestrator,
+                tool_registry=tool_registry,
+                system_prompt=system_prompt,
+                event_callback=event_callback,
+            )
+        except TypeError:
+            # Compatibility fallback for older loop implementations in tests.
+            response, state = await agent_loop.run(
+                user_message=request.message,
+                llm_adapter=llm_adapter,
+                mcp_orchestrator=mcp_orchestrator,
+                tool_registry=tool_registry,
+                system_prompt=system_prompt,
+            )
 
         if conversation_store is not None:
             tool_events: list[dict[str, Any]] = []
@@ -481,6 +521,8 @@ async def startup():
         max_tool_calls_per_turn=config.agent_loop.max_tool_calls_per_turn,
         enable_tool_use=config.agent_loop.enable_tool_use,
         enable_thinking=config.agent_loop.enable_thinking,
+        tool_timeout_seconds=config.mcp.tool_timeout_seconds,
+        max_tool_call_retries=config.mcp.max_tool_call_retries,
     )
     
     # Initialize MCP servers (single default or configured multi-server set).
@@ -609,17 +651,39 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
 
     async def event_stream():
         set_request_id(request_id)
-        try:
-            yield f"data: {json.dumps({'request_id': request_id})}\n\n"
+        progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def _on_progress(event: dict[str, Any]) -> None:
+            await progress_queue.put(event)
+
+        async def _run_with_progress() -> ChatResponse:
             selected_profile, system_prompt = _build_request_system_prompt(request, auth_context.is_admin)
             _log_event("chat.prompt_profile.selected", profile=selected_profile)
-            result = await _run_agent_request(
+            return await _run_agent_request(
                 request,
                 request_id,
                 conversation_id,
                 selected_profile,
                 system_prompt=system_prompt,
+                event_callback=_on_progress,
             )
+
+        try:
+            yield f"data: {json.dumps({'request_id': request_id})}\n\n"
+
+            run_task = asyncio.create_task(_run_with_progress())
+            while not run_task.done():
+                try:
+                    event = await asyncio.wait_for(progress_queue.get(), timeout=0.15)
+                    yield f"data: {json.dumps({'event': event}, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+
+            while not progress_queue.empty():
+                event = progress_queue.get_nowait()
+                yield f"data: {json.dumps({'event': event}, ensure_ascii=False)}\n\n"
+
+            result = await run_task
             for chunk in _chunk_text(result.response):
                 yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
@@ -709,6 +773,80 @@ async def list_tools(http_request: Request) -> ToolsResponse:
     )
 
 
+@app.post("/validate-directory", response_model=ValidateDirectoryResponse)
+async def validate_directory(req: ValidateDirectoryRequest, http_request: Request) -> ValidateDirectoryResponse:
+    """
+    Validate that a directory path exists and is accessible by the MCP server.
+    
+    Used by frontend to verify directory selection before sending to orchestrator.
+    """
+    await _enforce_rate_limit(http_request)
+    _authenticate_request(http_request)
+    
+    if not req.path or not req.path.strip():
+        return ValidateDirectoryResponse(
+            ok=False,
+            path="",
+            error="Path cannot be empty",
+            message="Please provide a directory path.",
+        )
+    
+    try:
+        path = Path(req.path).expanduser().resolve()
+        
+        if not path.exists():
+            return ValidateDirectoryResponse(
+                ok=False,
+                path=req.path,
+                error="Path does not exist",
+                message=f"Directory not found: {req.path}",
+            )
+        
+        if not path.is_dir():
+            return ValidateDirectoryResponse(
+                ok=False,
+                path=req.path,
+                error="Path is not a directory",
+                message=f"Path exists but is not a directory: {req.path}",
+            )
+        
+        # Verify path is readable
+        try:
+            list(path.iterdir())
+        except PermissionError:
+            return ValidateDirectoryResponse(
+                ok=False,
+                path=req.path,
+                error="Permission denied",
+                message=f"No permission to access: {req.path}",
+            )
+        
+        _log_event(
+            "directory.validated",
+            path=str(path),
+            status="ok",
+        )
+        
+        return ValidateDirectoryResponse(
+            ok=True,
+            path=str(path),
+            message=f"Directory is valid and accessible: {path.name or path}",
+        )
+    
+    except Exception as exc:
+        _log_event(
+            "directory.validation.failed",
+            path=req.path,
+            error=str(exc),
+        )
+        return ValidateDirectoryResponse(
+            ok=False,
+            path=req.path,
+            error=f"Validation error: {str(exc)}",
+            message="Failed to validate directory path.",
+        )
+
+
 @app.get("/conversations", response_model=ConversationsResponse)
 async def list_conversations(http_request: Request) -> ConversationsResponse:
     if conversation_store is None:
@@ -749,6 +887,8 @@ async def metrics(http_request: Request) -> MetricsResponse:
         chat_requests_failed=chat_requests_failed,
         total_tool_calls=total_tool_calls,
         active_mcp_servers=len(mcp_orchestrator.get_server_status()) if mcp_orchestrator else 0,
+        allowed_directory_custom=allowed_directory_requests_with_custom,
+        allowed_directory_default=allowed_directory_requests_with_default,
     )
 
 
