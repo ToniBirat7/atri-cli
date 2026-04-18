@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from tarbar_cli.main import _mcp_list_tools, _mcp_status, _mcp_refresh
+from tarbar_cli.main import _mcp_list_tools, _mcp_status, _mcp_refresh, _mcp_reconnect, _mcp_deferred
 
 
 def test_mcp_list_tools_formats_output(monkeypatch):
@@ -160,4 +160,91 @@ def test_mcp_refresh_handles_partial_failure(monkeypatch):
     output = "\n".join(output_lines)
     assert "partial_failure" in output
     assert "10" in output
+
+
+def test_mcp_reconnect_success(monkeypatch):
+    """Test successful MCP server reconnection."""
+    mock_client = Mock()
+    mock_client.request_json.return_value = {
+        "status": "reconnected",
+        "success": True,
+        "reason": None,
+    }
+
+    output_lines = []
+
+    def mock_print(*args, **kwargs):
+        output_lines.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", mock_print)
+    _mcp_reconnect(mock_client, "filesystem")
+
+    output = "\n".join(output_lines)
+    assert "reconnected" in output or "Successfully" in output
+    mock_client.request_json.assert_called_once_with("POST", "/mcp/reconnect", {"server": "filesystem"})
+
+
+def test_mcp_reconnect_failure(monkeypatch):
+    """Test failed MCP server reconnection."""
+    mock_client = Mock()
+    mock_client.request_json.return_value = {
+        "status": "failed",
+        "success": False,
+        "reason": "Max retry attempts exceeded",
+    }
+
+    output_lines = []
+
+    def mock_print(*args, **kwargs):
+        output_lines.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", mock_print)
+    _mcp_reconnect(mock_client, "shell")
+
+    output = "\n".join(output_lines)
+    assert "Failed" in output or "failed" in output
+
+
+def test_mcp_deferred_enable(monkeypatch):
+    """Test enabling deferred discovery."""
+    mock_client = Mock()
+    mock_client.request_json.return_value = {
+        "status": "configured",
+        "enabled": True,
+    }
+
+    output_lines = []
+
+    def mock_print(*args, **kwargs):
+        output_lines.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", mock_print)
+    _mcp_deferred(mock_client, "filesystem", True)
+
+    output = "\n".join(output_lines)
+    assert "configured" in output
+    assert "filesystem" in output
+    mock_client.request_json.assert_called_once_with(
+        "POST", "/mcp/deferred-discovery", {"server": "filesystem", "enabled": True}
+    )
+
+
+def test_mcp_deferred_disable(monkeypatch):
+    """Test disabling deferred discovery."""
+    mock_client = Mock()
+    mock_client.request_json.return_value = {
+        "status": "configured",
+        "enabled": False,
+    }
+
+    output_lines = []
+
+    def mock_print(*args, **kwargs):
+        output_lines.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", mock_print)
+    _mcp_deferred(mock_client, "shell", False)
+
+    output = "\n".join(output_lines)
+    assert "shell" in output
 

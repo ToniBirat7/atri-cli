@@ -60,11 +60,22 @@ class MCPOrchestrator:
     
     Phase 1: Single server support.
     Phase 4: Multi-server support with tool namespacing.
+    Phase 5: Reconnection/backoff and deferred tool discovery.
     """
 
     def __init__(self):
         self._servers: Dict[str, Any] = {}  # server_name -> client
         self._server_configs: Dict[str, MCPServerConfig] = {}
+        # Phase 5: Resilience tracking
+        self._server_failures: Dict[str, int] = {}  # server_name -> failure count
+        self._server_last_retry: Dict[str, float] = {}  # server_name -> timestamp
+        self._deferred_discovery: Dict[str, bool] = {}  # server_name -> deferred flag
+        self._deferred_tools_cache: Dict[str, List[Dict[str, Any]]] = {}  # server_name -> tools
+        # Configuration
+        self.MAX_TOOLS_BEFORE_DEFERRED = 50  # Defer if > 50 tools
+        self.MAX_RETRY_ATTEMPTS = 5
+        self.INITIAL_BACKOFF_SECONDS = 1
+        self.MAX_BACKOFF_SECONDS = 60
 
     def _try_load_local_module(self, config: MCPServerConfig) -> Optional[Any]:
         """Load local MCP Python module for in-process tool execution fallback."""
@@ -320,12 +331,84 @@ class MCPOrchestrator:
                 results[server_name] = 0
         return results
 
+    def _calculate_backoff_delay(self, server_name: str) -> float:
+        """Calculate exponential backoff delay for a server."""
+        attempts = self._server_failures.get(server_name, 0)
+        if attempts >= self.MAX_RETRY_ATTEMPTS:
+            return self.MAX_BACKOFF_SECONDS
+        delay = self.INITIAL_BACKOFF_SECONDS * (2 ** attempts)
+        return min(delay, self.MAX_BACKOFF_SECONDS)
+
+    async def reconnect_server(self, server_name: str) -> bool:
+        """
+        Attempt to reconnect to a failed MCP server with exponential backoff.
+        
+        Returns:
+            True if reconnection succeeded, False otherwise
+        """
+        if server_name not in self._server_configs:
+            logger.error(f"Server {server_name} not in configs")
+            return False
+
+        attempts = self._server_failures.get(server_name, 0)
+        if attempts >= self.MAX_RETRY_ATTEMPTS:
+            logger.error(f"Server {server_name} exceeded max retry attempts ({self.MAX_RETRY_ATTEMPTS})")
+            return False
+
+        try:
+            config = self._server_configs[server_name]
+            await self.initialize_server(config)
+            self._server_failures[server_name] = 0  # Reset on success
+            logger.info(f"Successfully reconnected to server {server_name}")
+            return True
+        except Exception as e:
+            self._server_failures[server_name] = attempts + 1
+            logger.error(f"Reconnection attempt {attempts + 1} for {server_name} failed: {e}")
+            return False
+
+    def should_defer_discovery(self, tool_count: int) -> bool:
+        """Check if tool discovery should be deferred based on tool count threshold."""
+        return tool_count > self.MAX_TOOLS_BEFORE_DEFERRED
+
+    async def set_deferred_discovery(self, server_name: str, deferred: bool) -> None:
+        """Enable or disable deferred tool discovery for a server."""
+        self._deferred_discovery[server_name] = deferred
+        if not deferred and server_name in self._deferred_tools_cache:
+            # Clear cache when deferral is disabled
+            del self._deferred_tools_cache[server_name]
+        logger.info(f"Deferred discovery for {server_name} set to {deferred}")
+
+    async def discover_tools_lazy(
+        self, server_name: str, tool_registry: 'ToolRegistry'
+    ) -> List[Dict[str, Any]]:
+        """
+        Discover tools with deferred loading for large schemas.
+        If deferred, register a stub and load on-demand.
+        """
+        if server_name in self._deferred_tools_cache:
+            return self._deferred_tools_cache[server_name]
+
+        tools = await self.discover_tools(server_name)
+        
+        if self.should_defer_discovery(len(tools)):
+            self._deferred_discovery[server_name] = True
+            # Cache discovered tools for lazy loading
+            self._deferred_tools_cache[server_name] = tools
+            logger.info(f"Deferring discovery for {server_name} ({len(tools)} tools > {self.MAX_TOOLS_BEFORE_DEFERRED})")
+            # Return stub indicating deferred state
+            return [{"name": f"__{server_name}_deferred__", "description": "Tools deferred for performance"}]
+        
+        return tools
+
     def get_server_status(self) -> Dict[str, Any]:
-        """Get status of all managed MCP servers."""
+        """Get status of all managed MCP servers, including resilience info."""
         return {
             server_name: {
                 "status": server_info.get("status", "unknown"),
                 "mode": server_info.get("mode", "unknown"),
+                "failures": self._server_failures.get(server_name, 0),
+                "max_retry_attempts": self.MAX_RETRY_ATTEMPTS,
+                "deferred_discovery": self._deferred_discovery.get(server_name, False),
             }
             for server_name, server_info in self._servers.items()
         }

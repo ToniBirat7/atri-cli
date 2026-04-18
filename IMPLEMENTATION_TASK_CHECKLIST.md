@@ -45,8 +45,8 @@ Status legend:
 
 - [x] Add MCP status/list commands in CLI
 - [x] Add dynamic tool list refresh support
-- [ ] Add reconnection/backoff handling for remote MCP servers
-- [ ] Add deferred tool discovery toggle and thresholds
+- [x] Add reconnection/backoff handling for remote MCP servers
+- [x] Add deferred tool discovery toggle and thresholds
 
 ## Increment 5: Worktrees and parallel flows
 

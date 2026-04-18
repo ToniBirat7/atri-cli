@@ -1,4 +1,4 @@
-# Tarbar CLI (Increment 1)
+# Tarbar CLI (Increment 1-4)
 
 Terminal client for Tarbar_AI using the same orchestrator backend as the web app.
 
@@ -10,8 +10,10 @@ Terminal client for Tarbar_AI using the same orchestrator backend as the web app
 - Permission evaluation command for incremental mode/rule testing
 - Runtime permission mode via `--permission-mode` and interactive `/mode`
 - Protected-path write safety prompts in interactive mode
-- MCP server inspection: `mcp tools` and `mcp status` commands
-- Shared backend endpoints (`/chat`, `/chat/stream`, `/conversations`, `/conversations/{id}`, `/conversations/{id}/resume`, `/conversations/{id}/fork`, `/tools`, `/health`)
+- MCP server inspection: `mcp tools`, `mcp status`, `mcp refresh`
+- MCP server resilience: `mcp reconnect` with exponential backoff
+- MCP deferred tool discovery: `mcp deferred` for large tool schemas
+- Shared backend endpoints (`/chat`, `/chat/stream`, `/conversations`, `/conversations/{id}`, `/conversations/{id}/resume`, `/conversations/{id}/fork`, `/tools`, `/tools/refresh`, `/health`, `/mcp/reconnect`, `/mcp/deferred-discovery`)
 
 ## Run
 
@@ -48,6 +50,9 @@ python -m tarbar_cli.main permissions check --tool-call "Bash(git push origin ma
 python -m tarbar_cli.main mcp tools
 python -m tarbar_cli.main mcp status
 python -m tarbar_cli.main mcp refresh
+python -m tarbar_cli.main mcp reconnect filesystem
+python -m tarbar_cli.main mcp deferred shell --enable
+python -m tarbar_cli.main mcp deferred filesystem --disable
 python -m tarbar_cli.main --permission-mode plan
 python -m tarbar_cli.main
 ```

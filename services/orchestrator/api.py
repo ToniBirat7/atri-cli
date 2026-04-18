@@ -122,6 +122,30 @@ class ToolRefreshResponse(BaseModel):
     total_discovered: int = Field(..., description="Total new tools discovered")
 
 
+class MCPReconnectRequest(BaseModel):
+    """Request to reconnect to a failed MCP server."""
+    server: str = Field(..., description="Server name to reconnect to")
+
+
+class MCPReconnectResponse(BaseModel):
+    """Response from MCP server reconnection."""
+    status: str = Field(..., description="Reconnection attempt status")
+    success: bool = Field(..., description="Whether reconnection succeeded")
+    reason: Optional[str] = Field(None, description="Failure reason if not successful")
+
+
+class MCPDeferredDiscoveryRequest(BaseModel):
+    """Request to manage deferred tool discovery."""
+    server: str = Field(..., description="Server name")
+    enabled: bool = Field(..., description="Enable or disable deferred discovery")
+
+
+class MCPDeferredDiscoveryResponse(BaseModel):
+    """Response from deferred discovery configuration."""
+    status: str = Field(..., description="Configuration status")
+    enabled: bool = Field(..., description="Current deferred discovery state")
+
+
 class MetricsResponse(BaseModel):
     """Runtime metrics for the orchestrator."""
     uptime_seconds: float
@@ -861,6 +885,55 @@ async def refresh_tools(http_request: Request) -> ToolRefreshResponse:
         servers=refresh_results,
         total_discovered=total_discovered,
     )
+
+
+@app.post("/mcp/reconnect", response_model=MCPReconnectResponse)
+async def reconnect_mcp_server(req: MCPReconnectRequest, http_request: Request) -> MCPReconnectResponse:
+    """Attempt to reconnect to a failed MCP server with exponential backoff."""
+    if mcp_orchestrator is None:
+        raise HTTPException(status_code=500, detail="MCP orchestrator not initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+    _authenticate_request(http_request)
+    
+    try:
+        success = await mcp_orchestrator.reconnect_server(req.server)
+        _log_event("mcp.reconnect_attempted", server=req.server, success=success)
+        
+        return MCPReconnectResponse(
+            status="reconnected" if success else "failed",
+            success=success,
+            reason=None if success else "Reconnection failed or max attempts exceeded"
+        )
+    except Exception as e:
+        logger.error(f"Reconnection error for {req.server}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/mcp/deferred-discovery", response_model=MCPDeferredDiscoveryResponse)
+async def configure_deferred_discovery(
+    req: MCPDeferredDiscoveryRequest, http_request: Request
+) -> MCPDeferredDiscoveryResponse:
+    """Enable or disable deferred tool discovery for an MCP server."""
+    if mcp_orchestrator is None:
+        raise HTTPException(status_code=500, detail="MCP orchestrator not initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+    _authenticate_request(http_request)
+    
+    try:
+        await mcp_orchestrator.set_deferred_discovery(req.server, req.enabled)
+        _log_event("mcp.deferred_discovery_configured", server=req.server, enabled=req.enabled)
+        
+        return MCPDeferredDiscoveryResponse(
+            status="configured",
+            enabled=req.enabled
+        )
+    except Exception as e:
+        logger.error(f"Deferred discovery config error for {req.server}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/validate-directory", response_model=ValidateDirectoryResponse)

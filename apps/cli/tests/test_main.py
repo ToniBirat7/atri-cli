@@ -93,4 +93,17 @@ def test_parser_supports_mcp_commands():
     args = parser.parse_args(["mcp", "refresh"])
     assert args.command == "mcp"
     assert args.mcp_command == "refresh"
+    
+    # Test mcp reconnect command
+    args = parser.parse_args(["mcp", "reconnect", "filesystem"])
+    assert args.command == "mcp"
+    assert args.mcp_command == "reconnect"
+    assert args.server == "filesystem"
+    
+    # Test mcp deferred command
+    args = parser.parse_args(["mcp", "deferred", "shell", "--enable"])
+    assert args.command == "mcp"
+    assert args.mcp_command == "deferred"
+    assert args.server == "shell"
+    assert args.enable is True
 

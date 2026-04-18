@@ -393,6 +393,27 @@ def _mcp_refresh(client: OrchestratorClient) -> None:
             print(f"  {server_name}: {count} tools")
 
 
+def _mcp_reconnect(client: OrchestratorClient, server_name: str) -> None:
+    response = client.request_json("POST", "/mcp/reconnect", {"server": server_name})
+    print(f"Reconnection status: {response.get('status')}")
+    if response.get("success"):
+        print(f"Successfully reconnected to {server_name}")
+    else:
+        print(f"Failed to reconnect to {server_name}")
+        print(f"Reason: {response.get('reason')}")
+
+
+def _mcp_deferred(client: OrchestratorClient, server_name: str, enabled: bool) -> None:
+    response = client.request_json(
+        "POST",
+        "/mcp/deferred-discovery",
+        {"server": server_name, "enabled": enabled}
+    )
+    print(f"Deferred discovery status: {response.get('status')}")
+    print(f"Server: {server_name}")
+    print(f"Enabled: {response.get('enabled')}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Tarbar CLI")
     parser.add_argument("--prompt", help="Prompt for print/interactive mode")
@@ -461,6 +482,14 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_sub.add_parser("tools", help="List available MCP tools")
     mcp_sub.add_parser("status", help="Show MCP server health and status")
     mcp_sub.add_parser("refresh", help="Refresh tool discovery from all MCP servers")
+    
+    reconnect = mcp_sub.add_parser("reconnect", help="Reconnect to a failed MCP server")
+    reconnect.add_argument("server", help="Server name to reconnect to")
+    
+    deferred = mcp_sub.add_parser("deferred", help="Manage deferred tool discovery")
+    deferred.add_argument("server", help="Server name")
+    deferred.add_argument("--enable", action="store_true", help="Enable deferred discovery")
+    deferred.add_argument("--disable", action="store_true", help="Disable deferred discovery")
 
     return parser
 
@@ -519,6 +548,15 @@ def main() -> None:
             return
         if args.mcp_command == "refresh":
             _mcp_refresh(client)
+            return
+        if args.mcp_command == "reconnect":
+            _mcp_reconnect(client, args.server)
+            return
+        if args.mcp_command == "deferred":
+            if not args.enable and not args.disable:
+                print("Error: specify --enable or --disable")
+                raise SystemExit(1)
+            _mcp_deferred(client, args.server, args.enable)
             return
 
     if args.print_mode:
