@@ -301,6 +301,25 @@ class MCPOrchestrator:
         for server_name in list(self._servers.keys()):
             await self.shutdown_server(server_name)
 
+    async def refresh_tools(self, tool_registry: 'ToolRegistry') -> Dict[str, int]:
+        """
+        Refresh tool discovery from all active MCP servers.
+        
+        Returns:
+            Dict mapping server_name -> count of discovered tools
+        """
+        results = {}
+        for server_name in self._servers.keys():
+            try:
+                tools = await self.discover_tools(server_name)
+                tool_registry.register_tools_from_mcp_discovery(tools, server_name)
+                results[server_name] = len(tools)
+                logger.info(f"Refreshed {len(tools)} tools from {server_name}")
+            except Exception as e:
+                logger.error(f"Failed to refresh tools from {server_name}: {e}")
+                results[server_name] = 0
+        return results
+
     def get_server_status(self) -> Dict[str, Any]:
         """Get status of all managed MCP servers."""
         return {

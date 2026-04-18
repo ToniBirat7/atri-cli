@@ -355,6 +355,7 @@ class AgentLoop:
                                     "tool_name": tool_call.tool_name,
                                     "routed_server": routed_server,
                                     "routed_tool_name": routed_tool_name,
+                                    "tool_input": validated_input,
                                 },
                             )
 

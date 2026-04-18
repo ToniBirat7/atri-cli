@@ -28,23 +28,23 @@ Status legend:
 ## Increment 2: Mode + permissions parity
 
 - [x] Add backend permission evaluation endpoint contract
-- [ ] Implement CLI `--permission-mode` and `/mode`
+- [x] Implement CLI `--permission-mode` and `/mode`
 - [x] Add CLI `/permissions` helper command
-- [ ] Implement protected-path write prompts in CLI renderer
+- [x] Implement protected-path write prompts in CLI renderer
 - [x] Add deterministic tests for deny > ask > allow behavior
 
 ## Increment 3: Search capability via tool calls
 
-- [ ] Add provider abstraction (`search_adapter.py`)
-- [ ] Implement `search_web` tool
-- [ ] Implement `fetch_url` tool
-- [ ] Add citation-enforcement prompt policy for web-grounded answers
-- [ ] Add integration tests for search grounding
+- [x] Add provider abstraction (`search_adapter.py`)
+- [x] Implement `search_web` tool
+- [x] Implement `fetch_url` tool
+- [x] Add citation-enforcement prompt policy for web-grounded answers
+- [x] Add integration tests for search grounding
 
 ## Increment 4: MCP scaling features
 
-- [ ] Add MCP status/list commands in CLI
-- [ ] Add dynamic tool list refresh support
+- [x] Add MCP status/list commands in CLI
+- [x] Add dynamic tool list refresh support
 - [ ] Add reconnection/backoff handling for remote MCP servers
 - [ ] Add deferred tool discovery toggle and thresholds
 

@@ -8,7 +8,10 @@ Terminal client for Tarbar_AI using the same orchestrator backend as the web app
 - Print mode (`-p`) for one-off requests
 - Session commands: list, resume, fork
 - Permission evaluation command for incremental mode/rule testing
-- Shared backend endpoints (`/chat`, `/chat/stream`, `/conversations`, `/conversations/{id}`, `/conversations/{id}/resume`, `/conversations/{id}/fork`)
+- Runtime permission mode via `--permission-mode` and interactive `/mode`
+- Protected-path write safety prompts in interactive mode
+- MCP server inspection: `mcp tools` and `mcp status` commands
+- Shared backend endpoints (`/chat`, `/chat/stream`, `/conversations`, `/conversations/{id}`, `/conversations/{id}/resume`, `/conversations/{id}/fork`, `/tools`, `/health`)
 
 ## Run
 
@@ -42,11 +45,21 @@ python -m tarbar_cli.main sessions list
 python -m tarbar_cli.main sessions show conv_abc123
 python -m tarbar_cli.main sessions fork conv_abc123
 python -m tarbar_cli.main permissions check --tool-call "Bash(git push origin main)" --ask "Bash(git push*)"
+python -m tarbar_cli.main mcp tools
+python -m tarbar_cli.main mcp status
+python -m tarbar_cli.main mcp refresh
+python -m tarbar_cli.main --permission-mode plan
 python -m tarbar_cli.main
 ```
+
+Interactive helpers:
+
+- `/mode` shows the current permission mode and rule counts
+- `/mode <default|plan|dontAsk|bypassPermissions|acceptEdits>` updates mode for the current CLI session
 
 Environment variables:
 
 - `TARBAR_API_URL` (default: `http://127.0.0.1:8001`)
 - `TARBAR_API_KEY` (optional API key)
 - `TARBAR_ALLOWED_DIRECTORY` (optional workspace root)
+- `TARBAR_PERMISSION_MODE` (default permission mode for runtime checks)

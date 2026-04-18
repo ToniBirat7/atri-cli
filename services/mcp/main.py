@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .search_adapter import fetch_web_content, search_web_results
+except ImportError:
+    from search_adapter import fetch_web_content, search_web_results
+
+try:
     from fastmcp import FastMCP
 except ImportError:
     class FastMCP:  # type: ignore[override]
@@ -84,6 +89,8 @@ INITIAL_ALLOWED_DIRS = _load_allowed_dirs()
 MAX_READ_BYTES = int(os.getenv("MCP_MAX_READ_BYTES", "1048576"))  # 1 MiB
 MAX_WRITE_BYTES = int(os.getenv("MCP_MAX_WRITE_BYTES", "1048576"))  # 1 MiB
 MAX_SEARCH_RESULTS = int(os.getenv("MCP_MAX_SEARCH_RESULTS", "200"))
+MAX_WEB_SEARCH_RESULTS = int(os.getenv("MCP_MAX_WEB_SEARCH_RESULTS", "8"))
+MAX_FETCH_CHARS = int(os.getenv("MCP_MAX_FETCH_CHARS", "12000"))
 ALLOW_HIDDEN = os.getenv("MCP_ALLOW_HIDDEN", "false").lower() == "true"
 
 
@@ -572,6 +579,27 @@ def search_files(
 
 
 @mcp.tool
+def search_web(query: str, provider: str = "auto", max_results: int = 5) -> dict[str, Any]:
+    """Search the web with a provider-neutral adapter."""
+    if max_results < 1:
+        raise ValueError("max_results must be >= 1")
+    max_results = min(max_results, MAX_WEB_SEARCH_RESULTS)
+
+    return search_web_results(
+        query=query,
+        provider=provider,
+        max_results=max_results,
+        brave_api_key=os.getenv("BRAVE_SEARCH_API_KEY"),
+    )
+
+
+@mcp.tool
+def fetch_url(url: str, max_chars: int = MAX_FETCH_CHARS) -> dict[str, Any]:
+    """Fetch a webpage and extract readable text content."""
+    return fetch_web_content(url=url, max_chars=max_chars)
+
+
+@mcp.tool
 def server_status() -> dict[str, Any]:
     """Operational status and safety config summary for auditing/debugging."""
     return {
@@ -580,6 +608,8 @@ def server_status() -> dict[str, Any]:
         "max_read_bytes": MAX_READ_BYTES,
         "max_write_bytes": MAX_WRITE_BYTES,
         "max_search_results": MAX_SEARCH_RESULTS,
+        "max_web_search_results": MAX_WEB_SEARCH_RESULTS,
+        "max_fetch_chars": MAX_FETCH_CHARS,
         "allow_hidden": ALLOW_HIDDEN,
     }
 

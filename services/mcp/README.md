@@ -27,6 +27,9 @@ Set environment variables before launching:
 - `MCP_MAX_READ_BYTES` (default: `1048576`)
 - `MCP_MAX_WRITE_BYTES` (default: `1048576`)
 - `MCP_MAX_SEARCH_RESULTS` (default: `200`)
+- `MCP_MAX_WEB_SEARCH_RESULTS` (default: `8`)
+- `MCP_MAX_FETCH_CHARS` (default: `12000`)
+- `BRAVE_SEARCH_API_KEY` (optional, enables Brave provider)
 - `MCP_ALLOW_HIDDEN` (default: `false`)
 - `MCP_LOG_LEVEL` (default: `INFO`)
 
@@ -51,6 +54,8 @@ Read-only tools:
 - `read_media_file_base64`
 - `get_file_info`
 - `search_files`
+- `search_web`
+- `fetch_url`
 - `server_status`
 
 Write/destructive tools:

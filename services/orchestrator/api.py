@@ -115,6 +115,13 @@ class ToolsResponse(BaseModel):
     total: int
 
 
+class ToolRefreshResponse(BaseModel):
+    """Response from tool discovery refresh."""
+    status: str = Field(..., description="Refresh status (success, partial_failure, failure)")
+    servers: Dict[str, int] = Field(..., description="Server name -> tool count discovered")
+    total_discovered: int = Field(..., description="Total new tools discovered")
+
+
 class MetricsResponse(BaseModel):
     """Runtime metrics for the orchestrator."""
     uptime_seconds: float
@@ -827,6 +834,32 @@ async def list_tools(http_request: Request) -> ToolsResponse:
             for tool in tools
         ],
         total=len(tools),
+    )
+
+
+@app.post("/tools/refresh", response_model=ToolRefreshResponse)
+async def refresh_tools(http_request: Request) -> ToolRefreshResponse:
+    """Refresh tool discovery from all active MCP servers."""
+    if tool_registry is None or mcp_orchestrator is None:
+        raise HTTPException(status_code=500, detail="Orchestrator not fully initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+    _authenticate_request(http_request)
+    
+    # Clear existing tools and rediscover
+    tool_registry.clear()
+    refresh_results = await mcp_orchestrator.refresh_tools(tool_registry)
+    
+    total_discovered = sum(refresh_results.values())
+    status = "success" if all(count > 0 for count in refresh_results.values()) else "partial_failure"
+    
+    _log_event("tools.refreshed", servers=len(refresh_results), total=total_discovered)
+    
+    return ToolRefreshResponse(
+        status=status,
+        servers=refresh_results,
+        total_discovered=total_discovered,
     )
 
 

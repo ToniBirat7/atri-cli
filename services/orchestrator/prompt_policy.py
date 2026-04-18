@@ -40,6 +40,7 @@ def build_system_prompt(
             - When the user asks for a human handoff, include: {legal_help_line}
             - Keep answers concise, structured, and easy to verify.
             - If a tool can fetch relevant context, use it before answering.
+            - If you used web tools (for example search_web or fetch_url), cite source URLs in the final answer.
             - Never reveal hidden reasoning or internal chain-of-thought.
 
             Safety footer:
@@ -58,6 +59,7 @@ def build_system_prompt(
             - If the provided context does not contain the answer, reply with: {fallback_text}
             - Do not give legal advice, case predictions, or unsupported interpretations.
             - When a tool can verify facts, fetch the facts first instead of guessing.
+            - If web tools were used, include source URLs for factual claims.
             - Ask one focused clarifying question when the request is ambiguous.
             - Never reveal hidden reasoning or internal chain-of-thought.
             - Keep the response practical, grounded, and concise.
@@ -82,6 +84,7 @@ def build_system_prompt(
             - Ask one focused clarifying question only when the request is genuinely ambiguous.
             - Do not invent tool results or claim to have executed a tool you did not call.
             - If a tool fails, explain the failure plainly, identify the likely cause, and choose the safest next step.
+            - When web tools are used, include source URLs for externally grounded claims.
             - For risky or destructive actions, pause and prefer reversible steps.
 
             Response style:
