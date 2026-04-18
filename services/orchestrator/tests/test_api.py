@@ -30,6 +30,7 @@ class _FakeConfig:
             rate_limit_per_minute=0,
             allow_unauthenticated_health=True,
         )
+        self.hooks = SimpleNamespace(enabled=True)
 
 
 class _FakeLLMAdapter:
@@ -217,6 +218,50 @@ async def test_chat_loads_prior_messages_for_existing_conversation(monkeypatch):
     assert fake_loop.prior_messages_seen is not None
     assert len(fake_loop.prior_messages_seen) == 2
     assert fake_loop.prior_messages_seen[0]["content"] == "old question"
+
+
+@pytest.mark.asyncio
+async def test_permissions_evaluate_emits_permission_denied_hook(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    api.hook_manager._history.clear()
+
+    response = await api.permissions_evaluate(
+        api.PermissionsEvaluateRequest(
+            tool_call="Bash(git push origin main)",
+            mode="dontAsk",
+            allow=[],
+            ask=[],
+            deny=[],
+        ),
+        _FakeRequest(path="/permissions/evaluate"),
+    )
+
+    assert response.action == "deny"
+    events = api.hook_manager.recent_events(5)
+    assert any(event["event"] == "PermissionDenied" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_chat_emits_pre_and_post_tool_hooks(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
+    monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+    monkeypatch.setattr(api, "conversation_store", _FakeConversationStore())
+    monkeypatch.setattr(api, "agent_loop", _FakeAgentLoop())
+    api.hook_manager._history.clear()
+
+    async def noop_execute_tool(server_name, tool_name, tool_input):
+        return "ok"
+
+    monkeypatch.setattr(api.mcp_orchestrator, "execute_tool", noop_execute_tool)
+
+    await api.chat(api.ChatRequest(message="hello"), _FakeRequest())
+
+    events = api.hook_manager.recent_events(10)
+    event_names = [event["event"] for event in events]
+    assert "PreToolUse" in event_names
+    assert "PostToolUse" in event_names
 
 
 @pytest.mark.asyncio

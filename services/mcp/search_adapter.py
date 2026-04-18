@@ -25,6 +25,31 @@ class SearchResult:
     provider: str
 
 
+def _normalize_http_url(raw_url: str) -> str:
+    text = (raw_url or "").strip()
+    if not text:
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    if not parsed.netloc:
+        return ""
+    cleaned = parsed._replace(fragment="")
+    return urllib.parse.urlunparse(cleaned)
+
+
+def _build_citations(results: list[SearchResult]) -> list[str]:
+    citations: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        normalized = _normalize_http_url(result.url)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        citations.append(normalized)
+    return citations
+
+
 class SearchProvider(Protocol):
     name: str
 
@@ -218,19 +243,31 @@ def search_web_results(
 
     adapter = get_search_provider(provider, brave_api_key=brave_api_key)
     results = adapter.query(text, max_results=max_results)
+    sanitized_results = [
+        SearchResult(
+            title=item.title,
+            url=_normalize_http_url(item.url),
+            snippet=item.snippet,
+            provider=item.provider,
+        )
+        for item in results
+    ]
+    sanitized_results = [item for item in sanitized_results if item.url and item.title]
+    citations = _build_citations(sanitized_results)
 
     return {
         "query": text,
         "provider": adapter.name,
-        "results": [asdict(item) for item in results],
-        "count": len(results),
+        "results": [asdict(item) for item in sanitized_results],
+        "count": len(sanitized_results),
+        "citations": citations,
     }
 
 
 def fetch_web_content(*, url: str, max_chars: int = 12000) -> dict[str, object]:
-    normalized_url = (url or "").strip()
+    normalized_url = _normalize_http_url(url)
     if not normalized_url:
-        raise ValueError("url cannot be empty")
+        raise ValueError("url cannot be empty and must be a valid http(s) URL")
 
     parsed = urllib.parse.urlparse(normalized_url)
     if parsed.scheme not in {"http", "https"}:
@@ -263,4 +300,6 @@ def fetch_web_content(*, url: str, max_chars: int = 12000) -> dict[str, object]:
         "content": text,
         "content_type": content_type,
         "truncated": len(text) >= safe_max_chars,
+        "citation": normalized_url,
+        "citations": [normalized_url],
     }

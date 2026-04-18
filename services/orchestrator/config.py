@@ -228,6 +228,24 @@ class SecurityConfig(BaseModel):
     )
 
 
+class HookConfig(BaseModel):
+    """Hook framework configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable orchestrator hook events"
+    )
+
+
+class ManagedSettingsConfig(BaseModel):
+    """Paths for configuration scope overlays."""
+
+    user_path: Optional[str] = Field(default=None)
+    project_path: Optional[str] = Field(default=None)
+    local_path: Optional[str] = Field(default=None)
+    managed_path: Optional[str] = Field(default=None)
+
+
 class OrchestratorConfig(BaseModel):
     """Root orchestrator configuration."""
 
@@ -240,6 +258,8 @@ class OrchestratorConfig(BaseModel):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    hooks: HookConfig = Field(default_factory=HookConfig)
+    managed_settings: ManagedSettingsConfig = Field(default_factory=ManagedSettingsConfig)
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR)"
@@ -261,7 +281,7 @@ class OrchestratorConfig(BaseModel):
 
         mcp_servers = _safe_parse_json_array(os.getenv("MCP_SERVERS_JSON", "[]"))
 
-        return cls(
+        base_config = cls(
             llm=LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
                 api_key=os.getenv("LLM_API_KEY"),
@@ -317,9 +337,39 @@ class OrchestratorConfig(BaseModel):
                 rate_limit_per_minute=int(os.getenv("ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", "0")),
                 allow_unauthenticated_health=os.getenv("ORCHESTRATOR_ALLOW_UNAUTHENTICATED_HEALTH", "true").lower() == "true",
             ),
+            hooks=HookConfig(
+                enabled=os.getenv("ORCHESTRATOR_HOOKS_ENABLED", "true").lower() == "true",
+            ),
+            managed_settings=ManagedSettingsConfig(
+                user_path=os.getenv("ORCHESTRATOR_SETTINGS_USER_PATH"),
+                project_path=os.getenv("ORCHESTRATOR_SETTINGS_PROJECT_PATH"),
+                local_path=os.getenv("ORCHESTRATOR_SETTINGS_LOCAL_PATH"),
+                managed_path=os.getenv("ORCHESTRATOR_MANAGED_SETTINGS_PATH"),
+            ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             enable_observability=os.getenv("ENABLE_OBSERVABILITY", "true").lower() == "true",
         )
+
+        try:
+            from .settings_layer import apply_overlays_from_files
+        except ImportError:
+            from settings_layer import apply_overlays_from_files
+
+        model_dump = getattr(base_config, "model_dump", None)
+        base_data = model_dump() if callable(model_dump) else base_config.dict()  # type: ignore[attr-defined]
+
+        overlay_paths: dict[str, Path] = {}
+        if base_config.managed_settings.user_path:
+            overlay_paths["user"] = Path(base_config.managed_settings.user_path)
+        if base_config.managed_settings.project_path:
+            overlay_paths["project"] = Path(base_config.managed_settings.project_path)
+        if base_config.managed_settings.local_path:
+            overlay_paths["local"] = Path(base_config.managed_settings.local_path)
+        if base_config.managed_settings.managed_path:
+            overlay_paths["managed"] = Path(base_config.managed_settings.managed_path)
+
+        merged = apply_overlays_from_files(base_data, overlay_paths)
+        return cls(**merged)
 
 
 def _safe_parse_json_array(raw_value: str) -> List[dict]:

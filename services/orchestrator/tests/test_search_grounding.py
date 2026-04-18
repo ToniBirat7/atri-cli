@@ -95,6 +95,50 @@ def test_get_search_provider_raises_on_unknown():
         get_search_provider("unknown-provider")
 
 
+def test_search_web_results_includes_citations(monkeypatch):
+    """Ensure search results include normalized citation URLs."""
+    from search_adapter import SearchResult, search_web_results
+
+    class _FakeProvider:
+        name = "fake"
+
+        def query(self, query: str, max_results: int):
+            return [
+                SearchResult("A", "https://example.com/a#frag", "x", "fake"),
+                SearchResult("B", "https://example.com/b", "y", "fake"),
+            ]
+
+    monkeypatch.setattr("search_adapter.get_search_provider", lambda provider, brave_api_key=None: _FakeProvider())
+
+    payload = search_web_results(query="hello", provider="auto", max_results=5)
+    assert payload["count"] == 2
+    assert payload["citations"] == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_fetch_web_content_includes_citation_fields(monkeypatch):
+    """Ensure fetched content carries citation fields for downstream grounding."""
+    from search_adapter import fetch_web_content
+
+    class _FakeResponse:
+        def __init__(self):
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def read(self):
+            return b"<html><title>T</title><body>Hello world</body></html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=20: _FakeResponse())
+    payload = fetch_web_content(url="https://example.com/page#frag", max_chars=1000)
+
+    assert payload["citation"] == "https://example.com/page"
+    assert payload["citations"] == ["https://example.com/page"]
+
+
 def test_citation_prompt_language_in_policies(monkeypatch):
     """Verify citation-grounding language is in system prompts."""
     from orchestrator import prompt_policy

@@ -44,6 +44,7 @@ try:
         stream_event_request_started,
         stream_event_session_started,
     )
+    from .hooks import HookManager
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
@@ -66,6 +67,7 @@ except ImportError:
         stream_event_request_started,
         stream_event_session_started,
     )
+    from hooks import HookManager
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +292,7 @@ agent_loop: Optional[AgentLoop] = None
 conversation_store: Optional[OrchestratorDatabase] = None
 request_authenticator: Optional[RequestAuthenticator] = None
 rate_limiter: Optional[DistributedRateLimiter] = None
+hook_manager = HookManager(enabled=True)
 service_started_at = time.monotonic()
 chat_requests_total = 0
 chat_requests_succeeded = 0
@@ -517,10 +520,26 @@ async def _run_agent_request(
             except Exception:
                 pass
 
+        hook_manager.emit(
+            "PreToolUse",
+            {
+                "tool_name": selected_tool,
+                "server": selected_server,
+                "input": {"path": selected_allowed_directory},
+            },
+        )
         await mcp_orchestrator.execute_tool(
             server_name=selected_server,
             tool_name=selected_tool,
             tool_input={"path": selected_allowed_directory},
+        )
+        hook_manager.emit(
+            "PostToolUse",
+            {
+                "tool_name": selected_tool,
+                "server": selected_server,
+                "status": "ok",
+            },
         )
         _log_event(
             "chat.allowed_directory.set",
@@ -596,6 +615,14 @@ async def _run_agent_request(
         chat_requests_failed += 1
         raise
     except Exception as e:
+        hook_manager.emit(
+            "Notification",
+            {
+                "level": "error",
+                "event": "chat.request.failed",
+                "error": str(e),
+            },
+        )
         chat_requests_failed += 1
         logger.error(
             json.dumps(
@@ -615,11 +642,12 @@ async def _run_agent_request(
 @app.on_event("startup")
 async def startup():
     """Initialize orchestrator on server startup."""
-    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter
+    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter, hook_manager
     
     _log_event("orchestrator.startup.begin")
     
     config = OrchestratorConfig.from_env()
+    hook_manager = HookManager(enabled=getattr(getattr(config, "hooks", None), "enabled", True))
     conversation_store = OrchestratorDatabase(
         config.database.url,
         enabled=config.database.enable_persistence,
@@ -1300,6 +1328,16 @@ async def permissions_evaluate(
         ask_rules=request.ask,
         deny_rules=request.deny,
     )
+
+    if decision.action == "deny":
+        hook_manager.emit(
+            "PermissionDenied",
+            {
+                "tool_call": request.tool_call,
+                "mode": request.mode,
+                "reason": decision.reason,
+            },
+        )
 
     return PermissionsEvaluateResponse(action=decision.action, reason=decision.reason)
 
