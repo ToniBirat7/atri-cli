@@ -42,6 +42,35 @@ class OrchestratorClient:
                 parsed = {"detail": body}
             raise RuntimeError(f"HTTP {exc.code}: {parsed}") from exc
 
+    @staticmethod
+    def _normalize_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalize typed SSE envelopes into the CLI's expected keys."""
+        event_type = payload.get("type")
+        if not isinstance(event_type, str):
+            return payload
+
+        if event_type == "request_started":
+            request_id = payload.get("request_id")
+            return {"request_id": request_id} if request_id else payload
+
+        if event_type == "session_started":
+            conversation_id = payload.get("conversation_id")
+            return {"conversation_id": conversation_id} if conversation_id else payload
+
+        if event_type == "agent_event":
+            event = payload.get("event")
+            return {"event": event} if isinstance(event, dict) else payload
+
+        if event_type == "assistant_delta":
+            content = payload.get("content")
+            return {"content": content} if isinstance(content, str) else payload
+
+        if event_type == "error":
+            error = payload.get("error")
+            return {"error": error} if isinstance(error, str) else payload
+
+        return payload
+
     def stream_chat(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         req = urllib.request.Request(
             self._build_url("/chat/stream"),
@@ -61,7 +90,11 @@ class OrchestratorClient:
                         yield {"done": True}
                         break
                     try:
-                        yield json.loads(data)
+                        parsed = json.loads(data)
+                        if isinstance(parsed, dict):
+                            yield self._normalize_stream_payload(parsed)
+                        else:
+                            yield {"malformed": data}
                     except Exception:
                         yield {"malformed": data}
         except urllib.error.HTTPError as exc:
