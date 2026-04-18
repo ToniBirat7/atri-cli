@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from .client import OrchestratorClient
+from .telemetry import SessionTelemetry
 
 
 PERMISSION_MODES = {
@@ -180,9 +183,12 @@ def _print_stream_response(
     permission_state: PermissionState,
     allowed_directory: Optional[str],
     interactive: bool,
+    telemetry: Optional[SessionTelemetry] = None,
+    stream_json: bool = False,
 ) -> str:
     chunks: list[str] = []
     active_conversation_id = payload.get("conversation_id")
+    turn_number = 1
 
     for event in client.stream_chat(payload):
         if event.get("done"):
@@ -198,19 +204,51 @@ def _print_stream_response(
             continue
         if "conversation_id" in event:
             active_conversation_id = event["conversation_id"]
+            if telemetry:
+                telemetry.conversation_id = active_conversation_id
             continue
         if "error" in event:
+            if telemetry:
+                telemetry.errors.append(event["error"])
             raise RuntimeError(event["error"])
         if "content" in event:
             text = event["content"]
-            print(text, end="", flush=True)
+            if stream_json:
+                print(json.dumps({"type": "content", "text": text}))
+            else:
+                print(text, end="", flush=True)
             chunks.append(text)
             continue
 
-    print()
-    if active_conversation_id:
-        print(f"\n[conversation_id] {active_conversation_id}")
-    return "".join(chunks)
+    response_text = "".join(chunks)
+    
+    # Record telemetry
+    if telemetry:
+        user_message = payload.get("message", "")
+        telemetry.add_turn(
+            turn_number=turn_number,
+            user_message=user_message,
+            assistant_response=response_text,
+            tool_calls=[],  # Tool calls would be tracked from events
+            duration_seconds=0.0,
+        )
+        exceeded, reason = telemetry.check_budget_limits()
+        if exceeded:
+            if stream_json:
+                print(json.dumps({"type": "error", "message": reason}))
+            else:
+                print(f"\n[error] {reason}")
+            raise SystemExit(1)
+
+    if not stream_json:
+        print()
+        if active_conversation_id:
+            print(f"\n[conversation_id] {active_conversation_id}")
+    else:
+        if active_conversation_id:
+            print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
+    
+    return response_text
 
 
 def _run_print_mode(
@@ -219,6 +257,8 @@ def _run_print_mode(
     conversation_id: Optional[str],
     allowed_directory: Optional[str],
     permission_state: PermissionState,
+    telemetry: Optional[SessionTelemetry] = None,
+    stream_json: bool = False,
 ) -> None:
     payload = _build_payload(prompt, conversation_id, allowed_directory)
     _print_stream_response(
@@ -227,6 +267,8 @@ def _run_print_mode(
         permission_state=permission_state,
         allowed_directory=allowed_directory,
         interactive=False,
+        telemetry=telemetry,
+        stream_json=stream_json,
     )
 
 
@@ -235,6 +277,8 @@ def _run_interactive(
     conversation_id: Optional[str],
     allowed_directory: Optional[str],
     permission_state: PermissionState,
+    telemetry: Optional[SessionTelemetry] = None,
+    stream_json: bool = False,
 ) -> None:
     print("Tarbar CLI interactive mode. Type /exit to quit.")
     print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
@@ -242,6 +286,7 @@ def _run_interactive(
         print(f"Resuming conversation: {conversation_id}")
 
     active_conversation_id = conversation_id
+    turn_number = 0
 
     while True:
         try:
@@ -258,6 +303,8 @@ def _run_interactive(
         if _handle_interactive_local_command(user_input, permission_state):
             continue
 
+        turn_number += 1
+        turn_start = time.time()
         payload = _build_payload(user_input, active_conversation_id, allowed_directory)
 
         chunks: list[str] = []
@@ -275,19 +322,48 @@ def _run_interactive(
                 continue
             if "conversation_id" in event:
                 active_conversation_id = event["conversation_id"]
+                if telemetry:
+                    telemetry.conversation_id = active_conversation_id
                 continue
             if "error" in event:
+                if telemetry:
+                    telemetry.errors.append(event["error"])
                 print(f"\n[error] {event['error']}")
                 break
             if "content" in event:
                 text = event["content"]
-                print(text, end="", flush=True)
+                if stream_json:
+                    print(json.dumps({"type": "content", "text": text}))
+                else:
+                    print(text, end="", flush=True)
                 chunks.append(text)
 
-        if chunks:
+        response_text = "".join(chunks)
+        turn_duration = time.time() - turn_start
+
+        if telemetry:
+            telemetry.add_turn(
+                turn_number=turn_number,
+                user_message=user_input,
+                assistant_response=response_text,
+                tool_calls=[],
+                duration_seconds=turn_duration,
+            )
+            exceeded, reason = telemetry.check_budget_limits()
+            if exceeded:
+                if stream_json:
+                    print(json.dumps({"type": "error", "message": reason}))
+                else:
+                    print(f"\n[error] {reason}")
+                return
+
+        if not stream_json:
             print()
-        if active_conversation_id:
-            print(f"[conversation_id] {active_conversation_id}")
+            if active_conversation_id:
+                print(f"[conversation_id] {active_conversation_id}")
+        else:
+            if active_conversation_id:
+                print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
 
 
 def _sessions_list(client: OrchestratorClient) -> None:
@@ -492,6 +568,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Initial deny rule (repeatable)",
     )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Maximum number of turns allowed in this session",
+    )
+    parser.add_argument(
+        "--max-budget-usd",
+        type=float,
+        default=None,
+        help="Maximum budget in USD for this session",
+    )
+    parser.add_argument(
+        "--stream-json",
+        action="store_true",
+        help="Output streaming results as JSON for CI pipelines",
+    )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        help="Print telemetry summary after session completes",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -560,6 +658,14 @@ def main() -> None:
         deny=list(args.deny_rule),
     )
 
+    # Initialize telemetry for chat sessions
+    telemetry = SessionTelemetry(
+        mode="print" if args.print_mode or args.prompt else "interactive",
+        permission_mode=args.permission_mode,
+        max_turns=args.max_turns,
+        max_budget_usd=args.max_budget_usd,
+    )
+
     if args.command == "sessions":
         if args.sessions_command == "list":
             _sessions_list(client)
@@ -623,7 +729,11 @@ def main() -> None:
             conversation_id=args.resume,
             allowed_directory=args.allowed_directory,
             permission_state=permission_state,
+            telemetry=telemetry,
+            stream_json=args.stream_json,
         )
+        if args.telemetry:
+            print("\n" + telemetry.summary())
         return
 
     if args.prompt:
@@ -633,7 +743,11 @@ def main() -> None:
             conversation_id=args.resume,
             allowed_directory=args.allowed_directory,
             permission_state=permission_state,
+            telemetry=telemetry,
+            stream_json=args.stream_json,
         )
+        if args.telemetry:
+            print("\n" + telemetry.summary())
         return
 
     _run_interactive(
@@ -641,7 +755,11 @@ def main() -> None:
         conversation_id=args.resume,
         allowed_directory=args.allowed_directory,
         permission_state=permission_state,
+        telemetry=telemetry,
+        stream_json=args.stream_json,
     )
+    if args.telemetry:
+        print("\n" + telemetry.summary())
 
 
 if __name__ == "__main__":

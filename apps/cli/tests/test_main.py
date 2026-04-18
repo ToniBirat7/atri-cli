@@ -60,7 +60,7 @@ def test_main_prompt_convenience_mode_dispatches_print(monkeypatch):
             self.base_url = base_url
             self.api_key = api_key
 
-    def _fake_run_print_mode(client, prompt, conversation_id, allowed_directory, permission_state):
+    def _fake_run_print_mode(client, prompt, conversation_id, allowed_directory, permission_state, telemetry=None, stream_json=False):
         captured["prompt"] = prompt
         captured["conversation_id"] = conversation_id
         captured["allowed_directory"] = allowed_directory
