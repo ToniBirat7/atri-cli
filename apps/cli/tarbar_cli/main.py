@@ -414,6 +414,48 @@ def _mcp_deferred(client: OrchestratorClient, server_name: str, enabled: bool) -
     print(f"Enabled: {response.get('enabled')}")
 
 
+def _worktrees_list() -> None:
+    """List available worktrees."""
+    try:
+        from orchestrator.worktree_manager import WorktreeManager
+        manager = WorktreeManager()
+        worktrees = manager.list_worktrees()
+        if not worktrees:
+            print("No worktrees found.")
+            return
+        
+        print(f"Active worktrees ({len(worktrees)}):\n")
+        for wt in worktrees:
+            status = "dirty" if wt.is_dirty else "clean"
+            print(f"  {wt.path}")
+            print(f"    Conversation: {wt.conversation_id}")
+            print(f"    Branch: {wt.branch}")
+            print(f"    Status: {status}")
+            print()
+    except Exception as e:
+        print(f"Error listing worktrees: {e}")
+
+
+def _worktrees_clean() -> None:
+    """Clean up dirty worktrees."""
+    try:
+        from orchestrator.worktree_manager import WorktreeManager
+        manager = WorktreeManager()
+        dirty = manager.cleanup_dirty_worktrees(auto_clean=False)
+        if not dirty:
+            print("No dirty worktrees found.")
+            return
+        
+        print(f"Dirty worktrees ({len(dirty)}):")
+        for name, needs_cleanup in dirty.items():
+            if needs_cleanup:
+                print(f"  {name}: cleaned")
+            else:
+                print(f"  {name}: requires manual cleanup")
+    except Exception as e:
+        print(f"Error cleaning worktrees: {e}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Tarbar CLI")
     parser.add_argument("--prompt", help="Prompt for print/interactive mode")
@@ -491,13 +533,18 @@ def _build_parser() -> argparse.ArgumentParser:
     deferred.add_argument("--enable", action="store_true", help="Enable deferred discovery")
     deferred.add_argument("--disable", action="store_true", help="Disable deferred discovery")
 
+    worktrees = subparsers.add_parser("worktrees", help="Manage git worktrees for parallel work")
+    worktrees_sub = worktrees.add_subparsers(dest="worktrees_command", required=True)
+    worktrees_sub.add_parser("list", help="List active worktrees")
+    worktrees_sub.add_parser("clean", help="Clean up dirty worktrees")
+
     return parser
 
 
 def main() -> None:
     parser = _build_parser()
     argv = sys.argv[1:]
-    known_commands = {"sessions", "permissions", "mcp"}
+    known_commands = {"sessions", "permissions", "mcp", "worktrees"}
     if argv and not argv[0].startswith("-") and argv[0] not in known_commands:
         # Convenience mode: `tarbar "prompt"` maps to print mode.
         prompt = " ".join(argv)
@@ -557,6 +604,14 @@ def main() -> None:
                 print("Error: specify --enable or --disable")
                 raise SystemExit(1)
             _mcp_deferred(client, args.server, args.enable)
+            return
+
+    if args.command == "worktrees":
+        if args.worktrees_command == "list":
+            _worktrees_list()
+            return
+        if args.worktrees_command == "clean":
+            _worktrees_clean()
             return
 
     if args.print_mode:

@@ -107,3 +107,17 @@ def test_parser_supports_mcp_commands():
     assert args.server == "shell"
     assert args.enable is True
 
+
+def test_parser_supports_worktree_commands():
+    parser = cli_main._build_parser()
+    
+    # Test worktree list command
+    args = parser.parse_args(["worktrees", "list"])
+    assert args.command == "worktrees"
+    assert args.worktrees_command == "list"
+    
+    # Test worktree clean command
+    args = parser.parse_args(["worktrees", "clean"])
+    assert args.command == "worktrees"
+    assert args.worktrees_command == "clean"
+
