@@ -1,9 +1,18 @@
 """Integration tests for observability features (telemetry, budgets, stream-json)."""
 
+import json
 import pytest
 from tarbar_cli.telemetry import SessionTelemetry
-from tarbar_cli.main import _build_parser
+from tarbar_cli.main import _build_parser, _print_stream_response, PermissionState
 import sys
+
+
+class _FakeStreamClient:
+    def stream_chat(self, payload):
+        yield {"conversation_id": "conv_test"}
+        yield {"content": "Hello "}
+        yield {"content": "world"}
+        yield {"done": True}
 
 
 def test_parser_supports_max_turns_argument():
@@ -25,6 +34,13 @@ def test_parser_supports_stream_json_flag():
     parser = _build_parser()
     args = parser.parse_args(["--stream-json", "--print", "--prompt", "test"])
     assert args.stream_json is True
+
+
+def test_parser_supports_output_format_flag():
+    """Test parser accepts --output-format flag."""
+    parser = _build_parser()
+    args = parser.parse_args(["--output-format", "json", "--print", "--prompt", "test"])
+    assert args.output_format == "json"
 
 
 def test_parser_supports_telemetry_flag():
@@ -116,5 +132,27 @@ def test_parser_no_default_budget_values():
     args = parser.parse_args(["--print", "--prompt", "test"])
     assert args.max_turns is None
     assert args.max_budget_usd is None
+    assert args.output_format is None
     assert args.stream_json is False
     assert args.telemetry is False
+
+
+def test_json_output_format_emits_structured_result(capsys):
+    """Test JSON output format emits a structured result envelope."""
+    telemetry = SessionTelemetry()
+    result = _print_stream_response(
+        _FakeStreamClient(),
+        {"message": "hello", "conversation_id": "conv_test"},
+        permission_state=PermissionState(),
+        allowed_directory=None,
+        interactive=False,
+        telemetry=telemetry,
+        output_format="json",
+    )
+
+    assert result == "Hello world"
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["type"] == "result"
+    assert payload["response"] == "Hello world"
+    assert payload["conversation_id"] == "conv_test"
+    assert len(payload["telemetry"]["turns"]) == 1

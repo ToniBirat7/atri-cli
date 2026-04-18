@@ -60,11 +60,12 @@ def test_main_prompt_convenience_mode_dispatches_print(monkeypatch):
             self.base_url = base_url
             self.api_key = api_key
 
-    def _fake_run_print_mode(client, prompt, conversation_id, allowed_directory, permission_state, telemetry=None, stream_json=False):
+    def _fake_run_print_mode(client, prompt, conversation_id, allowed_directory, permission_state, telemetry=None, output_format="text", stream_json=False):
         captured["prompt"] = prompt
         captured["conversation_id"] = conversation_id
         captured["allowed_directory"] = allowed_directory
         captured["permission_mode"] = permission_state.mode
+        captured["output_format"] = output_format
 
     monkeypatch.setattr(cli_main, "OrchestratorClient", _FakeClient)
     monkeypatch.setattr(cli_main, "_run_print_mode", _fake_run_print_mode)

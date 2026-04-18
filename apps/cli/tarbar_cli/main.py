@@ -184,12 +184,14 @@ def _print_stream_response(
     allowed_directory: Optional[str],
     interactive: bool,
     telemetry: Optional[SessionTelemetry] = None,
+    output_format: str = "text",
     stream_json: bool = False,
 ) -> str:
     chunks: list[str] = []
     active_conversation_id = payload.get("conversation_id")
     turn_number = 1
 
+    effective_output_format = "stream-json" if stream_json else output_format
     for event in client.stream_chat(payload):
         if event.get("done"):
             break
@@ -213,9 +215,9 @@ def _print_stream_response(
             raise RuntimeError(event["error"])
         if "content" in event:
             text = event["content"]
-            if stream_json:
+            if effective_output_format == "stream-json":
                 print(json.dumps({"type": "content", "text": text}))
-            else:
+            elif effective_output_format == "text":
                 print(text, end="", flush=True)
             chunks.append(text)
             continue
@@ -234,19 +236,30 @@ def _print_stream_response(
         )
         exceeded, reason = telemetry.check_budget_limits()
         if exceeded:
-            if stream_json:
+            if effective_output_format in {"stream-json", "json"}:
                 print(json.dumps({"type": "error", "message": reason}))
             else:
                 print(f"\n[error] {reason}")
             raise SystemExit(1)
 
-    if not stream_json:
+    if effective_output_format == "json":
+        result = {
+            "type": "result",
+            "response": response_text,
+            "turn": turn_number,
+        }
+        if active_conversation_id:
+            result["conversation_id"] = active_conversation_id
+        if telemetry:
+            result["telemetry"] = telemetry.to_dict()
+        print(json.dumps(result))
+    elif effective_output_format == "stream-json":
+        if active_conversation_id:
+            print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
+    else:
         print()
         if active_conversation_id:
             print(f"\n[conversation_id] {active_conversation_id}")
-    else:
-        if active_conversation_id:
-            print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
     
     return response_text
 
@@ -258,6 +271,7 @@ def _run_print_mode(
     allowed_directory: Optional[str],
     permission_state: PermissionState,
     telemetry: Optional[SessionTelemetry] = None,
+    output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
     payload = _build_payload(prompt, conversation_id, allowed_directory)
@@ -268,6 +282,7 @@ def _run_print_mode(
         allowed_directory=allowed_directory,
         interactive=False,
         telemetry=telemetry,
+        output_format=output_format,
         stream_json=stream_json,
     )
 
@@ -278,6 +293,7 @@ def _run_interactive(
     allowed_directory: Optional[str],
     permission_state: PermissionState,
     telemetry: Optional[SessionTelemetry] = None,
+    output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
     print("Tarbar CLI interactive mode. Type /exit to quit.")
@@ -287,6 +303,7 @@ def _run_interactive(
 
     active_conversation_id = conversation_id
     turn_number = 0
+    effective_output_format = "stream-json" if stream_json else output_format
 
     while True:
         try:
@@ -332,10 +349,12 @@ def _run_interactive(
                 break
             if "content" in event:
                 text = event["content"]
-                if stream_json:
+                if effective_output_format == "stream-json":
                     print(json.dumps({"type": "content", "text": text}))
-                else:
+                elif effective_output_format == "text":
                     print(text, end="", flush=True)
+                else:
+                    pass
                 chunks.append(text)
 
         response_text = "".join(chunks)
@@ -351,19 +370,30 @@ def _run_interactive(
             )
             exceeded, reason = telemetry.check_budget_limits()
             if exceeded:
-                if stream_json:
+                if effective_output_format in {"stream-json", "json"}:
                     print(json.dumps({"type": "error", "message": reason}))
                 else:
                     print(f"\n[error] {reason}")
                 return
 
-        if not stream_json:
+        if effective_output_format == "json":
+            result = {
+                "type": "turn_result",
+                "turn": turn_number,
+                "response": response_text,
+            }
+            if active_conversation_id:
+                result["conversation_id"] = active_conversation_id
+            if telemetry:
+                result["telemetry"] = telemetry.to_dict()
+            print(json.dumps(result))
+        elif effective_output_format == "stream-json":
+            if active_conversation_id:
+                print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
+        else:
             print()
             if active_conversation_id:
                 print(f"[conversation_id] {active_conversation_id}")
-        else:
-            if active_conversation_id:
-                print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
 
 
 def _sessions_list(client: OrchestratorClient) -> None:
@@ -581,6 +611,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum budget in USD for this session",
     )
     parser.add_argument(
+        "--output-format",
+        choices=("text", "json", "stream-json"),
+        default=None,
+        help="Output format for session results",
+    )
+    parser.add_argument(
         "--stream-json",
         action="store_true",
         help="Output streaming results as JSON for CI pipelines",
@@ -665,6 +701,7 @@ def main() -> None:
         max_turns=args.max_turns,
         max_budget_usd=args.max_budget_usd,
     )
+    output_format = args.output_format or ("stream-json" if args.stream_json else "text")
 
     if args.command == "sessions":
         if args.sessions_command == "list":
@@ -730,10 +767,12 @@ def main() -> None:
             allowed_directory=args.allowed_directory,
             permission_state=permission_state,
             telemetry=telemetry,
+            output_format=output_format,
             stream_json=args.stream_json,
         )
         if args.telemetry:
-            print("\n" + telemetry.summary())
+            if output_format != "json":
+                print("\n" + telemetry.summary())
         return
 
     if args.prompt:
@@ -744,10 +783,12 @@ def main() -> None:
             allowed_directory=args.allowed_directory,
             permission_state=permission_state,
             telemetry=telemetry,
+            output_format=output_format,
             stream_json=args.stream_json,
         )
         if args.telemetry:
-            print("\n" + telemetry.summary())
+            if output_format != "json":
+                print("\n" + telemetry.summary())
         return
 
     _run_interactive(
@@ -756,10 +797,12 @@ def main() -> None:
         allowed_directory=args.allowed_directory,
         permission_state=permission_state,
         telemetry=telemetry,
+        output_format=output_format,
         stream_json=args.stream_json,
     )
     if args.telemetry:
-        print("\n" + telemetry.summary())
+        if output_format != "json":
+            print("\n" + telemetry.summary())
 
 
 if __name__ == "__main__":
