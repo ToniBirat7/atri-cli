@@ -160,6 +160,7 @@ class AgentLoop:
         mcp_orchestrator: "MCPOrchestrator",  # type: ignore
         tool_registry: "ToolRegistry",  # type: ignore
         system_prompt: Optional[str] = None,
+        prior_messages: Optional[List[Dict[str, str]]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> Tuple[str, AgentState]:
         """
@@ -178,11 +179,13 @@ class AgentLoop:
         self.state = AgentState()
         self.state.status = "running"
         selected_system_prompt = system_prompt or self._build_system_prompt()
+        historical_messages = prior_messages or []
         self.state.messages = [
             {
                 "role": "system",
                 "content": selected_system_prompt,
             },
+            *historical_messages,
             {
                 "role": "user",
                 "content": user_message,

@@ -63,16 +63,68 @@ class _FakeToolRegistry:
         return []
 
 
+class _FakeConversationStore:
+    def __init__(self):
+        self.history_by_conversation = {
+            "conv_existing": [
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+            ]
+        }
+
+    async def ensure_conversation(self, conversation_id, prompt_profile):
+        return None
+
+    async def record_turn(self, **kwargs):
+        return None
+
+    async def list_conversations(self):
+        return []
+
+    async def build_chat_history_messages(self, conversation_id, max_turns=10):
+        return self.history_by_conversation.get(conversation_id, [])
+
+    async def get_conversation(self, conversation_id):
+        if conversation_id != "conv_existing":
+            return None
+        return SimpleNamespace(
+            conversation_id="conv_existing",
+            prompt_profile="general-purpose",
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+
+    async def list_turns(self, conversation_id, limit=100):
+        if conversation_id != "conv_existing":
+            return []
+        return [
+            SimpleNamespace(
+                turn_index=1,
+                user_message="old question",
+                assistant_response="old answer",
+                status="completed",
+                total_tool_calls=0,
+                model="test-model",
+                created_at="2026-01-01T00:00:00Z",
+            )
+        ]
+
+    async def fork_conversation(self, source_conversation_id, target_conversation_id):
+        return source_conversation_id == "conv_existing"
+
+
 class _FakeAgentLoop:
     def __init__(self):
         self.max_turns = 10
         self.last_system_prompt = None
+        self.prior_messages_seen = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, event_callback=None):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, prior_messages=None, event_callback=None):
         self.last_system_prompt = system_prompt
+        self.prior_messages_seen = prior_messages
         if event_callback is not None:
             await event_callback({"type": "turn_start", "turn": 1})
-        return "ok", type("State", (), {"turn": 1, "total_tool_calls": 1, "status": "completed"})()
+        return "ok", type("State", (), {"turn": 1, "total_tool_calls": 1, "status": "completed", "turns_history": []})()
 
 
 class _FakeAgentLoopLong:
@@ -80,12 +132,12 @@ class _FakeAgentLoopLong:
         self.max_turns = 10
         self.last_system_prompt = None
 
-    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, event_callback=None):
+    async def run(self, user_message, llm_adapter, mcp_orchestrator, tool_registry, system_prompt=None, prior_messages=None, event_callback=None):
         self.last_system_prompt = system_prompt
         if event_callback is not None:
             await event_callback({"type": "turn_start", "turn": 1})
             await event_callback({"type": "tool_call_start", "turn": 1, "tool_name": "list_directory"})
-        return "abcdefghij" * 40, type("State", (), {"turn": 2, "total_tool_calls": 2, "status": "completed"})()
+        return "abcdefghij" * 40, type("State", (), {"turn": 2, "total_tool_calls": 2, "status": "completed", "turns_history": []})()
 
 
 class _FakeRequest:
@@ -119,6 +171,7 @@ async def test_chat_returns_request_id_and_default_directory(monkeypatch):
     monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
     monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
     monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+    monkeypatch.setattr(api, "conversation_store", _FakeConversationStore())
     fake_loop = _FakeAgentLoop()
     monkeypatch.setattr(api, "agent_loop", fake_loop)
 
@@ -139,6 +192,31 @@ async def test_chat_returns_request_id_and_default_directory(monkeypatch):
     assert captured["tool_name"] == "set_allowed_directory"
     assert captured["tool_input"]["path"]
     assert fake_loop.last_system_prompt is not None
+
+
+@pytest.mark.asyncio
+async def test_chat_loads_prior_messages_for_existing_conversation(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "llm_adapter", _FakeLLMAdapter())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestrator())
+    monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+    monkeypatch.setattr(api, "conversation_store", _FakeConversationStore())
+    fake_loop = _FakeAgentLoop()
+    monkeypatch.setattr(api, "agent_loop", fake_loop)
+
+    async def noop_execute_tool(server_name, tool_name, tool_input):
+        return "ok"
+
+    monkeypatch.setattr(api.mcp_orchestrator, "execute_tool", noop_execute_tool)
+
+    await api.chat(
+        api.ChatRequest(message="continue", conversation_id="conv_existing"),
+        _FakeRequest(),
+    )
+
+    assert fake_loop.prior_messages_seen is not None
+    assert len(fake_loop.prior_messages_seen) == 2
+    assert fake_loop.prior_messages_seen[0]["content"] == "old question"
 
 
 @pytest.mark.asyncio
@@ -302,3 +380,47 @@ async def test_ready_and_live(monkeypatch):
 
     assert (await api.live())["status"] == "alive"
     assert (await api.ready())["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_details(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "conversation_store", _FakeConversationStore())
+
+    response = await api.get_conversation("conv_existing", _FakeRequest(path="/conversations/conv_existing"))
+    assert response.conversation.conversation_id == "conv_existing"
+    assert len(response.turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_and_fork_conversation(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "conversation_store", _FakeConversationStore())
+
+    resumed = await api.resume_conversation("conv_existing", _FakeRequest(path="/conversations/conv_existing/resume"))
+    assert resumed.turn_count == 1
+
+    forked = await api.fork_conversation(
+        "conv_existing",
+        api.ConversationForkRequest(new_conversation_id="conv_forked"),
+        _FakeRequest(path="/conversations/conv_existing/fork"),
+    )
+    assert forked.new_conversation_id == "conv_forked"
+
+
+@pytest.mark.asyncio
+async def test_permissions_evaluate_endpoint(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+
+    result = await api.permissions_evaluate(
+        api.PermissionsEvaluateRequest(
+            tool_call="Bash(git push origin main)",
+            mode="default",
+            allow=["Bash(git status*)"],
+            ask=["Bash(git push*)"],
+            deny=[],
+        ),
+        _FakeRequest(path="/permissions/evaluate"),
+    )
+
+    assert result.action == "ask"

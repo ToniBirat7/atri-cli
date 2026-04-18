@@ -34,6 +34,7 @@ try:
     from .prompt_policy import build_system_prompt, normalize_prompt_profile
     from .tool_registry import ToolRegistry
     from .agent_loop import AgentLoop
+    from .permissions import evaluate_permission
     from .logging_context import set_request_id, get_request_id
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
@@ -47,6 +48,7 @@ except ImportError:
     from prompt_policy import build_system_prompt, normalize_prompt_profile
     from tool_registry import ToolRegistry
     from agent_loop import AgentLoop
+    from permissions import evaluate_permission
     from logging_context import set_request_id, get_request_id
 
 logger = logging.getLogger(__name__)
@@ -143,6 +145,52 @@ class ConversationSummary(BaseModel):
     prompt_profile: str
     created_at: str
     updated_at: str
+
+
+class ConversationTurnSummary(BaseModel):
+    turn_index: int
+    user_message: str
+    assistant_response: str
+    status: str
+    total_tool_calls: int
+    model: str
+    created_at: str
+
+
+class ConversationDetailResponse(BaseModel):
+    conversation: ConversationSummary
+    turns: List[ConversationTurnSummary]
+
+
+class ConversationResumeResponse(BaseModel):
+    conversation_id: str
+    prompt_profile: str
+    turn_count: int
+
+
+class ConversationForkRequest(BaseModel):
+    new_conversation_id: Optional[str] = Field(
+        None,
+        description="Optional explicit conversation id for the fork; generated if omitted",
+    )
+
+
+class ConversationForkResponse(BaseModel):
+    source_conversation_id: str
+    new_conversation_id: str
+
+
+class PermissionsEvaluateRequest(BaseModel):
+    tool_call: str = Field(..., description="Tool call expression, e.g. Bash(git status)")
+    mode: str = Field(default="default", description="Permission mode")
+    allow: List[str] = Field(default_factory=list)
+    ask: List[str] = Field(default_factory=list)
+    deny: List[str] = Field(default_factory=list)
+
+
+class PermissionsEvaluateResponse(BaseModel):
+    action: str
+    reason: str
 
 
 class ConversationsResponse(BaseModel):
@@ -377,6 +425,13 @@ async def _run_agent_request(
         if request.max_turns:
             agent_loop.max_turns = request.max_turns
 
+        prior_messages: list[dict[str, str]] = []
+        if conversation_store is not None and request.conversation_id:
+            prior_messages = await conversation_store.build_chat_history_messages(
+                conversation_id=request.conversation_id,
+                max_turns=10,
+            )
+
         selected_allowed_directory = request.allowed_directory or DEFAULT_ALLOWED_DIRECTORY
         selected_server = "local-mcp"
         selected_tool = "set_allowed_directory"
@@ -410,6 +465,7 @@ async def _run_agent_request(
                 mcp_orchestrator=mcp_orchestrator,
                 tool_registry=tool_registry,
                 system_prompt=system_prompt,
+                prior_messages=prior_messages,
                 event_callback=event_callback,
             )
         except TypeError:
@@ -424,7 +480,7 @@ async def _run_agent_request(
 
         if conversation_store is not None:
             tool_events: list[dict[str, Any]] = []
-            for turn in state.turns_history:
+            for turn in getattr(state, "turns_history", []):
                 tool_events.extend(turn.metadata.get("tool_events", []))
 
             await conversation_store.record_turn(
@@ -670,6 +726,7 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
 
         try:
             yield f"data: {json.dumps({'request_id': request_id})}\n\n"
+            yield f"data: {json.dumps({'conversation_id': conversation_id})}\n\n"
 
             run_task = asyncio.create_task(_run_with_progress())
             while not run_task.done():
@@ -873,6 +930,99 @@ async def list_conversations(http_request: Request) -> ConversationsResponse:
     )
 
 
+@app.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
+async def get_conversation(conversation_id: str, http_request: Request) -> ConversationDetailResponse:
+    if conversation_store is None:
+        raise HTTPException(status_code=500, detail="Conversation store not initialized")
+
+    await _enforce_rate_limit(http_request)
+    auth_context = _authenticate_request(http_request)
+    if config is not None and (config.security.api_key or config.security.admin_api_key or config.auth.jwt_secret):
+        if not auth_context.is_admin:
+            raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conversation = await conversation_store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    turns = await conversation_store.list_turns(conversation_id=conversation_id, limit=500)
+    return ConversationDetailResponse(
+        conversation=ConversationSummary(
+            conversation_id=conversation.conversation_id,
+            prompt_profile=conversation.prompt_profile,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+        ),
+        turns=[
+            ConversationTurnSummary(
+                turn_index=turn.turn_index,
+                user_message=turn.user_message,
+                assistant_response=turn.assistant_response,
+                status=turn.status,
+                total_tool_calls=turn.total_tool_calls,
+                model=turn.model,
+                created_at=turn.created_at,
+            )
+            for turn in turns
+        ],
+    )
+
+
+@app.post("/conversations/{conversation_id}/resume", response_model=ConversationResumeResponse)
+async def resume_conversation(conversation_id: str, http_request: Request) -> ConversationResumeResponse:
+    if conversation_store is None:
+        raise HTTPException(status_code=500, detail="Conversation store not initialized")
+
+    await _enforce_rate_limit(http_request)
+    auth_context = _authenticate_request(http_request)
+    if config is not None and (config.security.api_key or config.security.admin_api_key or config.auth.jwt_secret):
+        if not auth_context.is_admin:
+            raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conversation = await conversation_store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    turns = await conversation_store.list_turns(conversation_id=conversation_id, limit=1_000)
+    return ConversationResumeResponse(
+        conversation_id=conversation.conversation_id,
+        prompt_profile=conversation.prompt_profile,
+        turn_count=len(turns),
+    )
+
+
+@app.post("/conversations/{conversation_id}/fork", response_model=ConversationForkResponse)
+async def fork_conversation(
+    conversation_id: str,
+    request: ConversationForkRequest,
+    http_request: Request,
+) -> ConversationForkResponse:
+    if conversation_store is None:
+        raise HTTPException(status_code=500, detail="Conversation store not initialized")
+
+    await _enforce_rate_limit(http_request)
+    auth_context = _authenticate_request(http_request)
+    if config is not None and (config.security.api_key or config.security.admin_api_key or config.auth.jwt_secret):
+        if not auth_context.is_admin:
+            raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    new_conversation_id = request.new_conversation_id or f"conv_{uuid.uuid4().hex[:12]}"
+    if new_conversation_id == conversation_id:
+        raise HTTPException(status_code=400, detail="Fork id must be different from source conversation id")
+
+    created = await conversation_store.fork_conversation(
+        source_conversation_id=conversation_id,
+        target_conversation_id=new_conversation_id,
+    )
+    if not created:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return ConversationForkResponse(
+        source_conversation_id=conversation_id,
+        new_conversation_id=new_conversation_id,
+    )
+
+
 @app.get("/metrics", response_model=MetricsResponse)
 async def metrics(http_request: Request) -> MetricsResponse:
     """Runtime metrics for the orchestrator."""
@@ -892,6 +1042,25 @@ async def metrics(http_request: Request) -> MetricsResponse:
     )
 
 
+@app.post("/permissions/evaluate", response_model=PermissionsEvaluateResponse)
+async def permissions_evaluate(
+    request: PermissionsEvaluateRequest,
+    http_request: Request,
+) -> PermissionsEvaluateResponse:
+    await _enforce_rate_limit(http_request)
+    _authenticate_request(http_request)
+
+    decision = evaluate_permission(
+        tool_call=request.tool_call,
+        mode=request.mode,
+        allow_rules=request.allow,
+        ask_rules=request.ask,
+        deny_rules=request.deny,
+    )
+
+    return PermissionsEvaluateResponse(action=decision.action, reason=decision.reason)
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -906,6 +1075,10 @@ async def root():
             "GET /ready — Readiness probe",
             "GET /tools — List available tools",
             "GET /conversations — List stored conversations",
+            "GET /conversations/{id} — Conversation details",
+            "POST /conversations/{id}/resume — Validate resumable conversation",
+            "POST /conversations/{id}/fork — Create conversation fork",
+            "POST /permissions/evaluate — Evaluate permission decision",
             "GET /metrics — Runtime metrics",
         ]
     }

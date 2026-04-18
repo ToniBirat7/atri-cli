@@ -1,0 +1,1 @@
+"""Tarbar CLI package."""

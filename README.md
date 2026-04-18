@@ -16,6 +16,7 @@ Tarbar_AI is a local-first agentic AI project that combines:
 ## Repository Structure
 
 - `apps/frontend` - Next.js chat application
+- `apps/cli` - terminal client for orchestrator-backed chat and session workflows
 - `services/mcp` - FastMCP server(s)
 - `runtime/llm/llama.cpp` - local llama.cpp runtime source
 - `docs` - architecture notes, references, and notebooks
@@ -24,6 +25,12 @@ Tarbar_AI is a local-first agentic AI project that combines:
 
 ## Quick Start
 
+Install CLI (Python-first installer):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
+```
+
 1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
 2. Start MCP server from `services/mcp/main.py`.
 3. Start frontend from `apps/frontend`:
@@ -31,6 +38,13 @@ Tarbar_AI is a local-first agentic AI project that combines:
 ```bash
 npm install
 npm run dev
+```
+
+4. Start CLI from `apps/cli`:
+
+```bash
+cd apps/cli
+python -m tarbar_cli.main --help
 ```
 
 ## Notes

@@ -30,6 +30,20 @@ class ConversationRecord:
     updated_at: str
 
 
+@dataclass(slots=True)
+class TurnRecord:
+    id: int
+    conversation_id: str
+    request_id: str
+    turn_index: int
+    user_message: str
+    assistant_response: str
+    status: str
+    total_tool_calls: int
+    model: str
+    created_at: str
+
+
 class OrchestratorDatabase:
     def __init__(self, database_url: str, enabled: bool = True):
         self.database_url = database_url
@@ -398,3 +412,218 @@ class OrchestratorDatabase:
                 ]
 
         return await asyncio.to_thread(_read)
+
+    async def get_conversation(self, conversation_id: str) -> Optional[ConversationRecord]:
+        if not self.enabled:
+            return None
+
+        def _read() -> Optional[ConversationRecord]:
+            if self._use_postgres():
+                with self._connect_postgres() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT conversation_id, prompt_profile, created_at, updated_at
+                            FROM conversations
+                            WHERE conversation_id = %s
+                            """,
+                            (conversation_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row is None:
+                            return None
+                        return ConversationRecord(
+                            conversation_id=row[0],
+                            prompt_profile=row[1],
+                            created_at=row[2],
+                            updated_at=row[3],
+                        )
+
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT conversation_id, prompt_profile, created_at, updated_at
+                    FROM conversations
+                    WHERE conversation_id = ?
+                    """,
+                    (conversation_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                return ConversationRecord(
+                    conversation_id=row["conversation_id"],
+                    prompt_profile=row["prompt_profile"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+
+        return await asyncio.to_thread(_read)
+
+    async def list_turns(self, conversation_id: str, limit: int = 100) -> list[TurnRecord]:
+        if not self.enabled:
+            return []
+
+        def _read() -> list[TurnRecord]:
+            if self._use_postgres():
+                with self._connect_postgres() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT id, conversation_id, request_id, turn_index, user_message,
+                                   assistant_response, status, total_tool_calls, model, created_at
+                            FROM turns
+                            WHERE conversation_id = %s
+                            ORDER BY id ASC
+                            LIMIT %s
+                            """,
+                            (conversation_id, limit),
+                        )
+                        rows = cursor.fetchall()
+                        return [
+                            TurnRecord(
+                                id=row[0],
+                                conversation_id=row[1],
+                                request_id=row[2],
+                                turn_index=row[3],
+                                user_message=row[4],
+                                assistant_response=row[5],
+                                status=row[6],
+                                total_tool_calls=row[7],
+                                model=row[8],
+                                created_at=row[9],
+                            )
+                            for row in rows
+                        ]
+
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, conversation_id, request_id, turn_index, user_message,
+                           assistant_response, status, total_tool_calls, model, created_at
+                    FROM turns
+                    WHERE conversation_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (conversation_id, limit),
+                ).fetchall()
+                return [
+                    TurnRecord(
+                        id=row["id"],
+                        conversation_id=row["conversation_id"],
+                        request_id=row["request_id"],
+                        turn_index=row["turn_index"],
+                        user_message=row["user_message"],
+                        assistant_response=row["assistant_response"],
+                        status=row["status"],
+                        total_tool_calls=row["total_tool_calls"],
+                        model=row["model"],
+                        created_at=row["created_at"],
+                    )
+                    for row in rows
+                ]
+
+        return await asyncio.to_thread(_read)
+
+    async def build_chat_history_messages(self, conversation_id: str, max_turns: int = 10) -> list[dict[str, str]]:
+        if not self.enabled:
+            return []
+
+        turns = await self.list_turns(conversation_id=conversation_id, limit=max_turns)
+        messages: list[dict[str, str]] = []
+        for turn in turns[-max_turns:]:
+            messages.append({"role": "user", "content": turn.user_message})
+            messages.append({"role": "assistant", "content": turn.assistant_response})
+        return messages
+
+    async def fork_conversation(self, source_conversation_id: str, target_conversation_id: str) -> bool:
+        if not self.enabled:
+            return False
+
+        now = self._utc_now()
+
+        def _fork() -> bool:
+            if self._use_postgres():
+                with self._connect_postgres() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT prompt_profile, created_at, updated_at
+                            FROM conversations
+                            WHERE conversation_id = %s
+                            """,
+                            (source_conversation_id,),
+                        )
+                        source = cursor.fetchone()
+                        if source is None:
+                            return False
+
+                        cursor.execute(
+                            """
+                            INSERT INTO conversations (conversation_id, prompt_profile, created_at, updated_at)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (target_conversation_id, source[0], now, now),
+                        )
+
+                        cursor.execute(
+                            """
+                            INSERT INTO turns (
+                                conversation_id, request_id, turn_index, user_message,
+                                assistant_response, status, total_tool_calls, model,
+                                system_prompt, turn_history_json, created_at
+                            )
+                            SELECT %s, request_id, turn_index, user_message,
+                                   assistant_response, status, total_tool_calls, model,
+                                   system_prompt, turn_history_json, created_at
+                            FROM turns
+                            WHERE conversation_id = %s
+                            ORDER BY id ASC
+                            """,
+                            (target_conversation_id, source_conversation_id),
+                        )
+
+                    connection.commit()
+                    return True
+
+            with self._connect() as connection:
+                source = connection.execute(
+                    """
+                    SELECT prompt_profile, created_at, updated_at
+                    FROM conversations
+                    WHERE conversation_id = ?
+                    """,
+                    (source_conversation_id,),
+                ).fetchone()
+                if source is None:
+                    return False
+
+                connection.execute(
+                    """
+                    INSERT INTO conversations (conversation_id, prompt_profile, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (target_conversation_id, source["prompt_profile"], now, now),
+                )
+
+                connection.execute(
+                    """
+                    INSERT INTO turns (
+                        conversation_id, request_id, turn_index, user_message,
+                        assistant_response, status, total_tool_calls, model,
+                        system_prompt, turn_history_json, created_at
+                    )
+                    SELECT ?, request_id, turn_index, user_message,
+                           assistant_response, status, total_tool_calls, model,
+                           system_prompt, turn_history_json, created_at
+                    FROM turns
+                    WHERE conversation_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (target_conversation_id, source_conversation_id),
+                )
+
+                connection.commit()
+                return True
+
+        return await asyncio.to_thread(_fork)

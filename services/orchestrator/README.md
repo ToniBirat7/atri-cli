@@ -72,6 +72,12 @@ Deterministic agentic AI loop:
 - `max_tool_calls_per_turn` — Tools executed per turn
 - `timeout_seconds` — Per-tool execution timeout
 
+### `permissions.py`
+Incremental permission rule evaluator used by API and CLI:
+- rule precedence: deny > ask > allow
+- mode-aware behavior (`default`, `plan`, `dontAsk`, `acceptEdits`, `bypassPermissions`)
+- glob-style matching for rule specifiers
+
 ### `api.py`
 FastAPI HTTP server exposing orchestrator:
 
@@ -83,6 +89,10 @@ FastAPI HTTP server exposing orchestrator:
 - `GET /ready` — Readiness probe
 - `GET /tools` — List available tools
 - `GET /conversations` — List stored conversations and prompt profiles
+- `GET /conversations/{id}` — Conversation details and turn transcript
+- `POST /conversations/{id}/resume` — Validate resumable conversation metadata
+- `POST /conversations/{id}/fork` — Fork conversation into a new session id
+- `POST /permissions/evaluate` — Evaluate a tool call against mode and rule sets
 - `GET /metrics` — Runtime counters and uptime
 - `GET /` — Service info
 
