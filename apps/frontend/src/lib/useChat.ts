@@ -14,6 +14,12 @@ export interface StreamStatus {
   detail: string;
 }
 
+export interface UsageCounters {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 function describeStreamEvent(event: Record<string, unknown>): StreamStatus {
   const type = String(event.type ?? '');
   switch (type) {
@@ -57,6 +63,15 @@ function describeStreamEvent(event: Record<string, unknown>): StreamStatus {
         phase: 'idle',
         detail: 'Response complete',
       };
+    case 'usage': {
+      const promptTokens = Number(event.prompt_tokens ?? 0);
+      const completionTokens = Number(event.completion_tokens ?? 0);
+      const totalTokens = Number(event.total_tokens ?? 0);
+      return {
+        phase: 'thinking',
+        detail: `Usage: in ${promptTokens} tok, out ${completionTokens} tok, total ${totalTokens}`,
+      };
+    }
     default:
       return {
         phase: 'thinking',
@@ -73,7 +88,22 @@ export function useChat() {
     detail: 'Ready for a new message',
   });
   const [activityFeed, setActivityFeed] = useState<string[]>([]);
+  const [usage, setUsage] = useState<UsageCounters>({
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  });
   const abortRef = useRef<AbortController | null>(null);
+  const pendingContentRef = useRef('');
+  const pendingActivitiesRef = useRef<
+    Array<{ line: string; phase: StreamStatus['phase'] }>
+  >([]);
+  const pendingUsageRef = useRef<UsageCounters>({
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  });
+  const flushRafRef = useRef<number | null>(null);
 
   const pushActivity = useCallback(
     (line: string, phase: StreamStatus['phase']) => {
@@ -81,6 +111,65 @@ export function useChat() {
       setActivityFeed((prev) => [line, ...prev].slice(0, 5));
     },
     [],
+  );
+
+  const flushPending = useCallback((assistantMessageId: string) => {
+    if (pendingContentRef.current) {
+      const chunk = pendingContentRef.current;
+      pendingContentRef.current = '';
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMessageId
+            ? { ...m, content: m.content + chunk }
+            : m,
+        ),
+      );
+    }
+
+    if (
+      pendingUsageRef.current.promptTokens > 0 ||
+      pendingUsageRef.current.completionTokens > 0 ||
+      pendingUsageRef.current.totalTokens > 0
+    ) {
+      const usageDelta = pendingUsageRef.current;
+      pendingUsageRef.current = {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      };
+      setUsage((prev) => ({
+        promptTokens: prev.promptTokens + usageDelta.promptTokens,
+        completionTokens: prev.completionTokens + usageDelta.completionTokens,
+        totalTokens: prev.totalTokens + usageDelta.totalTokens,
+      }));
+    }
+
+    if (pendingActivitiesRef.current.length > 0) {
+      const activities = pendingActivitiesRef.current;
+      pendingActivitiesRef.current = [];
+      const latest = activities[activities.length - 1];
+      setStreamStatus({ phase: latest.phase, detail: latest.line });
+      setActivityFeed((prev) => {
+        const next = [...prev];
+        for (let i = activities.length - 1; i >= 0; i -= 1) {
+          next.unshift(activities[i].line);
+        }
+        return next.slice(0, 5);
+      });
+    }
+  }, []);
+
+  const scheduleFlush = useCallback(
+    (assistantMessageId: string) => {
+      if (flushRafRef.current !== null) {
+        return;
+      }
+      flushRafRef.current = window.requestAnimationFrame(() => {
+        flushRafRef.current = null;
+        flushPending(assistantMessageId);
+      });
+    },
+    [flushPending],
   );
 
   const sendMessage = useCallback(
@@ -105,6 +194,14 @@ export function useChat() {
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsStreaming(true);
+      setUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+      pendingContentRef.current = '';
+      pendingActivitiesRef.current = [];
+      pendingUsageRef.current = {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      };
 
       abortRef.current = new AbortController();
 
@@ -227,21 +324,35 @@ export function useChat() {
             try {
               const parsed = JSON.parse(data);
               if (parsed.event) {
-                const eventStatus = describeStreamEvent(
-                  parsed.event as Record<string, unknown>,
-                );
-                pushActivity(eventStatus.detail, eventStatus.phase);
+                const eventPayload = parsed.event as Record<string, unknown>;
+                const eventStatus = describeStreamEvent(eventPayload);
+                pendingActivitiesRef.current.push({
+                  line: eventStatus.detail,
+                  phase: eventStatus.phase,
+                });
+                if (String(eventPayload.type ?? '') === 'usage') {
+                  pendingUsageRef.current.promptTokens += Number(
+                    eventPayload.prompt_tokens ?? 0,
+                  );
+                  pendingUsageRef.current.completionTokens += Number(
+                    eventPayload.completion_tokens ?? 0,
+                  );
+                  pendingUsageRef.current.totalTokens += Number(
+                    eventPayload.total_tokens ?? 0,
+                  );
+                }
+                scheduleFlush(assistantMsg.id);
               }
               if (parsed.content) {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === assistantMsg.id
-                      ? { ...m, content: m.content + parsed.content }
-                      : m,
-                  ),
-                );
+                pendingContentRef.current += String(parsed.content);
+                scheduleFlush(assistantMsg.id);
               }
               if (parsed.error) {
+                if (flushRafRef.current !== null) {
+                  window.cancelAnimationFrame(flushRafRef.current);
+                  flushRafRef.current = null;
+                }
+                flushPending(assistantMsg.id);
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantMsg.id
@@ -259,6 +370,11 @@ export function useChat() {
             }
           }
         }
+        if (flushRafRef.current !== null) {
+          window.cancelAnimationFrame(flushRafRef.current);
+          flushRafRef.current = null;
+        }
+        flushPending(assistantMsg.id);
         setStreamStatus({ phase: 'idle', detail: 'Ready for a new message' });
       } catch (err) {
         if ((err as Error).name !== 'AbortError') {
@@ -275,11 +391,15 @@ export function useChat() {
           pushActivity('Connection error while streaming response', 'error');
         }
       } finally {
+        if (flushRafRef.current !== null) {
+          window.cancelAnimationFrame(flushRafRef.current);
+          flushRafRef.current = null;
+        }
         setIsStreaming(false);
         abortRef.current = null;
       }
     },
-    [messages],
+    [messages, flushPending, pushActivity, scheduleFlush],
   );
 
   const stopStreaming = useCallback(() => {
@@ -292,6 +412,18 @@ export function useChat() {
     setMessages([]);
     setIsStreaming(false);
     setActivityFeed([]);
+    setUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+    pendingContentRef.current = '';
+    pendingActivitiesRef.current = [];
+    pendingUsageRef.current = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    if (flushRafRef.current !== null) {
+      window.cancelAnimationFrame(flushRafRef.current);
+      flushRafRef.current = null;
+    }
     setStreamStatus({
       phase: 'idle',
       detail: 'Ready for a new message',
@@ -306,5 +438,6 @@ export function useChat() {
     clearChat,
     streamStatus,
     activityFeed,
+    usage,
   };
 }

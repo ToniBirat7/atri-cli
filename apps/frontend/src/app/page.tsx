@@ -71,6 +71,7 @@ export default function Home() {
     clearChat,
     streamStatus,
     activityFeed,
+    usage,
   } = useChat();
   const { toasts, removeToast, infoToast } = useToast();
 
@@ -192,6 +193,11 @@ export default function Home() {
                 title="Updated"
                 value={lastUpdated}
                 description="Reflects the latest assistant event or UI activity."
+              />
+              <SidebarCard
+                title="Token usage"
+                value={`${usage.totalTokens} total`}
+                description={`Prompt ${usage.promptTokens} | Completion ${usage.completionTokens}`}
               />
             </div>
 

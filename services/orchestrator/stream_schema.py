@@ -49,3 +49,17 @@ def stream_event_error(message: str) -> Dict[str, Any]:
         "type": "error",
         "error": message,
     }
+
+
+def stream_event_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> Dict[str, Any]:
+    """Create usage event payload."""
+    return {
+        "type": "usage",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }

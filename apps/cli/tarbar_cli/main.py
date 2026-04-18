@@ -5,12 +5,14 @@ import os
 import sys
 import json
 import time
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from .client import OrchestratorClient
 from .telemetry import SessionTelemetry
+from .tui import TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
 
 
 PERMISSION_MODES = {
@@ -42,6 +44,9 @@ PATH_INPUT_KEYS = {
 }
 
 
+_TUI = TUIRenderer()
+
+
 @dataclass
 class PermissionState:
     mode: str = "default"
@@ -51,56 +56,28 @@ class PermissionState:
     prompted_write_targets: set[str] = field(default_factory=set)
 
 
-_ANSI = {
-    "reset": "\033[0m",
-    "bold": "\033[1m",
-    "dim": "\033[2m",
-    "red": "\033[31m",
-    "yellow": "\033[33m",
-    "green": "\033[32m",
-    "cyan": "\033[36m",
-}
-
-
 def _supports_color() -> bool:
-    if os.getenv("NO_COLOR"):
-        return False
-    if not sys.stdout.isatty():
-        return False
-    term = os.getenv("TERM", "")
-    return bool(term and term.lower() != "dumb")
+    return _TUI.supports_color()
 
 
 def _style(text: str, *, color: Optional[str] = None, bold: bool = False, dim: bool = False) -> str:
-    if not _supports_color():
-        return text
-
-    parts: list[str] = []
-    if bold:
-        parts.append(_ANSI["bold"])
-    if dim:
-        parts.append(_ANSI["dim"])
-    if color and color in _ANSI:
-        parts.append(_ANSI[color])
-    if not parts:
-        return text
-    return "".join(parts) + text + _ANSI["reset"]
+    return _TUI.style(text, color=color, bold=bold, dim=dim)
 
 
 def _print_info(message: str) -> None:
-    print(_style(f"[info] {message}", color="cyan"))
+    _TUI.print_info(message)
 
 
 def _print_success(message: str) -> None:
-    print(_style(f"[ok] {message}", color="green"))
+    _TUI.print_success(message)
 
 
 def _print_warning(message: str) -> None:
-    print(_style(f"[warn] {message}", color="yellow"))
+    _TUI.print_warning(message)
 
 
 def _print_error(message: str) -> None:
-    print(_style(f"[error] {message}", color="red", bold=True), file=sys.stderr)
+    _TUI.print_error(message)
 
 
 def _emit_error(output_format: str, message: str) -> None:
@@ -116,7 +93,97 @@ def _interactive_help_text() -> str:
         "  /help               Show this help\n"
         "  /mode               Show current permission mode\n"
         "  /mode <name>        Set permission mode\n"
+        "  /timeline           Show timeline verbosity\n"
+        "  /timeline <level>   Set timeline verbosity (minimal/normal/debug)\n"
         "  /exit | /quit       Exit interactive mode"
+    )
+
+
+def _tui_enabled() -> bool:
+    return _supports_color() and sys.stdout.isatty()
+
+
+def _status_set(message: str) -> None:
+    _TUI.status_set(
+        TurnStatus(
+            turn_number=0,
+            elapsed_seconds=0.0,
+            input_tokens=0,
+            output_tokens=0,
+            tool_calls=0,
+            phase=message,
+        )
+    )
+
+
+def _status_clear() -> None:
+    _TUI.status_clear()
+
+
+def _print_turn_card(turn_number: int, mode: str) -> None:
+    _TUI.print_turn_card(turn_number, mode)
+
+
+def _render_timeline_event(event: dict[str, Any], output_format: str) -> None:
+    _TUI.render_timeline_event(event, output_format)
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    # Lightweight approximation used for live counters when provider usage is unavailable.
+    return max(1, math.ceil(len(text) / 4))
+
+
+def _update_live_status(
+    turn_number: int,
+    turn_start: float,
+    input_tokens: int,
+    output_chars: int,
+    tool_calls: int,
+    phase: str,
+    output_tokens_exact: Optional[int] = None,
+) -> None:
+    if not _tui_enabled():
+        return
+    _TUI.status_set(
+        TurnStatus(
+            turn_number=turn_number,
+            elapsed_seconds=max(0.0, time.time() - turn_start),
+            input_tokens=input_tokens,
+            output_tokens=(
+                output_tokens_exact
+                if output_tokens_exact is not None
+                else max(0, math.ceil(output_chars / 4))
+            ),
+            tool_calls=tool_calls,
+            phase=phase,
+        )
+    )
+
+
+def _print_turn_status_summary(
+    turn_number: int,
+    turn_start: float,
+    input_tokens: int,
+    output_chars: int,
+    tool_calls: int,
+    phase: str,
+    output_tokens_exact: Optional[int] = None,
+) -> None:
+    _TUI.print_status_summary(
+        TurnStatus(
+            turn_number=turn_number,
+            elapsed_seconds=max(0.0, time.time() - turn_start),
+            input_tokens=input_tokens,
+            output_tokens=(
+                output_tokens_exact
+                if output_tokens_exact is not None
+                else max(0, math.ceil(output_chars / 4))
+            ),
+            tool_calls=tool_calls,
+            phase=phase,
+        )
     )
 
 
@@ -195,6 +262,20 @@ def _handle_interactive_local_command(user_input: str, permission_state: Permiss
         print(f"permission_mode set to {requested}")
         return True
 
+    if user_input == "/timeline":
+        print(f"timeline_verbosity={_TUI.timeline_verbosity}")
+        return True
+
+    if user_input.startswith("/timeline "):
+        requested = user_input.split(None, 1)[1].strip()
+        if requested not in TIMELINE_VERBOSITY_LEVELS:
+            valid = ", ".join(TIMELINE_VERBOSITY_LEVELS)
+            print(f"Unknown timeline verbosity: {requested}. Valid levels: {valid}")
+            return True
+        _TUI.set_timeline_verbosity(requested)
+        print(f"timeline_verbosity set to {requested}")
+        return True
+
     return False
 
 
@@ -264,12 +345,77 @@ def _print_stream_response(
     active_conversation_id = payload.get("conversation_id")
     turn_number = 1
     first_content_chunk = True
+    turn_start = time.time()
+    input_tokens = _estimate_tokens(str(payload.get("message", "")) )
+    output_chars = 0
+    tool_calls = 0
+    tool_names: list[str] = []
+    content_started = False
+    exact_input_tokens = 0
+    exact_output_tokens = 0
+    has_exact_usage = False
 
     effective_output_format = "stream-json" if stream_json else output_format
+    if effective_output_format == "text":
+        _print_turn_card(turn_number, permission_state.mode)
+        _update_live_status(turn_number, turn_start, input_tokens, output_chars, tool_calls, "thinking")
     for event in client.stream_chat(payload):
         if event.get("done"):
             break
         if "event" in event and isinstance(event["event"], dict):
+            _render_timeline_event(event["event"], effective_output_format)
+            event_type = str(event["event"].get("type") or "")
+            if event_type == "usage":
+                exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
+                exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
+                has_exact_usage = True
+                if not content_started:
+                    _update_live_status(
+                        turn_number,
+                        turn_start,
+                        exact_input_tokens,
+                        output_chars,
+                        tool_calls,
+                        "thinking",
+                        output_tokens_exact=exact_output_tokens,
+                    )
+                continue
+            if event_type == "tool_call_start":
+                tool_calls += 1
+                tool_name = str(event["event"].get("tool_name") or "tool")
+                tool_names.append(tool_name)
+                if not content_started:
+                    _update_live_status(
+                        turn_number,
+                        turn_start,
+                        exact_input_tokens if has_exact_usage else input_tokens,
+                        output_chars,
+                        tool_calls,
+                        "tool",
+                        output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                    )
+            elif event_type == "turn_complete":
+                if not content_started:
+                    _update_live_status(
+                        turn_number,
+                        turn_start,
+                        exact_input_tokens if has_exact_usage else input_tokens,
+                        output_chars,
+                        tool_calls,
+                        "finalizing",
+                        output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                    )
+            else:
+                if not content_started:
+                    _update_live_status(
+                        turn_number,
+                        turn_start,
+                        exact_input_tokens if has_exact_usage else input_tokens,
+                        output_chars,
+                        tool_calls,
+                        "thinking",
+                        output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                    )
             _render_permission_event(
                 client,
                 event["event"],
@@ -284,32 +430,44 @@ def _print_stream_response(
                 telemetry.conversation_id = active_conversation_id
             continue
         if "error" in event:
+            _status_clear()
             if telemetry:
                 telemetry.errors.append(event["error"])
             raise RuntimeError(event["error"])
         if "content" in event:
             text = event["content"]
+            output_chars += len(text)
             if effective_output_format == "stream-json":
                 print(json.dumps({"type": "content", "text": text}))
             elif effective_output_format == "text":
                 if first_content_chunk:
+                    _status_clear()
                     print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
                     first_content_chunk = False
+                    content_started = True
                 print(text, end="", flush=True)
             chunks.append(text)
             continue
 
     response_text = "".join(chunks)
+    _status_clear()
+    turn_duration = time.time() - turn_start
     
     # Record telemetry
     if telemetry:
         user_message = payload.get("message", "")
+        if has_exact_usage:
+            telemetry.total_input_tokens += exact_input_tokens
+            telemetry.total_output_tokens += exact_output_tokens
+        else:
+            telemetry.total_input_tokens += input_tokens
+            telemetry.total_output_tokens += _estimate_tokens(response_text)
         telemetry.add_turn(
             turn_number=turn_number,
             user_message=user_message,
             assistant_response=response_text,
-            tool_calls=[],  # Tool calls would be tracked from events
-            duration_seconds=0.0,
+            tool_calls=tool_names,
+            duration_seconds=turn_duration,
         )
         exceeded, reason = telemetry.check_budget_limits()
         if exceeded:
@@ -335,6 +493,15 @@ def _print_stream_response(
             print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
     else:
         print()
+        _print_turn_status_summary(
+            turn_number,
+            turn_start,
+            exact_input_tokens if has_exact_usage else input_tokens,
+            output_chars,
+            tool_calls,
+            "complete",
+            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+        )
         if active_conversation_id:
             _print_info(f"conversation_id: {active_conversation_id}")
     
@@ -401,12 +568,76 @@ def _run_interactive(
         turn_number += 1
         turn_start = time.time()
         payload = _build_payload(user_input, active_conversation_id, allowed_directory)
+        input_tokens = _estimate_tokens(user_input)
+        output_chars = 0
+        tool_calls = 0
+        tool_names: list[str] = []
+        content_started = False
+        exact_input_tokens = 0
+        exact_output_tokens = 0
+        has_exact_usage = False
+        if effective_output_format == "text":
+            _print_turn_card(turn_number, permission_state.mode)
+            _update_live_status(turn_number, turn_start, input_tokens, output_chars, tool_calls, "thinking")
 
         chunks: list[str] = []
         for event in client.stream_chat(payload):
             if event.get("done"):
                 break
             if "event" in event and isinstance(event["event"], dict):
+                _render_timeline_event(event["event"], effective_output_format)
+                event_type = str(event["event"].get("type") or "")
+                if event_type == "usage":
+                    exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
+                    exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
+                    has_exact_usage = True
+                    if not content_started:
+                        _update_live_status(
+                            turn_number,
+                            turn_start,
+                            exact_input_tokens,
+                            output_chars,
+                            tool_calls,
+                            "thinking",
+                            output_tokens_exact=exact_output_tokens,
+                        )
+                    continue
+                if event_type == "tool_call_start":
+                    tool_calls += 1
+                    tool_name = str(event["event"].get("tool_name") or "tool")
+                    tool_names.append(tool_name)
+                    if not content_started:
+                        _update_live_status(
+                            turn_number,
+                            turn_start,
+                            exact_input_tokens if has_exact_usage else input_tokens,
+                            output_chars,
+                            tool_calls,
+                            "tool",
+                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                        )
+                elif event_type == "turn_complete":
+                    if not content_started:
+                        _update_live_status(
+                            turn_number,
+                            turn_start,
+                            exact_input_tokens if has_exact_usage else input_tokens,
+                            output_chars,
+                            tool_calls,
+                            "finalizing",
+                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                        )
+                else:
+                    if not content_started:
+                        _update_live_status(
+                            turn_number,
+                            turn_start,
+                            exact_input_tokens if has_exact_usage else input_tokens,
+                            output_chars,
+                            tool_calls,
+                            "thinking",
+                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                        )
                 _render_permission_event(
                     client,
                     event["event"],
@@ -421,31 +652,42 @@ def _run_interactive(
                     telemetry.conversation_id = active_conversation_id
                 continue
             if "error" in event:
+                _status_clear()
                 if telemetry:
                     telemetry.errors.append(event["error"])
                 _emit_error(effective_output_format, str(event["error"]))
                 break
             if "content" in event:
                 text = event["content"]
+                output_chars += len(text)
                 if effective_output_format == "stream-json":
                     print(json.dumps({"type": "content", "text": text}))
                 elif effective_output_format == "text":
                     if not chunks:
+                        _status_clear()
                         print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
+                        content_started = True
                     print(text, end="", flush=True)
                 else:
                     pass
                 chunks.append(text)
 
         response_text = "".join(chunks)
+        _status_clear()
         turn_duration = time.time() - turn_start
 
         if telemetry:
+            if has_exact_usage:
+                telemetry.total_input_tokens += exact_input_tokens
+                telemetry.total_output_tokens += exact_output_tokens
+            else:
+                telemetry.total_input_tokens += input_tokens
+                telemetry.total_output_tokens += _estimate_tokens(response_text)
             telemetry.add_turn(
                 turn_number=turn_number,
                 user_message=user_input,
                 assistant_response=response_text,
-                tool_calls=[],
+                tool_calls=tool_names,
                 duration_seconds=turn_duration,
             )
             exceeded, reason = telemetry.check_budget_limits()
@@ -472,6 +714,15 @@ def _run_interactive(
                 print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
         else:
             print()
+            _print_turn_status_summary(
+                turn_number,
+                turn_start,
+                exact_input_tokens if has_exact_usage else input_tokens,
+                output_chars,
+                tool_calls,
+                "complete",
+                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+            )
             if active_conversation_id:
                 _print_info(f"conversation_id: {active_conversation_id}")
 
@@ -703,6 +954,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output streaming results as JSON for CI pipelines",
     )
     parser.add_argument(
+        "--timeline-verbosity",
+        choices=TIMELINE_VERBOSITY_LEVELS,
+        default=os.getenv("TARBAR_TIMELINE_VERBOSITY", "normal"),
+        help="Timeline verbosity for text mode: minimal, normal, debug",
+    )
+    parser.add_argument(
         "--telemetry",
         action="store_true",
         help="Print telemetry summary after session completes",
@@ -783,6 +1040,7 @@ def main() -> None:
         max_budget_usd=args.max_budget_usd,
     )
     output_format = args.output_format or ("stream-json" if args.stream_json else "text")
+    _TUI.set_timeline_verbosity(args.timeline_verbosity)
 
     try:
         if args.command == "sessions":

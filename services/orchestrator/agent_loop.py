@@ -246,6 +246,32 @@ class AgentLoop:
                         },
                     )
 
+                    usage = completion.get("usage")
+                    if isinstance(usage, dict):
+                        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                        completion_tokens = int(usage.get("completion_tokens") or 0)
+                        total_tokens = int(
+                            usage.get("total_tokens")
+                            or (prompt_tokens + completion_tokens)
+                        )
+                        turn.metadata.setdefault("usage", []).append(
+                            {
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": total_tokens,
+                            }
+                        )
+                        await self._emit_event(
+                            event_callback,
+                            {
+                                "type": "usage",
+                                "turn": self.state.turn,
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": total_tokens,
+                            },
+                        )
+
                     tool_calls = await llm_adapter.extract_tool_calls(completion)
                     turn.tool_calls_requested = len(tool_calls)
 

@@ -33,6 +33,21 @@ Optional environment variables:
 - `LLM_BENCH_BASE_URL` (default: `http://127.0.0.1:8000`)
 - `LLM_BENCH_API_KEY` (default: `secret`)
 
+## Live Readiness Harness
+
+Boot orchestrator, run CLI smoke checks, run live stream checks (including MCP tool-call success rate),
+and emit a readiness scorecard:
+
+```bash
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.env/bin/python" scripts/benchmarks/live_readiness_harness.py --iterations 2
+```
+
+Include frontend boot and web smoke checks:
+
+```bash
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.env/bin/python" scripts/benchmarks/live_readiness_harness.py --start-frontend --iterations 2 --report-file readiness_report.json
+```
+
 ## Reset Local State
 
 Clean local cache and database artifacts:

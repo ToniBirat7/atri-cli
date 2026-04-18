@@ -15,6 +15,13 @@ class _FakeStreamClient:
         yield {"done": True}
 
 
+class _FakeUsageStreamClient:
+    def stream_chat(self, payload):
+        yield {"event": {"type": "usage", "prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}}
+        yield {"content": "Token exactness"}
+        yield {"done": True}
+
+
 def test_parser_supports_max_turns_argument():
     """Test parser accepts --max-turns argument."""
     parser = _build_parser()
@@ -156,3 +163,19 @@ def test_json_output_format_emits_structured_result(capsys):
     assert payload["response"] == "Hello world"
     assert payload["conversation_id"] == "conv_test"
     assert len(payload["telemetry"]["turns"]) == 1
+
+
+def test_stream_usage_events_drive_exact_telemetry_totals():
+    telemetry = SessionTelemetry()
+    _print_stream_response(
+        _FakeUsageStreamClient(),
+        {"message": "hello"},
+        permission_state=PermissionState(),
+        allowed_directory=None,
+        interactive=False,
+        telemetry=telemetry,
+        output_format="json",
+    )
+
+    assert telemetry.total_input_tokens == 120
+    assert telemetry.total_output_tokens == 45

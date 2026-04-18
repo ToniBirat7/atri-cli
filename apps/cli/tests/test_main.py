@@ -60,6 +60,14 @@ def test_help_command_outputs_interactive_help(capsys):
     out = capsys.readouterr().out
     assert "Commands:" in out
     assert "/mode" in out
+    assert "/timeline" in out
+
+
+def test_print_turn_card_outputs_mode_and_turn(capsys):
+    cli_main._print_turn_card(3, "plan")
+    out = capsys.readouterr().out
+    assert "turn 3" in out
+    assert "mode=plan" in out
 
 
 def test_main_prompt_convenience_mode_dispatches_print(monkeypatch):
@@ -152,4 +160,22 @@ def test_parser_supports_worktree_commands():
     args = parser.parse_args(["worktrees", "clean"])
     assert args.command == "worktrees"
     assert args.worktrees_command == "clean"
+
+
+def test_parser_supports_timeline_verbosity_flag():
+    parser = cli_main._build_parser()
+    args = parser.parse_args(["--timeline-verbosity", "debug", "--print", "--prompt", "hello"])
+    assert args.timeline_verbosity == "debug"
+
+
+def test_timeline_command_updates_runtime_state(capsys):
+    state = cli_main.PermissionState(mode="default")
+
+    handled = cli_main._handle_interactive_local_command("/timeline minimal", state)
+    assert handled is True
+
+    handled = cli_main._handle_interactive_local_command("/timeline", state)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "timeline_verbosity=minimal" in out
 

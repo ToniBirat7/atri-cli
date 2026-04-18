@@ -137,6 +137,7 @@ class _FakeAgentLoopLong:
         self.last_system_prompt = system_prompt
         if event_callback is not None:
             await event_callback({"type": "turn_start", "turn": 1})
+            await event_callback({"type": "usage", "turn": 1, "prompt_tokens": 100, "completion_tokens": 25, "total_tokens": 125})
             await event_callback({"type": "tool_call_start", "turn": 1, "tool_name": "list_directory"})
         return "abcdefghij" * 40, type("State", (), {"turn": 2, "total_tool_calls": 2, "status": "completed", "turns_history": []})()
 
@@ -415,6 +416,8 @@ async def test_chat_stream_emits_chunks_and_done(monkeypatch):
     assert '"type": "session_started"' in body
     assert '"event"' in body
     assert '"type": "agent_event"' in body
+    assert '"type": "usage"' in body
+    assert '"prompt_tokens": 100' in body
     assert "content" in body
     assert '"type": "assistant_delta"' in body
     assert "[DONE]" in body

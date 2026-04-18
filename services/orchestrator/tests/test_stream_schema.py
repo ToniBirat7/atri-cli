@@ -7,6 +7,7 @@ from stream_schema import (
     stream_event_progress,
     stream_event_request_started,
     stream_event_session_started,
+    stream_event_usage,
 )
 
 
@@ -39,6 +40,14 @@ def test_stream_event_error_shape():
     payload = stream_event_error("boom")
     assert payload["type"] == "error"
     assert payload["error"] == "boom"
+
+
+def test_stream_event_usage_shape():
+    payload = stream_event_usage(100, 25, 125)
+    assert payload["type"] == "usage"
+    assert payload["prompt_tokens"] == 100
+    assert payload["completion_tokens"] == 25
+    assert payload["total_tokens"] == 125
 
 
 def test_encode_sse_data_wraps_json_line():
