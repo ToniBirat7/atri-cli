@@ -424,3 +424,42 @@ async def test_permissions_evaluate_endpoint(monkeypatch):
     )
 
     assert result.action == "ask"
+
+
+@pytest.mark.asyncio
+async def test_worktrees_list_response_model(monkeypatch):
+    """Test WorktreesListResponse model creation."""
+    from orchestrator.worktree_manager import WorktreeInfo
+    
+    worktree_info = api.WorktreeInfoResponse(
+        path="/tmp/test",
+        conversation_id="conv_123",
+        branch="test-branch",
+        is_dirty=False,
+    )
+    
+    response = api.WorktreesListResponse(
+        status="success",
+        worktrees=[worktree_info],
+        count=1,
+    )
+    
+    assert response.status == "success"
+    assert len(response.worktrees) == 1
+    assert response.count == 1
+
+
+@pytest.mark.asyncio
+async def test_worktree_fork_response_model():
+    """Test WorktreeForkResponse model creation."""
+    response = api.WorktreeForkResponse(
+        status="success",
+        success=True,
+        new_conversation_id="conv_forked",
+        worktree_path="/tmp/wt_fork",
+    )
+    
+    assert response.status == "success"
+    assert response.success is True
+    assert response.new_conversation_id == "conv_forked"
+    assert response.worktree_path == "/tmp/wt_fork"
