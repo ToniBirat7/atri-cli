@@ -36,6 +36,14 @@ try:
     from .agent_loop import AgentLoop
     from .permissions import evaluate_permission
     from .logging_context import set_request_id, get_request_id
+    from .stream_schema import (
+        encode_sse_data,
+        stream_event_assistant_delta,
+        stream_event_error,
+        stream_event_progress,
+        stream_event_request_started,
+        stream_event_session_started,
+    )
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
@@ -50,6 +58,14 @@ except ImportError:
     from agent_loop import AgentLoop
     from permissions import evaluate_permission
     from logging_context import set_request_id, get_request_id
+    from stream_schema import (
+        encode_sse_data,
+        stream_event_assistant_delta,
+        stream_event_error,
+        stream_event_progress,
+        stream_event_request_started,
+        stream_event_session_started,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -785,32 +801,32 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
             )
 
         try:
-            yield f"data: {json.dumps({'request_id': request_id})}\n\n"
-            yield f"data: {json.dumps({'conversation_id': conversation_id})}\n\n"
+            yield encode_sse_data(stream_event_request_started(request_id))
+            yield encode_sse_data(stream_event_session_started(conversation_id))
 
             run_task = asyncio.create_task(_run_with_progress())
             while not run_task.done():
                 try:
                     event = await asyncio.wait_for(progress_queue.get(), timeout=0.15)
-                    yield f"data: {json.dumps({'event': event}, ensure_ascii=False)}\n\n"
+                    yield encode_sse_data(stream_event_progress(event))
                 except asyncio.TimeoutError:
                     continue
 
             while not progress_queue.empty():
                 event = progress_queue.get_nowait()
-                yield f"data: {json.dumps({'event': event}, ensure_ascii=False)}\n\n"
+                yield encode_sse_data(stream_event_progress(event))
 
             result = await run_task
             for chunk in _chunk_text(result.response):
-                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                yield encode_sse_data(stream_event_assistant_delta(chunk))
             yield "data: [DONE]\n\n"
         except HTTPException as e:
-            yield f"data: {json.dumps({'error': str(e.detail)})}\n\n"
+            yield encode_sse_data(stream_event_error(str(e.detail)))
             yield "data: [DONE]\n\n"
         except asyncio.CancelledError:
             return
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield encode_sse_data(stream_event_error(str(e)))
             yield "data: [DONE]\n\n"
         finally:
             set_request_id(None)

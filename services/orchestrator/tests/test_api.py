@@ -366,8 +366,12 @@ async def test_chat_stream_emits_chunks_and_done(monkeypatch):
 
     body = "".join(chunks)
     assert "request_id" in body
+    assert '"type": "request_started"' in body
+    assert '"type": "session_started"' in body
     assert '"event"' in body
+    assert '"type": "agent_event"' in body
     assert "content" in body
+    assert '"type": "assistant_delta"' in body
     assert "[DONE]" in body
 
 
