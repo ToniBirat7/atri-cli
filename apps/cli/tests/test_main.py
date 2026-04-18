@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import pytest
 
 from tarbar_cli import main as cli_main
 
@@ -52,6 +53,15 @@ def test_mode_command_updates_runtime_state(capsys):
     assert "permission_mode=plan" in out
 
 
+def test_help_command_outputs_interactive_help(capsys):
+    state = cli_main.PermissionState(mode="default")
+    handled = cli_main._handle_interactive_local_command("/help", state)
+    assert handled is True
+    out = capsys.readouterr().out
+    assert "Commands:" in out
+    assert "/mode" in out
+
+
 def test_main_prompt_convenience_mode_dispatches_print(monkeypatch):
     captured = {}
 
@@ -75,6 +85,27 @@ def test_main_prompt_convenience_mode_dispatches_print(monkeypatch):
 
     assert captured["prompt"] == "Explain this repo"
     assert captured["permission_mode"] == "default"
+
+
+def test_main_handles_runtime_error_with_clean_exit(monkeypatch, capsys):
+    class _FakeClient:
+        def __init__(self, base_url: str, api_key=None):
+            self.base_url = base_url
+            self.api_key = api_key
+
+    def _fake_run_print_mode(*args, **kwargs):
+        raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(cli_main, "OrchestratorClient", _FakeClient)
+    monkeypatch.setattr(cli_main, "_run_print_mode", _fake_run_print_mode)
+    monkeypatch.setattr(sys, "argv", ["tarbar", "--print", "--prompt", "hello"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main.main()
+
+    assert exc_info.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "backend unavailable" in stderr
 
 
 def test_parser_supports_mcp_commands():

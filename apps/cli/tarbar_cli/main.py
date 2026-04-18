@@ -51,6 +51,75 @@ class PermissionState:
     prompted_write_targets: set[str] = field(default_factory=set)
 
 
+_ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "yellow": "\033[33m",
+    "green": "\033[32m",
+    "cyan": "\033[36m",
+}
+
+
+def _supports_color() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    term = os.getenv("TERM", "")
+    return bool(term and term.lower() != "dumb")
+
+
+def _style(text: str, *, color: Optional[str] = None, bold: bool = False, dim: bool = False) -> str:
+    if not _supports_color():
+        return text
+
+    parts: list[str] = []
+    if bold:
+        parts.append(_ANSI["bold"])
+    if dim:
+        parts.append(_ANSI["dim"])
+    if color and color in _ANSI:
+        parts.append(_ANSI[color])
+    if not parts:
+        return text
+    return "".join(parts) + text + _ANSI["reset"]
+
+
+def _print_info(message: str) -> None:
+    print(_style(f"[info] {message}", color="cyan"))
+
+
+def _print_success(message: str) -> None:
+    print(_style(f"[ok] {message}", color="green"))
+
+
+def _print_warning(message: str) -> None:
+    print(_style(f"[warn] {message}", color="yellow"))
+
+
+def _print_error(message: str) -> None:
+    print(_style(f"[error] {message}", color="red", bold=True), file=sys.stderr)
+
+
+def _emit_error(output_format: str, message: str) -> None:
+    if output_format in {"json", "stream-json"}:
+        print(json.dumps({"type": "error", "message": message}))
+    else:
+        _print_error(message)
+
+
+def _interactive_help_text() -> str:
+    return (
+        "Commands:\n"
+        "  /help               Show this help\n"
+        "  /mode               Show current permission mode\n"
+        "  /mode <name>        Set permission mode\n"
+        "  /exit | /quit       Exit interactive mode"
+    )
+
+
 def _build_payload(
     message: str,
     conversation_id: Optional[str],
@@ -105,6 +174,10 @@ def _prompt_write_target(tool_name: str, target_path: str) -> bool:
 
 
 def _handle_interactive_local_command(user_input: str, permission_state: PermissionState) -> bool:
+    if user_input in {"/help", "/?"}:
+        print(_interactive_help_text())
+        return True
+
     if user_input == "/mode":
         print(
             f"permission_mode={permission_state.mode} "
@@ -190,6 +263,7 @@ def _print_stream_response(
     chunks: list[str] = []
     active_conversation_id = payload.get("conversation_id")
     turn_number = 1
+    first_content_chunk = True
 
     effective_output_format = "stream-json" if stream_json else output_format
     for event in client.stream_chat(payload):
@@ -218,6 +292,9 @@ def _print_stream_response(
             if effective_output_format == "stream-json":
                 print(json.dumps({"type": "content", "text": text}))
             elif effective_output_format == "text":
+                if first_content_chunk:
+                    print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
+                    first_content_chunk = False
                 print(text, end="", flush=True)
             chunks.append(text)
             continue
@@ -239,7 +316,7 @@ def _print_stream_response(
             if effective_output_format in {"stream-json", "json"}:
                 print(json.dumps({"type": "error", "message": reason}))
             else:
-                print(f"\n[error] {reason}")
+                _print_error(reason)
             raise SystemExit(1)
 
     if effective_output_format == "json":
@@ -259,7 +336,7 @@ def _print_stream_response(
     else:
         print()
         if active_conversation_id:
-            print(f"\n[conversation_id] {active_conversation_id}")
+            _print_info(f"conversation_id: {active_conversation_id}")
     
     return response_text
 
@@ -296,10 +373,11 @@ def _run_interactive(
     output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
-    print("Tarbar CLI interactive mode. Type /exit to quit.")
+    print(_style("Tarbar CLI", color="cyan", bold=True) + " interactive mode")
+    print(_style("Type /help for commands.", dim=True))
     print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
     if conversation_id:
-        print(f"Resuming conversation: {conversation_id}")
+        _print_info(f"Resuming conversation: {conversation_id}")
 
     active_conversation_id = conversation_id
     turn_number = 0
@@ -307,7 +385,7 @@ def _run_interactive(
 
     while True:
         try:
-            user_input = input("\ntarbar> ").strip()
+            user_input = input(f"\n{_style(f'tarbar[{permission_state.mode}]> ', color='cyan', bold=True)}").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             return
@@ -315,7 +393,7 @@ def _run_interactive(
         if not user_input:
             continue
         if user_input in {"/exit", "/quit"}:
-            print("Goodbye.")
+            _print_success("Goodbye.")
             return
         if _handle_interactive_local_command(user_input, permission_state):
             continue
@@ -345,13 +423,15 @@ def _run_interactive(
             if "error" in event:
                 if telemetry:
                     telemetry.errors.append(event["error"])
-                print(f"\n[error] {event['error']}")
+                _emit_error(effective_output_format, str(event["error"]))
                 break
             if "content" in event:
                 text = event["content"]
                 if effective_output_format == "stream-json":
                     print(json.dumps({"type": "content", "text": text}))
                 elif effective_output_format == "text":
+                    if not chunks:
+                        print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
                     print(text, end="", flush=True)
                 else:
                     pass
@@ -373,7 +453,7 @@ def _run_interactive(
                 if effective_output_format in {"stream-json", "json"}:
                     print(json.dumps({"type": "error", "message": reason}))
                 else:
-                    print(f"\n[error] {reason}")
+                    _print_error(reason)
                 return
 
         if effective_output_format == "json":
@@ -393,16 +473,17 @@ def _run_interactive(
         else:
             print()
             if active_conversation_id:
-                print(f"[conversation_id] {active_conversation_id}")
+                _print_info(f"conversation_id: {active_conversation_id}")
 
 
 def _sessions_list(client: OrchestratorClient) -> None:
     response = client.request_json("GET", "/conversations")
     conversations = response.get("conversations", [])
     if not conversations:
-        print("No conversations found.")
+        _print_warning("No conversations found.")
         return
 
+    print(_style("Conversations", color="cyan", bold=True))
     for item in conversations:
         print(
             f"{item['conversation_id']}\t{item['prompt_profile']}\t{item['updated_at']}"
@@ -461,10 +542,10 @@ def _mcp_list_tools(client: OrchestratorClient) -> None:
     response = client.request_json("GET", "/tools")
     tools = response.get("tools", [])
     if not tools:
-        print("No tools available.")
+        _print_warning("No tools available.")
         return
 
-    print(f"Available tools ({response.get('total', len(tools))}):\n")
+    print(_style(f"Available tools ({response.get('total', len(tools))})", color="cyan", bold=True) + "\n")
     for tool in tools:
         print(f"  {tool['name']}")
         if tool.get("description"):
@@ -477,11 +558,11 @@ def _mcp_list_tools(client: OrchestratorClient) -> None:
 
 def _mcp_status(client: OrchestratorClient) -> None:
     response = client.request_json("GET", "/health")
-    print(f"Status: {response.get('status')}")
+    print(_style(f"Status: {response.get('status')}", color="cyan", bold=True))
     print(f"LLM connected: {response.get('llm_connected')}")
     mcp_servers = response.get("mcp_servers", {})
     if mcp_servers:
-        print("\nMCP servers:")
+        print("\n" + _style("MCP servers:", color="cyan", bold=True))
         for server_name, server_status in mcp_servers.items():
             print(f"  {server_name}: {server_status.get('status', 'unknown')}")
     else:
@@ -703,66 +784,98 @@ def main() -> None:
     )
     output_format = args.output_format or ("stream-json" if args.stream_json else "text")
 
-    if args.command == "sessions":
-        if args.sessions_command == "list":
-            _sessions_list(client)
-            return
-        if args.sessions_command == "show":
-            _sessions_show(client, args.conversation_id)
-            return
-        if args.sessions_command == "resume":
-            _sessions_resume(client, args.conversation_id)
-            return
-        if args.sessions_command == "fork":
-            _sessions_fork(client, args.conversation_id, args.new_id)
-            return
+    try:
+        if args.command == "sessions":
+            if args.sessions_command == "list":
+                _sessions_list(client)
+                return
+            if args.sessions_command == "show":
+                _sessions_show(client, args.conversation_id)
+                return
+            if args.sessions_command == "resume":
+                _sessions_resume(client, args.conversation_id)
+                return
+            if args.sessions_command == "fork":
+                _sessions_fork(client, args.conversation_id, args.new_id)
+                return
 
-    if args.command == "permissions":
-        if args.permissions_command == "check":
-            _permissions_check(
-                client,
-                tool_call=args.tool_call,
-                mode=args.mode,
-                allow=args.allow,
-                ask=args.ask,
-                deny=args.deny,
-            )
-            return
+        if args.command == "permissions":
+            if args.permissions_command == "check":
+                _permissions_check(
+                    client,
+                    tool_call=args.tool_call,
+                    mode=args.mode,
+                    allow=args.allow,
+                    ask=args.ask,
+                    deny=args.deny,
+                )
+                return
 
-    if args.command == "mcp":
-        if args.mcp_command == "tools":
-            _mcp_list_tools(client)
-            return
-        if args.mcp_command == "status":
-            _mcp_status(client)
-            return
-        if args.mcp_command == "refresh":
-            _mcp_refresh(client)
-            return
-        if args.mcp_command == "reconnect":
-            _mcp_reconnect(client, args.server)
-            return
-        if args.mcp_command == "deferred":
-            if not args.enable and not args.disable:
-                print("Error: specify --enable or --disable")
+        if args.command == "mcp":
+            if args.mcp_command == "tools":
+                _mcp_list_tools(client)
+                return
+            if args.mcp_command == "status":
+                _mcp_status(client)
+                return
+            if args.mcp_command == "refresh":
+                _mcp_refresh(client)
+                return
+            if args.mcp_command == "reconnect":
+                _mcp_reconnect(client, args.server)
+                return
+            if args.mcp_command == "deferred":
+                if not args.enable and not args.disable:
+                    _emit_error(output_format, "specify --enable or --disable")
+                    raise SystemExit(1)
+                _mcp_deferred(client, args.server, args.enable)
+                return
+
+        if args.command == "worktrees":
+            if args.worktrees_command == "list":
+                _worktrees_list()
+                return
+            if args.worktrees_command == "clean":
+                _worktrees_clean()
+                return
+
+        if args.print_mode:
+            if not args.prompt:
+                _emit_error(output_format, "Print mode requires a prompt")
                 raise SystemExit(1)
-            _mcp_deferred(client, args.server, args.enable)
+            _run_print_mode(
+                client,
+                prompt=args.prompt,
+                conversation_id=args.resume,
+                allowed_directory=args.allowed_directory,
+                permission_state=permission_state,
+                telemetry=telemetry,
+                output_format=output_format,
+                stream_json=args.stream_json,
+            )
+            if args.telemetry:
+                if output_format != "json":
+                    print("\n" + telemetry.summary())
             return
 
-    if args.command == "worktrees":
-        if args.worktrees_command == "list":
-            _worktrees_list()
-            return
-        if args.worktrees_command == "clean":
-            _worktrees_clean()
+        if args.prompt:
+            _run_print_mode(
+                client,
+                prompt=args.prompt,
+                conversation_id=args.resume,
+                allowed_directory=args.allowed_directory,
+                permission_state=permission_state,
+                telemetry=telemetry,
+                output_format=output_format,
+                stream_json=args.stream_json,
+            )
+            if args.telemetry:
+                if output_format != "json":
+                    print("\n" + telemetry.summary())
             return
 
-    if args.print_mode:
-        if not args.prompt:
-            raise SystemExit("Print mode requires a prompt")
-        _run_print_mode(
+        _run_interactive(
             client,
-            prompt=args.prompt,
             conversation_id=args.resume,
             allowed_directory=args.allowed_directory,
             permission_state=permission_state,
@@ -773,36 +886,9 @@ def main() -> None:
         if args.telemetry:
             if output_format != "json":
                 print("\n" + telemetry.summary())
-        return
-
-    if args.prompt:
-        _run_print_mode(
-            client,
-            prompt=args.prompt,
-            conversation_id=args.resume,
-            allowed_directory=args.allowed_directory,
-            permission_state=permission_state,
-            telemetry=telemetry,
-            output_format=output_format,
-            stream_json=args.stream_json,
-        )
-        if args.telemetry:
-            if output_format != "json":
-                print("\n" + telemetry.summary())
-        return
-
-    _run_interactive(
-        client,
-        conversation_id=args.resume,
-        allowed_directory=args.allowed_directory,
-        permission_state=permission_state,
-        telemetry=telemetry,
-        output_format=output_format,
-        stream_json=args.stream_json,
-    )
-    if args.telemetry:
-        if output_format != "json":
-            print("\n" + telemetry.summary())
+    except RuntimeError as exc:
+        _emit_error(output_format, str(exc))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
