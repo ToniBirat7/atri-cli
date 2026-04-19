@@ -25,22 +25,42 @@ Tarbar_AI is a local-first agentic AI project that combines:
 
 ## Quick Start
 
+This branch is CLI-focused (Claude Code-style terminal workflow).
+
 Install CLI (Python-first installer):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
 ```
 
-1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
-2. Start MCP server from `services/mcp/main.py`.
-3. Start frontend from `apps/frontend`:
+Single-command CLI pipeline:
+
+Linux/macOS:
 
 ```bash
-npm install
-npm run dev
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.sh | bash
 ```
 
-4. Start CLI from `apps/cli`:
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.ps1 -UseBasicParsing | iex"
+```
+
+From an existing local clone:
+
+```bash
+make cli-up
+```
+
+Branch strategy:
+- `master`: complete pipeline for end-to-end local usage on other devices.
+- `cli`: this branch, CLI-focused for Claude Code-style terminal workflow.
+- `web`: Web-focused branch for Claude Desktop-style browser workflow.
+
+1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
+2. Start MCP server from `services/mcp/main.py`.
+3. Start CLI from `apps/cli`:
 
 ```bash
 cd apps/cli
