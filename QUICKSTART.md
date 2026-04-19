@@ -4,23 +4,23 @@ Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orches
 
 ## Branch Mode
 
-You are on the CLI-focused branch (`cli`) aligned to a Claude Code-style workflow.
+You are on the CLI-focused `master` branch aligned to a Claude Code-style workflow.
 
 Single-step setup for other users:
 
 Linux/macOS:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
 ```
 
 Windows PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
 ```
 
 From an existing local clone:
 ```bash
-make cli-up
+make local-up
 ```
 
 ## Prerequisites

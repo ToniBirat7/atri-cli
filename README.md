@@ -38,24 +38,23 @@ Single-command CLI pipeline:
 Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/cli_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
 ```
 
 From an existing local clone:
 
 ```bash
-make cli-up
+make local-up
 ```
 
 Branch strategy:
-- `master`: complete pipeline for end-to-end local usage on other devices.
-- `cli`: this branch, CLI-focused for Claude Code-style terminal workflow.
+- `master`: this branch, CLI-focused for Claude Code-style terminal workflow.
 - `web`: Web-focused branch for Claude Desktop-style browser workflow.
 
 1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
