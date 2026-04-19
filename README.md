@@ -25,11 +25,71 @@ Tarbar_AI is a local-first agentic AI project that combines:
 
 ## Quick Start
 
+This branch is Web-focused (Claude Desktop-style browser workflow).
+
 Install CLI (Python-first installer):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
 ```
+
+Single-command Web pipeline (clone/update repo, install deps, auto GPU/CPU build, start llama + orchestrator + frontend):
+
+Linux/macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.sh | bash
+```
+
+Linux/macOS (full pipeline):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/local_up.sh | bash
+```
+
+Linux/macOS (CLI-focused optional flow):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/cli_up.sh | bash
+```
+
+Windows (PowerShell, Web-focused):
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.ps1 -UseBasicParsing | iex"
+```
+
+Windows PowerShell (full pipeline):
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/local_up.ps1 -UseBasicParsing | iex"
+```
+
+Windows PowerShell (CLI-focused optional flow):
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/cli_up.ps1 -UseBasicParsing | iex"
+```
+
+From an existing local clone (Web-focused default):
+
+```bash
+make web-up
+```
+
+From an existing local clone, full pipeline and CLI-focused startup are also available:
+
+```bash
+make local-up
+make cli-up
+```
+
+Prerequisites (both Linux and Windows): Git, Python 3.10+, Node.js 20+, npm, CMake. CUDA is optional; when available (nvidia-smi + nvcc), GPU build is used automatically, otherwise CPU-optimized build is used.
+
+Branch strategy:
+- `master`: complete pipeline for end-to-end local usage on other devices.
+- `cli`: CLI-focused branch for Claude Code-style terminal workflow.
+- `web`: this branch, Web-focused for Claude Desktop-style browser workflow.
 
 1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
 2. Start MCP server from `services/mcp/main.py`.

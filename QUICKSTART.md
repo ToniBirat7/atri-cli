@@ -2,6 +2,22 @@
 
 Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orchestration, and web UI.
 
+## Branch Mode
+
+You are on the Web-focused branch (`web`) aligned to a Claude Desktop-style workflow.
+
+Single-step setup for other users:
+
+Linux/macOS:
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.sh | bash
+```
+
+Windows PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.ps1 -UseBasicParsing | iex"
+```
+
 ## Prerequisites
 
 ### Option 1: Local Development (Makefile)
