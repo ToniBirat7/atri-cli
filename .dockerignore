@@ -1,0 +1,57 @@
+# VCS and editor metadata
+.git
+.github
+.vscode
+.idea
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Node and frontend build artifacts
+node_modules
+**/node_modules
+.next
+**/.next
+out
+**/out
+dist
+**/dist
+coverage
+**/coverage
+
+# Python artifacts
+__pycache__
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+
+# Runtime/generated artifacts
+*.log
+*.pid
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+runtime/state
+
+# Large local assets and benchmarks
+models
+benchmark_reports
+
+# Notebook and markdown notes excluded from production image context
+*.ipynb
+.ipynb_checkpoints
+*.md
+!README.md
+!apps/**/README.md
+!services/**/README.md

@@ -51,7 +51,7 @@ def test_search_web_results_uses_selected_provider(monkeypatch):
                 }
             ]
 
-    def _fake_get_provider(provider: str, brave_api_key=None):
+    def _fake_get_provider(provider: str, brave_api_key=None, tavily_api_key=None):
         class _Adapter:
             name = "fake"
 

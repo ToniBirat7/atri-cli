@@ -146,7 +146,7 @@ class DatabaseConfig(BaseModel):
     """Conversation persistence configuration."""
 
     url: str = Field(
-        default="sqlite:///orchestrator.db",
+        default="sqlite:///runtime/state/orchestrator.db",
         description="Database URL used for conversation persistence"
     )
     enable_persistence: bool = Field(
@@ -313,7 +313,7 @@ class OrchestratorConfig(BaseModel):
                 legal_help_line=os.getenv("PROMPT_POLICY_LEGAL_HELP_LINE", "For human help, call 1660-01-333-55."),
             ),
             database=DatabaseConfig(
-                url=os.getenv("ORCHESTRATOR_DATABASE_URL", "sqlite:///orchestrator.db"),
+                url=os.getenv("ORCHESTRATOR_DATABASE_URL", "sqlite:///runtime/state/orchestrator.db"),
                 enable_persistence=os.getenv("ORCHESTRATOR_ENABLE_PERSISTENCE", "true").lower() == "true",
             ),
             auth=AuthConfig(

@@ -9,12 +9,17 @@ import json
 import re
 import urllib.parse
 import urllib.request
+import os
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from typing import Protocol
 
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_FETCH_CHARS = 50000
+
+# Intentionally hardcoded per user request for local reliability.
+# Replace with your active Tavily key when available.
+HARDCODED_TAVILY_API_KEY = "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"
 
 
 @dataclass
@@ -194,6 +199,51 @@ class BraveProvider:
         return [r for r in results if r.url and r.title][:max_results]
 
 
+class TavilyProvider:
+    name = "tavily"
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    def query(self, query: str, max_results: int) -> list[SearchResult]:
+        body = json.dumps(
+            {
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "advanced",
+                "include_answer": False,
+                "include_images": False,
+            }
+        ).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.tavily.com/search",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": "tarbar-search/1.0",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+
+        results: list[SearchResult] = []
+        for item in payload.get("results", []):
+            results.append(
+                SearchResult(
+                    title=str(item.get("title", "")).strip(),
+                    url=str(item.get("url", "")).strip(),
+                    snippet=str(item.get("content", "")).strip(),
+                    provider="tavily",
+                )
+            )
+
+        return [r for r in results if r.url and r.title][:max_results]
+
+
 def _normalize_duckduckgo_href(href: str) -> str:
     if not href:
         return ""
@@ -211,12 +261,33 @@ def _normalize_duckduckgo_href(href: str) -> str:
     return ""
 
 
-def get_search_provider(provider: str, brave_api_key: str | None = None) -> SearchProvider:
+def _resolve_tavily_api_key(tavily_api_key: str | None = None) -> str | None:
+    if tavily_api_key:
+        return tavily_api_key
+    if HARDCODED_TAVILY_API_KEY:
+        return HARDCODED_TAVILY_API_KEY
+    return os.getenv("TAVILY_API_KEY")
+
+
+def get_search_provider(
+    provider: str,
+    brave_api_key: str | None = None,
+    tavily_api_key: str | None = None,
+) -> SearchProvider:
     normalized = (provider or "auto").strip().lower()
+    resolved_tavily_key = _resolve_tavily_api_key(tavily_api_key)
+
     if normalized in {"auto", "duckduckgo", "ddg"}:
+        if normalized == "auto" and resolved_tavily_key:
+            return TavilyProvider(resolved_tavily_key)
         if normalized == "auto" and brave_api_key:
             return BraveProvider(brave_api_key)
         return DuckDuckGoProvider()
+
+    if normalized == "tavily":
+        if not resolved_tavily_key:
+            raise ValueError("Tavily provider requires TAVILY_API_KEY or HARDCODED_TAVILY_API_KEY")
+        return TavilyProvider(resolved_tavily_key)
 
     if normalized == "brave":
         if not brave_api_key:
@@ -232,6 +303,7 @@ def search_web_results(
     provider: str,
     max_results: int,
     brave_api_key: str | None = None,
+    tavily_api_key: str | None = None,
 ) -> dict[str, object]:
     text = (query or "").strip()
     if not text:
@@ -241,7 +313,11 @@ def search_web_results(
         raise ValueError("max_results must be >= 1")
     max_results = min(max_results, 10)
 
-    adapter = get_search_provider(provider, brave_api_key=brave_api_key)
+    adapter = get_search_provider(
+        provider,
+        brave_api_key=brave_api_key,
+        tavily_api_key=tavily_api_key,
+    )
     results = adapter.query(text, max_results=max_results)
     sanitized_results = [
         SearchResult(

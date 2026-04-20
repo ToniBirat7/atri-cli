@@ -116,7 +116,7 @@ Prompt policy:
 - The Gemma 4 llama.cpp Jinja template accepts system content in the first system turn and injects tool declarations there, so prompts stay plain text and do not embed tool markup directly.
 
 Persistence:
-- `ORCHESTRATOR_DATABASE_URL` defaults to `sqlite:///orchestrator.db` for local persistence.
+- `ORCHESTRATOR_DATABASE_URL` defaults to `sqlite:///runtime/state/orchestrator.db` for local persistence.
 - Production compose uses PostgreSQL through `postgresql://...`.
 - Set `ORCHESTRATOR_ENABLE_PERSISTENCE=false` to disable conversation and turn recording.
 - Each `/chat` or `/chat/stream` request stores the conversation metadata, turn history, and tool-call audit trail.
@@ -221,7 +221,7 @@ PROMPT_POLICY_DISCLAIMER_TEXT=यो जानकारी मार्गदर
 PROMPT_POLICY_LEGAL_HELP_LINE=For human help, call 1660-01-333-55.
 
 # Persistence and auth
-ORCHESTRATOR_DATABASE_URL=sqlite:///orchestrator.db
+ORCHESTRATOR_DATABASE_URL=sqlite:///runtime/state/orchestrator.db
 ORCHESTRATOR_ENABLE_PERSISTENCE=true
 ORCHESTRATOR_AUTH_MODE=hybrid
 ORCHESTRATOR_JWT_SECRET=replace-with-a-long-random-secret
