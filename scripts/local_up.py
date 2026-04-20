@@ -202,6 +202,8 @@ def _prune_non_production(repo_dir: Path) -> None:
         repo_dir / "docs",
         repo_dir / "notes_images",
         repo_dir / "mcp",
+        repo_dir / "scripts",
+        repo_dir / "benchmarks",
         repo_dir / "benchmark_reports",
         repo_dir / ".github",
         repo_dir / ".idea",
@@ -214,9 +216,14 @@ def _prune_non_production(repo_dir: Path) -> None:
     remove_files = [
         repo_dir / "resources.md",
         repo_dir / "notes.ipynb",
+        repo_dir / ".dockerignore",
+        repo_dir / ".env.example",
     ]
     for path in remove_files:
         _remove_path(path)
+
+    for tmp_file in repo_dir.glob(".tmp_*"):
+        _remove_path(tmp_file)
 
     for ipynb in repo_dir.glob("**/*.ipynb"):
         _remove_path(ipynb)
@@ -225,9 +232,14 @@ def _prune_non_production(repo_dir: Path) -> None:
         if test_dir.is_dir():
             _remove_path(test_dir)
 
-    keep_top_level_md = {"README.md", "QUICKSTART.md", "LICENSE", "LICENSE.md"}
-    for md in repo_dir.glob("*.md"):
-        if md.name not in keep_top_level_md:
+    keep_markdown = {
+        Path("README.md"),
+        Path("QUICKSTART.md"),
+        Path("LICENSE"),
+        Path("LICENSE.md"),
+    }
+    for md in repo_dir.glob("**/*.md"):
+        if md.relative_to(repo_dir) not in keep_markdown:
             _remove_path(md)
 
 
@@ -368,6 +380,7 @@ def main() -> int:
     _install_dependencies(repo_dir)
     use_gpu = _detect_gpu()
     _build_llama(repo_dir, use_gpu)
+    _start_services_by_mode(repo_dir, use_gpu, args.mode)
 
     if not args.no_production_prune:
         _prune_non_production(repo_dir)
@@ -376,7 +389,6 @@ def main() -> int:
         _clean_local_caches(repo_dir)
         _clean_system_caches(repo_dir)
 
-    _start_services_by_mode(repo_dir, use_gpu, args.mode)
     return 0
 
 
