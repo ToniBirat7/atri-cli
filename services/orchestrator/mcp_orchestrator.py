@@ -22,6 +22,7 @@ import inspect
 import importlib.util
 from pathlib import Path
 import shlex
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,26 @@ class MCPServerConfig:
     transport: str = "stdio"  # stdio, sse, websocket
 
 
+@dataclass
+class MCPErrorDetail:
+    code: str
+    message: str
+    retryable: bool
+
+
+@dataclass
+class MCPReconnectResult:
+    status: str
+    success: bool
+    error_code: Optional[str] = None
+    reason: Optional[str] = None
+    retryable: Optional[bool] = None
+    attempts_used: int = 0
+    attempts_remaining: int = 0
+    next_retry_after_seconds: Optional[float] = None
+    recommended_fix: Optional[str] = None
+
+
 class MCPOrchestrator:
     """
     Orchestrator for MCP server lifecycle and tool execution.
@@ -71,11 +92,182 @@ class MCPOrchestrator:
         self._server_last_retry: Dict[str, float] = {}  # server_name -> timestamp
         self._deferred_discovery: Dict[str, bool] = {}  # server_name -> deferred flag
         self._deferred_tools_cache: Dict[str, List[Dict[str, Any]]] = {}  # server_name -> tools
+        self._tool_discovery_cache: Dict[str, Dict[str, Any]] = {}  # server_name -> {tools, cached_at}
+        self._last_discovery_source: Dict[str, str] = {}  # server_name -> cache|fresh
+        self._last_refresh_metadata: Dict[str, Dict[str, Any]] = {}  # server_name -> metadata
+        self._startup_trace: Dict[str, Any] = {
+            "started_at": None,
+            "completed_at": None,
+            "servers": {},
+        }
         # Configuration
         self.MAX_TOOLS_BEFORE_DEFERRED = 50  # Defer if > 50 tools
         self.MAX_RETRY_ATTEMPTS = 5
         self.INITIAL_BACKOFF_SECONDS = 1
         self.MAX_BACKOFF_SECONDS = 60
+        self.STARTUP_MAX_ATTEMPTS = 3
+        self.STARTUP_INITIAL_BACKOFF_SECONDS = 1.0
+        self.STARTUP_MAX_BACKOFF_SECONDS = 8.0
+        self.DISCOVERY_CACHE_TTL_SECONDS = 30
+
+    def configure_runtime(
+        self,
+        *,
+        startup_max_attempts: Optional[int] = None,
+        startup_initial_backoff_seconds: Optional[float] = None,
+        startup_max_backoff_seconds: Optional[float] = None,
+        discovery_cache_ttl_seconds: Optional[int] = None,
+    ) -> None:
+        if startup_max_attempts is not None:
+            self.STARTUP_MAX_ATTEMPTS = max(1, int(startup_max_attempts))
+        if startup_initial_backoff_seconds is not None:
+            self.STARTUP_INITIAL_BACKOFF_SECONDS = max(0.0, float(startup_initial_backoff_seconds))
+        if startup_max_backoff_seconds is not None:
+            self.STARTUP_MAX_BACKOFF_SECONDS = max(0.0, float(startup_max_backoff_seconds))
+        if discovery_cache_ttl_seconds is not None:
+            self.DISCOVERY_CACHE_TTL_SECONDS = max(0, int(discovery_cache_ttl_seconds))
+
+    def reset_startup_trace(self, expected_servers: Optional[List[str]] = None) -> None:
+        self._startup_trace = {
+            "started_at": time.time(),
+            "completed_at": None,
+            "expected_servers": expected_servers or [],
+            "servers": {},
+        }
+
+    def complete_startup_trace(self) -> None:
+        self._startup_trace["completed_at"] = time.time()
+
+    def get_startup_trace_summary(self) -> Dict[str, Any]:
+        servers: Dict[str, Any] = self._startup_trace.get("servers", {})
+        failed = [name for name, item in servers.items() if item.get("status") != "initialized"]
+        initialized = [name for name, item in servers.items() if item.get("status") == "initialized"]
+        recommendations = [
+            item.get("recommended_fix")
+            for item in servers.values()
+            if item.get("recommended_fix")
+        ]
+        return {
+            "started_at": self._startup_trace.get("started_at"),
+            "completed_at": self._startup_trace.get("completed_at"),
+            "expected_servers": self._startup_trace.get("expected_servers", []),
+            "initialized_servers": initialized,
+            "failed_servers": failed,
+            "servers": servers,
+            "recommendations": recommendations,
+        }
+
+    def update_startup_trace_server(self, server_name: str, **fields: Any) -> None:
+        servers = self._startup_trace.setdefault("servers", {})
+        current = dict(servers.get(server_name, {}))
+        current.update(fields)
+        servers[server_name] = current
+
+    def _error_detail_from_exception(self, exc: BaseException) -> MCPErrorDetail:
+        if isinstance(exc, asyncio.TimeoutError):
+            return MCPErrorDetail(code="MCP_TOOL_TIMEOUT", message=str(exc), retryable=True)
+        if isinstance(exc, FileNotFoundError):
+            return MCPErrorDetail(code="MCP_SERVER_COMMAND_NOT_FOUND", message=str(exc), retryable=False)
+        if isinstance(exc, PermissionError):
+            return MCPErrorDetail(code="MCP_PERMISSION_DENIED", message=str(exc), retryable=False)
+        if isinstance(exc, ValueError):
+            return MCPErrorDetail(code="MCP_INVALID_CONFIGURATION", message=str(exc), retryable=False)
+        return MCPErrorDetail(code="MCP_INTERNAL_ERROR", message=str(exc), retryable=True)
+
+    def _recommended_fix(self, error_code: str) -> str:
+        if error_code == "MCP_SERVER_COMMAND_NOT_FOUND":
+            return "Verify MCP server command/path and runtime dependencies"
+        if error_code == "MCP_INVALID_CONFIGURATION":
+            return "Check MCP server config entries (name, command, transport)"
+        if error_code == "MCP_PERMISSION_DENIED":
+            return "Grant file/execute permissions for MCP module and workspace"
+        if error_code == "MCP_TOOL_TIMEOUT":
+            return "Increase tool timeout or reduce workload for MCP tools"
+        return "Inspect orchestrator logs for MCP startup details"
+
+    async def initialize_server_with_retry(self, config: MCPServerConfig) -> Dict[str, Any]:
+        attempts = 0
+        last_error: Optional[MCPErrorDetail] = None
+        max_attempts = max(1, self.STARTUP_MAX_ATTEMPTS)
+
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                await self.initialize_server(config)
+                result = {
+                    "status": "initialized",
+                    "attempts": attempts,
+                    "error_code": None,
+                    "error": None,
+                    "recommended_fix": None,
+                }
+                self._startup_trace.setdefault("servers", {})[config.name] = result
+                return result
+            except Exception as exc:
+                error = self._error_detail_from_exception(exc)
+                last_error = error
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "mcp.server.initialize.retryable_error",
+                            "server": config.name,
+                            "attempt": attempts,
+                            "max_attempts": max_attempts,
+                            "error_code": error.code,
+                            "error": error.message,
+                            "retryable": error.retryable,
+                        },
+                        ensure_ascii=True,
+                    )
+                )
+                if attempts >= max_attempts or not error.retryable:
+                    break
+                delay = min(
+                    self.STARTUP_MAX_BACKOFF_SECONDS,
+                    self.STARTUP_INITIAL_BACKOFF_SECONDS * (2 ** (attempts - 1)),
+                )
+                await asyncio.sleep(delay)
+
+        final_error = last_error or MCPErrorDetail(
+            code="MCP_INTERNAL_ERROR",
+            message="Unknown startup failure",
+            retryable=False,
+        )
+        result = {
+            "status": "failed",
+            "attempts": attempts,
+            "error_code": final_error.code,
+            "error": final_error.message,
+            "recommended_fix": self._recommended_fix(final_error.code),
+        }
+        self._startup_trace.setdefault("servers", {})[config.name] = result
+        raise MCPOrchestratorError(f"{final_error.code}: {final_error.message}")
+
+    def clear_tool_cache(self, server_name: Optional[str] = None) -> None:
+        if server_name is None:
+            self._tool_discovery_cache.clear()
+            return
+        self._tool_discovery_cache.pop(server_name, None)
+
+    def get_discovery_cache_status(self) -> Dict[str, Any]:
+        now = time.time()
+        result: Dict[str, Any] = {}
+        for server_name, entry in self._tool_discovery_cache.items():
+            cached_at = float(entry.get("cached_at", 0.0))
+            age_seconds = max(0.0, now - cached_at)
+            result[server_name] = {
+                "tool_count": len(entry.get("tools", [])),
+                "age_seconds": round(age_seconds, 3),
+                "ttl_seconds": self.DISCOVERY_CACHE_TTL_SECONDS,
+                "fresh": (
+                    self.DISCOVERY_CACHE_TTL_SECONDS == 0
+                    or age_seconds <= self.DISCOVERY_CACHE_TTL_SECONDS
+                ),
+            }
+        return result
+
+    def get_last_refresh_metadata(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self._last_refresh_metadata)
 
     def _try_load_local_module(self, config: MCPServerConfig) -> Optional[Any]:
         """Load local MCP Python module for in-process tool execution fallback."""
@@ -176,7 +368,7 @@ class MCPOrchestrator:
         }
         logger.info(f"MCP server {config.name} initialized")
 
-    async def discover_tools(self, server_name: str) -> List[Dict[str, Any]]:
+    async def discover_tools(self, server_name: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Discover available tools from an MCP server via ListTools.
 
@@ -185,6 +377,16 @@ class MCPOrchestrator:
         """
         if server_name not in self._servers:
             raise ValueError(f"Server {server_name} not initialized")
+
+        now = time.time()
+        if not force_refresh and self.DISCOVERY_CACHE_TTL_SECONDS > 0:
+            cache_entry = self._tool_discovery_cache.get(server_name)
+            if cache_entry is not None:
+                age_seconds = now - float(cache_entry.get("cached_at", 0.0))
+                if age_seconds <= self.DISCOVERY_CACHE_TTL_SECONDS:
+                    self._last_discovery_source[server_name] = "cache"
+                    return list(cache_entry.get("tools", []))
+
         server = self._servers[server_name]
         if server.get("mode") == "inprocess-module":
             module = server["module"]
@@ -202,11 +404,22 @@ class MCPOrchestrator:
                         },
                     }
                 )
+            self._tool_discovery_cache[server_name] = {
+                "tools": tools,
+                "cached_at": now,
+            }
+            self._last_discovery_source[server_name] = "fresh"
             return tools
 
         # Placeholder for future MCP SDK mode
         logger.info(f"Discovering tools from {server_name}")
-        return []
+        tools: List[Dict[str, Any]] = []
+        self._tool_discovery_cache[server_name] = {
+            "tools": tools,
+            "cached_at": now,
+        }
+        self._last_discovery_source[server_name] = "fresh"
+        return tools
 
     async def execute_tool(
         self,
@@ -272,23 +485,58 @@ class MCPOrchestrator:
                         ) from exc
                     backoff = 0.1 * attempt
                     logger.warning(
-                        f"Tool {server_name}.{tool_name} timed out on attempt {attempt}/{max_retries}, retrying in {backoff}s"
+                        json.dumps(
+                            {
+                                "event": "mcp.tool.retry",
+                                "server": server_name,
+                                "tool": tool_name,
+                                "attempt": attempt,
+                                "max_retries": max_retries,
+                                "backoff_seconds": backoff,
+                                "error_code": "MCP_TOOL_TIMEOUT",
+                            },
+                            ensure_ascii=True,
+                        )
                     )
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     last_error = exc
+                    error = self._error_detail_from_exception(exc)
                     if attempt >= max_retries:
                         logger.error(
-                            f"Tool {server_name}.{tool_name} failed on attempt {attempt}/{max_retries}: {type(exc).__name__}: {exc}"
+                            json.dumps(
+                                {
+                                    "event": "mcp.tool.failed",
+                                    "server": server_name,
+                                    "tool": tool_name,
+                                    "attempt": attempt,
+                                    "max_retries": max_retries,
+                                    "error_code": error.code,
+                                    "error": error.message,
+                                },
+                                ensure_ascii=True,
+                            )
                         )
                         raise MCPToolExecutionError(
-                            f"Tool {server_name}.{tool_name} failed: {exc}"
+                            f"{error.code}: Tool {server_name}.{tool_name} failed: {exc}"
                         ) from exc
                     backoff = 0.1 * attempt
                     logger.warning(
-                        f"Tool {server_name}.{tool_name} failed on attempt {attempt}/{max_retries} ({type(exc).__name__}), retrying in {backoff}s"
+                        json.dumps(
+                            {
+                                "event": "mcp.tool.retry",
+                                "server": server_name,
+                                "tool": tool_name,
+                                "attempt": attempt,
+                                "max_retries": max_retries,
+                                "backoff_seconds": backoff,
+                                "error_code": error.code,
+                                "error": error.message,
+                            },
+                            ensure_ascii=True,
+                        )
                     )
                     await asyncio.sleep(backoff)
 
@@ -312,23 +560,50 @@ class MCPOrchestrator:
         for server_name in list(self._servers.keys()):
             await self.shutdown_server(server_name)
 
-    async def refresh_tools(self, tool_registry: 'ToolRegistry') -> Dict[str, int]:
+    async def refresh_tools(
+        self,
+        tool_registry: 'ToolRegistry',
+        *,
+        force_refresh: bool = True,
+        clear_cache: bool = False,
+    ) -> Dict[str, int]:
         """
         Refresh tool discovery from all active MCP servers.
         
         Returns:
             Dict mapping server_name -> count of discovered tools
         """
+        if clear_cache:
+            self.clear_tool_cache()
+
         results = {}
+        metadata: Dict[str, Dict[str, Any]] = {}
         for server_name in self._servers.keys():
             try:
-                tools = await self.discover_tools(server_name)
-                tool_registry.register_tools_from_mcp_discovery(tools, server_name)
+                tools = await self.discover_tools(server_name, force_refresh=force_refresh)
+                tool_registry.register_tools_from_mcp_discovery(server_name, tools)
                 results[server_name] = len(tools)
+                metadata[server_name] = {
+                    "status": "ok",
+                    "source": self._last_discovery_source.get(server_name, "unknown"),
+                    "tool_count": len(tools),
+                    "cache": self.get_discovery_cache_status().get(server_name, {}),
+                }
                 logger.info(f"Refreshed {len(tools)} tools from {server_name}")
             except Exception as e:
+                error = self._error_detail_from_exception(e)
                 logger.error(f"Failed to refresh tools from {server_name}: {e}")
                 results[server_name] = 0
+                metadata[server_name] = {
+                    "status": "error",
+                    "source": "error",
+                    "tool_count": 0,
+                    "error": str(e),
+                    "error_code": error.code,
+                    "retryable": error.retryable,
+                    "recommended_fix": self._recommended_fix(error.code),
+                }
+        self._last_refresh_metadata = metadata
         return results
 
     def _calculate_backoff_delay(self, server_name: str) -> float:
@@ -339,32 +614,104 @@ class MCPOrchestrator:
         delay = self.INITIAL_BACKOFF_SECONDS * (2 ** attempts)
         return min(delay, self.MAX_BACKOFF_SECONDS)
 
-    async def reconnect_server(self, server_name: str) -> bool:
+    async def reconnect_server(self, server_name: str) -> MCPReconnectResult:
         """
         Attempt to reconnect to a failed MCP server with exponential backoff.
         
         Returns:
-            True if reconnection succeeded, False otherwise
+            Structured reconnect result.
         """
+        now = time.time()
+
         if server_name not in self._server_configs:
             logger.error(f"Server {server_name} not in configs")
-            return False
+            return MCPReconnectResult(
+                status="unknown_server",
+                success=False,
+                error_code="MCP_SERVER_UNKNOWN",
+                reason="Server not found in orchestrator configuration",
+                retryable=False,
+                attempts_used=0,
+                attempts_remaining=0,
+                recommended_fix="Verify server name in MCP config",
+            )
+
+        existing = self._servers.get(server_name)
+        if existing and existing.get("status") == "initialized":
+            attempts = self._server_failures.get(server_name, 0)
+            return MCPReconnectResult(
+                status="already_initialized",
+                success=True,
+                attempts_used=attempts,
+                attempts_remaining=max(0, self.MAX_RETRY_ATTEMPTS - attempts),
+            )
 
         attempts = self._server_failures.get(server_name, 0)
         if attempts >= self.MAX_RETRY_ATTEMPTS:
             logger.error(f"Server {server_name} exceeded max retry attempts ({self.MAX_RETRY_ATTEMPTS})")
-            return False
+            return MCPReconnectResult(
+                status="max_attempts_exceeded",
+                success=False,
+                error_code="MCP_RECONNECT_MAX_ATTEMPTS_EXCEEDED",
+                reason="Maximum reconnect attempts exceeded",
+                retryable=False,
+                attempts_used=attempts,
+                attempts_remaining=0,
+                recommended_fix="Inspect startup summary and fix server configuration before retrying",
+            )
+
+        last_retry = self._server_last_retry.get(server_name, 0.0)
+        backoff_delay = self._calculate_backoff_delay(server_name)
+        retry_ready_at = last_retry + backoff_delay
+        if last_retry > 0 and now < retry_ready_at:
+            wait_seconds = max(0.0, retry_ready_at - now)
+            return MCPReconnectResult(
+                status="backoff_active",
+                success=False,
+                error_code="MCP_RECONNECT_BACKOFF_ACTIVE",
+                reason="Reconnect is temporarily delayed by backoff policy",
+                retryable=True,
+                attempts_used=attempts,
+                attempts_remaining=max(0, self.MAX_RETRY_ATTEMPTS - attempts),
+                next_retry_after_seconds=round(wait_seconds, 3),
+                recommended_fix="Wait for backoff window and retry",
+            )
 
         try:
             config = self._server_configs[server_name]
             await self.initialize_server(config)
             self._server_failures[server_name] = 0  # Reset on success
+            self._server_last_retry[server_name] = now
             logger.info(f"Successfully reconnected to server {server_name}")
-            return True
+            return MCPReconnectResult(
+                status="reconnected",
+                success=True,
+                attempts_used=attempts,
+                attempts_remaining=self.MAX_RETRY_ATTEMPTS,
+            )
         except Exception as e:
-            self._server_failures[server_name] = attempts + 1
-            logger.error(f"Reconnection attempt {attempts + 1} for {server_name} failed: {e}")
-            return False
+            attempts_after = attempts + 1
+            self._server_failures[server_name] = attempts_after
+            self._server_last_retry[server_name] = now
+            error = self._error_detail_from_exception(e)
+            logger.error(
+                "Reconnection attempt %s for %s failed [%s]: %s",
+                attempts_after,
+                server_name,
+                error.code,
+                e,
+            )
+            return MCPReconnectResult(
+                status="failed",
+                success=False,
+                error_code=error.code,
+                reason=error.message,
+                retryable=error.retryable,
+                attempts_used=attempts_after,
+                attempts_remaining=max(0, self.MAX_RETRY_ATTEMPTS - attempts_after),
+                next_retry_after_seconds=round(self._calculate_backoff_delay(server_name), 3),
+                recommended_fix=self._recommended_fix(error.code),
+            )
 
     def should_defer_discovery(self, tool_count: int) -> bool:
         """Check if tool discovery should be deferred based on tool count threshold."""

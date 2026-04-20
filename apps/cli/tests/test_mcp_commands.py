@@ -114,10 +114,15 @@ def test_mcp_refresh_displays_results(monkeypatch):
     mock_client = Mock()
     mock_client.request_json.return_value = {
         "status": "success",
+        "error_code": None,
         "total_discovered": 15,
         "servers": {
             "filesystem": 10,
             "shell": 5,
+        },
+        "refresh_metadata": {
+            "filesystem": {"source": "fresh"},
+            "shell": {"source": "fresh"},
         },
     }
 
@@ -127,14 +132,17 @@ def test_mcp_refresh_displays_results(monkeypatch):
         output_lines.append(" ".join(str(arg) for arg in args))
 
     monkeypatch.setattr("builtins.print", mock_print)
-    _mcp_refresh(mock_client)
+    _mcp_refresh(mock_client, use_cache=False, clear_cache=False)
 
     output = "\n".join(output_lines)
     assert "success" in output
     assert "15" in output
     assert "filesystem" in output
     assert "shell" in output
-    mock_client.request_json.assert_called_once_with("POST", "/tools/refresh")
+    mock_client.request_json.assert_called_once_with(
+        "POST",
+        "/tools/refresh?force_refresh=true&clear_cache=false",
+    )
 
 
 def test_mcp_refresh_handles_partial_failure(monkeypatch):
@@ -142,10 +150,19 @@ def test_mcp_refresh_handles_partial_failure(monkeypatch):
     mock_client = Mock()
     mock_client.request_json.return_value = {
         "status": "partial_failure",
+        "error_code": "MCP_REFRESH_PARTIAL_FAILURE",
         "total_discovered": 10,
         "servers": {
             "filesystem": 10,
             "shell": 0,
+        },
+        "refresh_metadata": {
+            "filesystem": {"source": "fresh"},
+            "shell": {
+                "source": "error",
+                "error_code": "MCP_INTERNAL_ERROR",
+                "recommended_fix": "Inspect orchestrator logs",
+            },
         },
     }
 
@@ -155,11 +172,12 @@ def test_mcp_refresh_handles_partial_failure(monkeypatch):
         output_lines.append(" ".join(str(arg) for arg in args))
 
     monkeypatch.setattr("builtins.print", mock_print)
-    _mcp_refresh(mock_client)
+    _mcp_refresh(mock_client, use_cache=False, clear_cache=False)
 
     output = "\n".join(output_lines)
     assert "partial_failure" in output
     assert "10" in output
+    assert "MCP_REFRESH_PARTIAL_FAILURE" in output
 
 
 def test_mcp_reconnect_success(monkeypatch):
@@ -168,7 +186,12 @@ def test_mcp_reconnect_success(monkeypatch):
     mock_client.request_json.return_value = {
         "status": "reconnected",
         "success": True,
+        "error_code": None,
         "reason": None,
+        "attempts_used": 1,
+        "attempts_remaining": 4,
+        "next_retry_after_seconds": None,
+        "recommended_fix": None,
     }
 
     output_lines = []
@@ -188,9 +211,14 @@ def test_mcp_reconnect_failure(monkeypatch):
     """Test failed MCP server reconnection."""
     mock_client = Mock()
     mock_client.request_json.return_value = {
-        "status": "failed",
+        "status": "backoff_active",
         "success": False,
-        "reason": "Max retry attempts exceeded",
+        "error_code": "MCP_RECONNECT_BACKOFF_ACTIVE",
+        "reason": "Reconnect is temporarily delayed by backoff policy",
+        "attempts_used": 2,
+        "attempts_remaining": 3,
+        "next_retry_after_seconds": 1.25,
+        "recommended_fix": "Wait for backoff window and retry",
     }
 
     output_lines = []
@@ -203,6 +231,7 @@ def test_mcp_reconnect_failure(monkeypatch):
 
     output = "\n".join(output_lines)
     assert "Failed" in output or "failed" in output
+    assert "MCP_RECONNECT_BACKOFF_ACTIVE" in output
 
 
 def test_mcp_deferred_enable(monkeypatch):

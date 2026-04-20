@@ -6,13 +6,28 @@ import sys
 import json
 import time
 import math
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from .client import OrchestratorClient
 from .telemetry import SessionTelemetry
-from .tui import TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
+from .tui import DashboardFrame, TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.formatted_text import AnyFormattedText
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.styles import Style
+
+    PROMPT_TOOLKIT_AVAILABLE = True
+except Exception:
+    PROMPT_TOOLKIT_AVAILABLE = False
 
 
 PERMISSION_MODES = {
@@ -45,6 +60,22 @@ PATH_INPUT_KEYS = {
 
 
 _TUI = TUIRenderer()
+
+SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "/help": "Show interactive command help",
+    "/mode": "Show or set permission mode",
+    "/timeline": "Show or set timeline verbosity",
+    "/exit": "Exit interactive mode",
+    "/quit": "Exit interactive mode",
+}
+
+
+def _env_first(*names: str, default: Optional[str] = None) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value != "":
+            return value
+    return default
 
 
 @dataclass
@@ -95,8 +126,217 @@ def _interactive_help_text() -> str:
         "  /mode <name>        Set permission mode\n"
         "  /timeline           Show timeline verbosity\n"
         "  /timeline <level>   Set timeline verbosity (minimal/normal/debug)\n"
-        "  /exit | /quit       Exit interactive mode"
+        "  /exit | /quit       Exit interactive mode\n"
+        "\nKeyboard:\n"
+        "  Tab                 Slash command autocomplete\n"
+        "  Ctrl-R              History search\n"
+        "  Ctrl-N              Insert newline while composing"
     )
+
+
+def _fullscreen_tui_enabled() -> bool:
+    flag = _env_first("ATRI_FULLSCREEN_TUI", "TARBAR_FULLSCREEN_TUI")
+    if flag is not None:
+        return flag.strip().lower() not in {"0", "false", "no", "off"}
+    return _TUI.fullscreen_supported()
+
+
+def _reduced_motion_enabled() -> bool:
+    flag = _env_first("ATRI_REDUCED_MOTION", "TARBAR_REDUCED_MOTION")
+    if flag is None:
+        return False
+    return flag.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _preview_line(text: str, limit: int = 110) -> str:
+    flattened = " ".join(text.split())
+    if len(flattened) <= limit:
+        return flattened
+    return flattened[: max(0, limit - 3)] + "..."
+
+
+def _append_bounded(lines: list[str], entry: str, limit: int) -> None:
+    lines.append(entry)
+    if len(lines) > limit:
+        del lines[: len(lines) - limit]
+
+
+def _render_interactive_dashboard(
+    *,
+    conversation_id: Optional[str],
+    permission_state: PermissionState,
+    status: Optional[TurnStatus],
+    conversation_log: list[str],
+    tool_log: list[str],
+    note: str,
+    reduced_motion: bool,
+) -> None:
+    subtitle = note
+    if conversation_id:
+        subtitle = f"{subtitle} | conversation {conversation_id}"
+
+    _TUI.render_fullscreen_dashboard(
+        DashboardFrame(
+            title="Atri Code CLI",
+            subtitle=subtitle,
+            mode=permission_state.mode,
+            status=status,
+            conversation=conversation_log[-12:],
+            tool_events=tool_log[-10:],
+            command_hints=[
+                "/help, /mode, /timeline, /exit",
+                "Tab completes slash commands",
+                "Ctrl-N inserts a newline in multiline input",
+            ],
+            footer=[
+                "Tab: complete | Ctrl-R: history search | Ctrl-N: newline | Enter: submit",
+                f"timeline={_TUI.timeline_verbosity} | reduced_motion={'on' if reduced_motion else 'off'}",
+            ],
+            reduced_motion=reduced_motion,
+        )
+    )
+
+
+if PROMPT_TOOLKIT_AVAILABLE:
+    class _SlashCompleter(Completer):
+        """Autocomplete slash commands and known argument values."""
+
+        def get_completions(self, document: Document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/"):
+                return
+
+            stripped = text.lstrip()
+            parts = stripped.split()
+
+            if len(parts) <= 1 and not stripped.endswith(" "):
+                for command, description in sorted(SLASH_COMMAND_DESCRIPTIONS.items()):
+                    if command.startswith(stripped):
+                        yield Completion(
+                            command,
+                            start_position=-len(stripped),
+                            display_meta=description,
+                        )
+                return
+
+            base_command = parts[0] if parts else stripped
+            if base_command == "/mode" and stripped.startswith("/mode "):
+                suffix = stripped[len("/mode "):]
+                for mode in sorted(PERMISSION_MODES):
+                    if mode.startswith(suffix):
+                        yield Completion(
+                            mode,
+                            start_position=-len(suffix),
+                            display_meta="Permission mode",
+                        )
+                return
+
+            if base_command == "/timeline" and stripped.startswith("/timeline "):
+                suffix = stripped[len("/timeline "):]
+                for level in TIMELINE_VERBOSITY_LEVELS:
+                    if level.startswith(suffix):
+                        yield Completion(
+                            level,
+                            start_position=-len(suffix),
+                            display_meta="Timeline verbosity",
+                        )
+
+
+def _slash_hint_for_input(text: str) -> Optional[str]:
+    stripped = (text or "").strip()
+    if not stripped.startswith("/"):
+        return None
+
+    parts = stripped.split()
+    command = parts[0]
+
+    if command in {"/mode", "/timeline"} and len(parts) > 1:
+        value = parts[1]
+        if command == "/mode":
+            if value not in PERMISSION_MODES:
+                return f"unknown mode '{value}' | valid: {', '.join(sorted(PERMISSION_MODES))}"
+            return f"set permission mode -> {value}"
+        if command == "/timeline":
+            if value not in TIMELINE_VERBOSITY_LEVELS:
+                return (
+                    f"unknown timeline level '{value}' | "
+                    f"valid: {', '.join(TIMELINE_VERBOSITY_LEVELS)}"
+                )
+            return f"set timeline verbosity -> {value}"
+
+    if command in SLASH_COMMAND_DESCRIPTIONS:
+        return SLASH_COMMAND_DESCRIPTIONS[command]
+
+    candidates = [name for name in sorted(SLASH_COMMAND_DESCRIPTIONS) if name.startswith(command)]
+    if candidates:
+        return f"matching: {', '.join(candidates)}"
+    return f"unknown command '{command}' | try /help"
+
+
+def _build_prompt_toolkit_session() -> Optional[Any]:
+    if not PROMPT_TOOLKIT_AVAILABLE:
+        return None
+
+    history_path = Path.home() / ".local" / "share" / "atri-code-cli" / "history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    key_bindings = KeyBindings()
+
+    @key_bindings.add("c-n")
+    def _(event):
+        event.app.current_buffer.insert_text("\n")
+
+    return PromptSession(
+        history=FileHistory(str(history_path)),
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=_SlashCompleter() if PROMPT_TOOLKIT_AVAILABLE else None,
+        complete_while_typing=True,
+        key_bindings=key_bindings,
+    )
+
+
+def _prompt_toolkit_bottom_toolbar(permission_state: PermissionState, text: str) -> AnyFormattedText:
+    hint = _slash_hint_for_input(text)
+    left = f" mode={permission_state.mode} "
+    if hint:
+        return [
+            ("class:toolbar", left),
+            ("class:toolbar", "| "),
+            ("class:toolbar", hint),
+        ]
+    return [("class:toolbar", left), ("class:toolbar", "| Tab complete | Ctrl-R history | Ctrl-N newline")]
+
+
+def _read_interactive_input(
+    session: Optional[Any],
+    permission_state: PermissionState,
+) -> Optional[str]:
+    if session is None:
+        try:
+            return input(f"\n{_style(f'atri-cli[{permission_state.mode}]> ', color='cyan', bold=True)}").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    try:
+        user_input = session.prompt(
+            f"atri-cli[{permission_state.mode}]> ",
+            bottom_toolbar=lambda: _prompt_toolkit_bottom_toolbar(
+                permission_state,
+                session.default_buffer.document.text,
+            ),
+            style=_PTK_STYLE,
+        )
+        return user_input.strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+if PROMPT_TOOLKIT_AVAILABLE:
+    _PTK_STYLE = Style.from_dict({
+        "toolbar": "bg:#1f2937 #d1d5db",
+    })
+else:
+    _PTK_STYLE = {}
 
 
 def _tui_enabled() -> bool:
@@ -124,7 +364,9 @@ def _print_turn_card(turn_number: int, mode: str) -> None:
     _TUI.print_turn_card(turn_number, mode)
 
 
-def _render_timeline_event(event: dict[str, Any], output_format: str) -> None:
+def _render_timeline_event(event: dict[str, Any], output_format: str, quiet: bool = False) -> None:
+    if quiet:
+        return
     _TUI.render_timeline_event(event, output_format)
 
 
@@ -276,6 +518,10 @@ def _handle_interactive_local_command(user_input: str, permission_state: Permiss
         print(f"timeline_verbosity set to {requested}")
         return True
 
+    if user_input.startswith("/"):
+        print(f"Unknown command: {user_input}. Type /help for available commands.")
+        return True
+
     return False
 
 
@@ -285,6 +531,7 @@ def _render_permission_event(
     permission_state: PermissionState,
     allowed_directory: Optional[str],
     interactive: bool,
+    quiet: bool = False,
 ) -> None:
     if event.get("type") != "tool_call_start":
         return
@@ -306,7 +553,8 @@ def _render_permission_event(
             "deny": permission_state.deny,
         },
     )
-    print(f"\n[permission] {tool_call} -> {response.get('action')} ({response.get('reason')})")
+    if not quiet:
+        print(f"\n[permission] {tool_call} -> {response.get('action')} ({response.get('reason')})")
 
     if tool_name not in WRITE_LIKE_TOOLS:
         return
@@ -320,15 +568,18 @@ def _render_permission_event(
         if _is_path_within_allowed_directory(target_path, allowed_directory):
             continue
 
-        print(f"[safety] Write target outside allowed directory: {target_path}")
+        if not quiet:
+            print(f"[safety] Write target outside allowed directory: {target_path}")
         if interactive:
             allowed = _prompt_write_target(tool_name, target_path)
             if allowed:
                 permission_state.allow.append(f"{tool_name}({target_path})")
-                print(f"[permission] Added allow rule for {tool_name}({target_path})")
+                if not quiet:
+                    print(f"[permission] Added allow rule for {tool_name}({target_path})")
             else:
                 permission_state.deny.append(f"{tool_name}({target_path})")
-                print(f"[permission] Added deny rule for {tool_name}({target_path})")
+                if not quiet:
+                    print(f"[permission] Added deny rule for {tool_name}({target_path})")
 
 
 def _print_stream_response(
@@ -540,20 +791,51 @@ def _run_interactive(
     output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
-    print(_style("Tarbar CLI", color="cyan", bold=True) + " interactive mode")
-    print(_style("Type /help for commands.", dim=True))
-    print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
-    if conversation_id:
-        _print_info(f"Resuming conversation: {conversation_id}")
+    fullscreen_mode = _fullscreen_tui_enabled()
+    reduced_motion = _reduced_motion_enabled()
+    conversation_log: list[str] = []
+    tool_log: list[str] = []
+    current_status: Optional[TurnStatus] = None
+
+    if fullscreen_mode:
+        _render_interactive_dashboard(
+            conversation_id=conversation_id,
+            permission_state=permission_state,
+            status=current_status,
+            conversation_log=conversation_log,
+            tool_log=tool_log,
+            note="interactive mode",
+            reduced_motion=reduced_motion,
+        )
+    else:
+        print(_style("Atri Code CLI", color="cyan", bold=True) + " interactive mode")
+        print(_style("Type /help for commands.", dim=True))
+        print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
+        if PROMPT_TOOLKIT_AVAILABLE:
+            print(_style("Interactive shell: prompt_toolkit (Tab completion, Ctrl-R history, Ctrl-N newline)", dim=True))
+        else:
+            print(_style("Interactive shell: basic fallback (install prompt_toolkit for autocomplete/history)", dim=True))
+        if conversation_id:
+            _print_info(f"Resuming conversation: {conversation_id}")
 
     active_conversation_id = conversation_id
     turn_number = 0
     effective_output_format = "stream-json" if stream_json else output_format
+    prompt_session = _build_prompt_toolkit_session()
 
     while True:
-        try:
-            user_input = input(f"\n{_style(f'tarbar[{permission_state.mode}]> ', color='cyan', bold=True)}").strip()
-        except (KeyboardInterrupt, EOFError):
+        if fullscreen_mode:
+            _render_interactive_dashboard(
+                conversation_id=active_conversation_id,
+                permission_state=permission_state,
+                status=current_status,
+                conversation_log=conversation_log,
+                tool_log=tool_log,
+                note="waiting for input",
+                reduced_motion=reduced_motion,
+            )
+        user_input = _read_interactive_input(prompt_session, permission_state)
+        if user_input is None:
             print("\nExiting.")
             return
 
@@ -563,6 +845,16 @@ def _run_interactive(
             _print_success("Goodbye.")
             return
         if _handle_interactive_local_command(user_input, permission_state):
+            if fullscreen_mode:
+                _render_interactive_dashboard(
+                    conversation_id=active_conversation_id,
+                    permission_state=permission_state,
+                    status=current_status,
+                    conversation_log=conversation_log,
+                    tool_log=tool_log,
+                    note=f"command handled: {user_input}",
+                    reduced_motion=reduced_motion,
+                )
             continue
 
         turn_number += 1
@@ -576,7 +868,25 @@ def _run_interactive(
         exact_input_tokens = 0
         exact_output_tokens = 0
         has_exact_usage = False
-        if effective_output_format == "text":
+        current_status = TurnStatus(
+            turn_number=turn_number,
+            elapsed_seconds=0.0,
+            input_tokens=input_tokens,
+            output_tokens=0,
+            tool_calls=tool_calls,
+            phase="thinking",
+        )
+        if fullscreen_mode:
+            _render_interactive_dashboard(
+                conversation_id=active_conversation_id,
+                permission_state=permission_state,
+                status=current_status,
+                conversation_log=conversation_log,
+                tool_log=tool_log,
+                note=f"turn {turn_number} started",
+                reduced_motion=reduced_motion,
+            )
+        elif effective_output_format == "text":
             _print_turn_card(turn_number, permission_state.mode)
             _update_live_status(turn_number, turn_start, input_tokens, output_chars, tool_calls, "thinking")
 
@@ -585,13 +895,13 @@ def _run_interactive(
             if event.get("done"):
                 break
             if "event" in event and isinstance(event["event"], dict):
-                _render_timeline_event(event["event"], effective_output_format)
+                _render_timeline_event(event["event"], effective_output_format, quiet=fullscreen_mode)
                 event_type = str(event["event"].get("type") or "")
                 if event_type == "usage":
                     exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
                     exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
                     has_exact_usage = True
-                    if not content_started:
+                    if not content_started and not fullscreen_mode:
                         _update_live_status(
                             turn_number,
                             turn_start,
@@ -606,7 +916,9 @@ def _run_interactive(
                     tool_calls += 1
                     tool_name = str(event["event"].get("tool_name") or "tool")
                     tool_names.append(tool_name)
-                    if not content_started:
+                    if fullscreen_mode:
+                        _append_bounded(tool_log, f"turn {turn_number}: tool started {tool_name}", 10)
+                    if not content_started and not fullscreen_mode:
                         _update_live_status(
                             turn_number,
                             turn_start,
@@ -617,7 +929,7 @@ def _run_interactive(
                             output_tokens_exact=exact_output_tokens if has_exact_usage else None,
                         )
                 elif event_type == "turn_complete":
-                    if not content_started:
+                    if not content_started and not fullscreen_mode:
                         _update_live_status(
                             turn_number,
                             turn_start,
@@ -628,7 +940,7 @@ def _run_interactive(
                             output_tokens_exact=exact_output_tokens if has_exact_usage else None,
                         )
                 else:
-                    if not content_started:
+                    if not content_started and not fullscreen_mode:
                         _update_live_status(
                             turn_number,
                             turn_start,
@@ -644,6 +956,7 @@ def _run_interactive(
                     permission_state,
                     allowed_directory=allowed_directory,
                     interactive=True,
+                    quiet=fullscreen_mode,
                 )
                 continue
             if "conversation_id" in event:
@@ -656,13 +969,32 @@ def _run_interactive(
                 if telemetry:
                     telemetry.errors.append(event["error"])
                 _emit_error(effective_output_format, str(event["error"]))
+                if fullscreen_mode:
+                    _append_bounded(tool_log, f"turn {turn_number}: error {event['error']}", 10)
+                    current_status = TurnStatus(
+                        turn_number=turn_number,
+                        elapsed_seconds=max(0.0, time.time() - turn_start),
+                        input_tokens=exact_input_tokens if has_exact_usage else input_tokens,
+                        output_tokens=exact_output_tokens if has_exact_usage else _estimate_tokens("".join(chunks)),
+                        tool_calls=tool_calls,
+                        phase="error",
+                    )
+                    _render_interactive_dashboard(
+                        conversation_id=active_conversation_id,
+                        permission_state=permission_state,
+                        status=current_status,
+                        conversation_log=conversation_log,
+                        tool_log=tool_log,
+                        note=f"turn {turn_number} failed",
+                        reduced_motion=reduced_motion,
+                    )
                 break
             if "content" in event:
                 text = event["content"]
                 output_chars += len(text)
                 if effective_output_format == "stream-json":
                     print(json.dumps({"type": "content", "text": text}))
-                elif effective_output_format == "text":
+                elif effective_output_format == "text" and not fullscreen_mode:
                     if not chunks:
                         _status_clear()
                         print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
@@ -675,6 +1007,14 @@ def _run_interactive(
         response_text = "".join(chunks)
         _status_clear()
         turn_duration = time.time() - turn_start
+
+        if fullscreen_mode:
+            _append_bounded(conversation_log, f"you: {_preview_line(user_input)}", 12)
+            _append_bounded(conversation_log, f"atri: {_preview_line(response_text or '(no response)')}", 12)
+            if tool_names:
+                names = ", ".join(tool_names[:3])
+                suffix = " ..." if len(tool_names) > 3 else ""
+                _append_bounded(tool_log, f"turn {turn_number}: {names}{suffix}", 10)
 
         if telemetry:
             if has_exact_usage:
@@ -713,18 +1053,37 @@ def _run_interactive(
             if active_conversation_id:
                 print(json.dumps({"type": "conversation_id", "conversation_id": active_conversation_id}))
         else:
-            print()
-            _print_turn_status_summary(
-                turn_number,
-                turn_start,
-                exact_input_tokens if has_exact_usage else input_tokens,
-                output_chars,
-                tool_calls,
-                "complete",
-                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
-            )
-            if active_conversation_id:
-                _print_info(f"conversation_id: {active_conversation_id}")
+            if fullscreen_mode:
+                current_status = TurnStatus(
+                    turn_number=turn_number,
+                    elapsed_seconds=turn_duration,
+                    input_tokens=exact_input_tokens if has_exact_usage else input_tokens,
+                    output_tokens=exact_output_tokens if has_exact_usage else _estimate_tokens(response_text),
+                    tool_calls=tool_calls,
+                    phase="complete",
+                )
+                _render_interactive_dashboard(
+                    conversation_id=active_conversation_id,
+                    permission_state=permission_state,
+                    status=current_status,
+                    conversation_log=conversation_log,
+                    tool_log=tool_log,
+                    note=f"turn {turn_number} complete",
+                    reduced_motion=reduced_motion,
+                )
+            else:
+                print()
+                _print_turn_status_summary(
+                    turn_number,
+                    turn_start,
+                    exact_input_tokens if has_exact_usage else input_tokens,
+                    output_chars,
+                    tool_calls,
+                    "complete",
+                    output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                )
+                if active_conversation_id:
+                    _print_info(f"conversation_id: {active_conversation_id}")
 
 
 def _sessions_list(client: OrchestratorClient) -> None:
@@ -810,7 +1169,14 @@ def _mcp_list_tools(client: OrchestratorClient) -> None:
 def _mcp_status(client: OrchestratorClient) -> None:
     response = client.request_json("GET", "/health")
     print(_style(f"Status: {response.get('status')}", color="cyan", bold=True))
+    print(f"Ready: {response.get('ready')}")
     print(f"LLM connected: {response.get('llm_connected')}")
+    readiness_issues = response.get("readiness_issues") or []
+    if readiness_issues:
+        print("Readiness issues:")
+        for issue in readiness_issues:
+            print(f"  - {issue}")
+
     mcp_servers = response.get("mcp_servers", {})
     if mcp_servers:
         print("\n" + _style("MCP servers:", color="cyan", bold=True))
@@ -819,26 +1185,74 @@ def _mcp_status(client: OrchestratorClient) -> None:
     else:
         print("\nNo MCP servers configured.")
 
+    startup_summary = response.get("startup_summary") or {}
+    if startup_summary:
+        failed = startup_summary.get("failed_servers") or []
+        initialized = startup_summary.get("initialized_servers") or []
+        print("\n" + _style("Startup summary:", color="cyan", bold=True))
+        print(f"  initialized_servers={len(initialized)}")
+        print(f"  failed_servers={len(failed)}")
+        recommendations = startup_summary.get("recommendations") or []
+        if recommendations:
+            print("  recommendations:")
+            for recommendation in recommendations:
+                print(f"    - {recommendation}")
 
-def _mcp_refresh(client: OrchestratorClient) -> None:
-    response = client.request_json("POST", "/tools/refresh")
+
+def _mcp_startup_summary(client: OrchestratorClient) -> None:
+    response = client.request_json("GET", "/mcp/startup-summary")
+    summary = response.get("summary") or {}
+    print(_style("MCP startup summary", color="cyan", bold=True))
+    print(f"Initialized servers: {', '.join(summary.get('initialized_servers') or []) or 'none'}")
+    print(f"Failed servers: {', '.join(summary.get('failed_servers') or []) or 'none'}")
+    recommendations = summary.get("recommendations") or []
+    if recommendations:
+        print("Recommendations:")
+        for recommendation in recommendations:
+            print(f"  - {recommendation}")
+
+
+def _mcp_refresh(client: OrchestratorClient, use_cache: bool, clear_cache: bool) -> None:
+    force_refresh = not use_cache
+    response = client.request_json(
+        "POST",
+        f"/tools/refresh?force_refresh={'true' if force_refresh else 'false'}&clear_cache={'true' if clear_cache else 'false'}",
+    )
     print(f"Refresh status: {response.get('status')}")
+    if response.get("error_code"):
+        print(f"Error code: {response.get('error_code')}")
     print(f"Total tools discovered: {response.get('total_discovered')}")
     servers = response.get("servers", {})
+    metadata = response.get("refresh_metadata", {})
     if servers:
         print("\nTools by server:")
         for server_name, count in servers.items():
-            print(f"  {server_name}: {count} tools")
+            server_meta = metadata.get(server_name) or {}
+            source = server_meta.get("source", "unknown")
+            line = f"  {server_name}: {count} tools (source={source})"
+            if server_meta.get("error_code"):
+                line += f" error_code={server_meta.get('error_code')}"
+            print(line)
+            if server_meta.get("recommended_fix"):
+                print(f"    fix: {server_meta.get('recommended_fix')}")
 
 
 def _mcp_reconnect(client: OrchestratorClient, server_name: str) -> None:
     response = client.request_json("POST", "/mcp/reconnect", {"server": server_name})
     print(f"Reconnection status: {response.get('status')}")
+    if response.get("error_code"):
+        print(f"Error code: {response.get('error_code')}")
+    print(f"Attempts used: {response.get('attempts_used')}")
+    print(f"Attempts remaining: {response.get('attempts_remaining')}")
+    if response.get("next_retry_after_seconds") is not None:
+        print(f"Next retry after: {response.get('next_retry_after_seconds')}s")
     if response.get("success"):
         print(f"Successfully reconnected to {server_name}")
     else:
         print(f"Failed to reconnect to {server_name}")
         print(f"Reason: {response.get('reason')}")
+        if response.get("recommended_fix"):
+            print(f"Recommended fix: {response.get('recommended_fix')}")
 
 
 def _mcp_deferred(client: OrchestratorClient, server_name: str, enabled: bool) -> None:
@@ -894,21 +1308,87 @@ def _worktrees_clean() -> None:
         print(f"Error cleaning worktrees: {e}")
 
 
+def _cleanup(mode: str, assume_yes: bool) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "reset_local_state.py"
+    if not script.exists():
+        raise RuntimeError(f"cleanup script not found: {script}")
+
+    command = [sys.executable, str(script)]
+    if assume_yes:
+        command.append("--yes")
+    if mode in {"deep", "docker"}:
+        command.append("--include-frontend-build")
+    if mode == "docker":
+        command.append("--with-docker-volumes")
+
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout.rstrip())
+    if completed.returncode != 0:
+        if completed.stderr:
+            print(completed.stderr.rstrip(), file=sys.stderr)
+        raise RuntimeError(f"cleanup failed (mode={mode}, exit={completed.returncode})")
+
+
+def _doctor(client: OrchestratorClient, output_format: str) -> None:
+    checks: list[dict[str, Any]] = []
+
+    def _record(name: str, path: str) -> None:
+        try:
+            response = client.request_json("GET", path)
+            checks.append({"name": name, "ok": True, "path": path, "response": response})
+        except Exception as exc:
+            checks.append({"name": name, "ok": False, "path": path, "error": str(exc)})
+
+    _record("liveness", "/live")
+    _record("health", "/health")
+    _record("readiness", "/ready")
+    _record("tools", "/tools")
+
+    all_ok = all(item["ok"] for item in checks)
+    if output_format in {"json", "stream-json"}:
+        print(json.dumps({"type": "doctor", "ok": all_ok, "checks": checks}))
+    else:
+        print(_style("Atri Code doctor", color="cyan", bold=True))
+        for item in checks:
+            status = "ok" if item["ok"] else "failed"
+            prefix = _style("[ok]", color="green", bold=True) if item["ok"] else _style("[failed]", color="red", bold=True)
+            print(f"{prefix} {item['name']} {item['path']} -> {status}")
+            if item["ok"]:
+                if item["name"] == "readiness":
+                    print(f"  response={item['response']}")
+            else:
+                print(f"  error={item['error']}")
+
+        if all_ok:
+            _print_success("Doctor checks passed. Runtime is ready.")
+        else:
+            _print_error("Doctor checks failed. Run `atri-cli mcp status` and inspect orchestrator logs.")
+            raise SystemExit(1)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Tarbar CLI")
+    parser = argparse.ArgumentParser(description="Atri Code CLI")
     parser.add_argument("--prompt", help="Prompt for print/interactive mode")
     parser.add_argument("-p", "--print", action="store_true", dest="print_mode", help="Run one-shot mode and exit")
     parser.add_argument("-r", "--resume", help="Resume a conversation id")
-    parser.add_argument("--api-url", default=os.getenv("TARBAR_API_URL", "http://127.0.0.1:8001"))
-    parser.add_argument("--api-key", default=os.getenv("TARBAR_API_KEY"))
+    parser.add_argument("--api-url", default=_env_first("ATRI_API_URL", "TARBAR_API_URL", default="http://127.0.0.1:8001"))
+    parser.add_argument("--api-key", default=_env_first("ATRI_API_KEY", "TARBAR_API_KEY"))
     parser.add_argument(
         "--allowed-directory",
-        default=os.getenv("TARBAR_ALLOWED_DIRECTORY"),
+        default=_env_first("ATRI_ALLOWED_DIRECTORY", "TARBAR_ALLOWED_DIRECTORY"),
         help="Optional filesystem scope root",
     )
     parser.add_argument(
         "--permission-mode",
-        default=os.getenv("TARBAR_PERMISSION_MODE", "default"),
+        default=_env_first("ATRI_PERMISSION_MODE", "TARBAR_PERMISSION_MODE", default="default"),
         choices=sorted(PERMISSION_MODES),
         help="Runtime permission mode for tool-call checks",
     )
@@ -956,7 +1436,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeline-verbosity",
         choices=TIMELINE_VERBOSITY_LEVELS,
-        default=os.getenv("TARBAR_TIMELINE_VERBOSITY", "normal"),
+        default=_env_first("ATRI_TIMELINE_VERBOSITY", "TARBAR_TIMELINE_VERBOSITY", default="normal"),
         help="Timeline verbosity for text mode: minimal, normal, debug",
     )
     parser.add_argument(
@@ -995,7 +1475,18 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_sub.add_parser("tools", help="List available MCP tools")
     mcp_sub.add_parser("status", help="Show MCP server health and status")
-    mcp_sub.add_parser("refresh", help="Refresh tool discovery from all MCP servers")
+    mcp_sub.add_parser("startup-summary", help="Show MCP startup trace summary")
+    refresh = mcp_sub.add_parser("refresh", help="Refresh tool discovery from all MCP servers")
+    refresh.add_argument(
+        "--cached",
+        action="store_true",
+        help="Allow cached discovery results instead of forcing fresh discovery",
+    )
+    refresh.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear discovery cache before refreshing",
+    )
     
     reconnect = mcp_sub.add_parser("reconnect", help="Reconnect to a failed MCP server")
     reconnect.add_argument("server", help="Server name to reconnect to")
@@ -1010,15 +1501,30 @@ def _build_parser() -> argparse.ArgumentParser:
     worktrees_sub.add_parser("list", help="List active worktrees")
     worktrees_sub.add_parser("clean", help="Clean up dirty worktrees")
 
+    cleanup = subparsers.add_parser("cleanup", help="Clean runtime caches and local artifacts")
+    cleanup.add_argument(
+        "--mode",
+        choices=("safe", "deep", "docker"),
+        default="safe",
+        help="safe: caches/db only, deep: include frontend build cache, docker: also reset docker volumes",
+    )
+    cleanup.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    subparsers.add_parser("doctor", help="Run connectivity and readiness diagnostics")
+
     return parser
 
 
 def main() -> None:
     parser = _build_parser()
     argv = sys.argv[1:]
-    known_commands = {"sessions", "permissions", "mcp", "worktrees"}
+    known_commands = {"sessions", "permissions", "mcp", "worktrees", "doctor", "cleanup"}
     if argv and not argv[0].startswith("-") and argv[0] not in known_commands:
-        # Convenience mode: `tarbar "prompt"` maps to print mode.
+        # Convenience mode: `atri-cli "prompt"` maps to print mode.
         prompt = " ".join(argv)
         args = parser.parse_args(["--print", "--prompt", prompt])
     else:
@@ -1076,8 +1582,11 @@ def main() -> None:
             if args.mcp_command == "status":
                 _mcp_status(client)
                 return
+            if args.mcp_command == "startup-summary":
+                _mcp_startup_summary(client)
+                return
             if args.mcp_command == "refresh":
-                _mcp_refresh(client)
+                _mcp_refresh(client, use_cache=args.cached, clear_cache=args.clear_cache)
                 return
             if args.mcp_command == "reconnect":
                 _mcp_reconnect(client, args.server)
@@ -1096,6 +1605,14 @@ def main() -> None:
             if args.worktrees_command == "clean":
                 _worktrees_clean()
                 return
+
+        if args.command == "doctor":
+            _doctor(client, output_format=output_format)
+            return
+
+        if args.command == "cleanup":
+            _cleanup(args.mode, args.yes)
+            return
 
         if args.print_mode:
             if not args.prompt:

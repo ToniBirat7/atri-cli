@@ -86,6 +86,26 @@ class MCPConfig(BaseModel):
         ge=0,
         description="Max retries for failed tool calls"
     )
+    startup_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum startup initialization attempts per MCP server"
+    )
+    startup_initial_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Initial backoff for MCP startup retries"
+    )
+    startup_max_backoff_seconds: float = Field(
+        default=8.0,
+        ge=0.0,
+        description="Maximum backoff for MCP startup retries"
+    )
+    discovery_cache_ttl_seconds: int = Field(
+        default=30,
+        ge=0,
+        description="Tool discovery cache TTL in seconds; 0 disables cache"
+    )
 
     class Config:
         env_prefix = "MCP_"
@@ -298,6 +318,10 @@ class OrchestratorConfig(BaseModel):
                 default_transport=os.getenv("MCP_DEFAULT_TRANSPORT", "stdio"),
                 tool_timeout_seconds=int(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "10")),
                 max_tool_call_retries=int(os.getenv("MCP_MAX_TOOL_CALL_RETRIES", "2")),
+                startup_max_attempts=int(os.getenv("MCP_STARTUP_MAX_ATTEMPTS", "3")),
+                startup_initial_backoff_seconds=float(os.getenv("MCP_STARTUP_INITIAL_BACKOFF_SECONDS", "1.0")),
+                startup_max_backoff_seconds=float(os.getenv("MCP_STARTUP_MAX_BACKOFF_SECONDS", "8.0")),
+                discovery_cache_ttl_seconds=int(os.getenv("MCP_DISCOVERY_CACHE_TTL_SECONDS", "30")),
             ),
             agent_loop=AgentLoopConfig(
                 max_turns=int(os.getenv("AGENT_MAX_TURNS", "10")),

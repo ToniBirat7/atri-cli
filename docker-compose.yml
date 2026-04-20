@@ -57,7 +57,7 @@ services:
       LLAMA_ARG_MODEL: /models/gemma-4-e2b-it-Q4_K_M.gguf
       LLAMA_ARG_HOST: 0.0.0.0
       LLAMA_ARG_PORT: '8000'
-      LLAMA_ARG_API_KEY: ${LLAMA_API_KEY:-secret}
+      LLAMA_ARG_API_KEY: ${LLAMA_API_KEY:-__SET_ME__}
       LLAMA_ARG_JINJA: 'true'
     volumes:
       - ./models:/models:ro
@@ -90,11 +90,11 @@ services:
         condition: service_healthy
     environment:
       LLM_BASE_URL: http://llama:8000/v1
-      LLM_API_KEY: ${LLAMA_API_KEY:-secret}
+      LLM_API_KEY: ${LLAMA_API_KEY:-__SET_ME__}
       LLM_MODEL: local-model
       LLM_TEMPERATURE: '0.7'
       LLM_MAX_TOKENS: '2048'
-      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:-secret}
+      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:-__SET_ME__}
       MCP_TOOL_TIMEOUT_SECONDS: '10'
       AGENT_MAX_TURNS: '10'
       AGENT_MAX_TOOL_CALLS_PER_TURN: '3'
@@ -103,7 +103,7 @@ services:
       ORCHESTRATOR_DATABASE_URL: postgresql://tarbar:tarbar@postgres:5432/tarbar
       ORCHESTRATOR_ENABLE_PERSISTENCE: 'true'
       ORCHESTRATOR_AUTH_MODE: hybrid
-      ORCHESTRATOR_JWT_SECRET: ${ORCHESTRATOR_JWT_SECRET:-change-me-in-production}
+      ORCHESTRATOR_JWT_SECRET: ${ORCHESTRATOR_JWT_SECRET:-replace-with-a-long-random-secret}
       ORCHESTRATOR_JWT_ISSUER: tarbar-ai
       ORCHESTRATOR_JWT_AUDIENCE: tarbar-ai-orchestrator
       ORCHESTRATOR_SERVICE_SUBJECT: orchestrator-service
@@ -137,7 +137,7 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://orchestrator:8001
       ORCHESTRATOR_URL: http://orchestrator:8001
-      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:-secret}
+      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:-__SET_ME__}
       NEXT_PUBLIC_DEFAULT_ALLOWED_DIRECTORY: ${PWD}
       NODE_ENV: production
     networks:

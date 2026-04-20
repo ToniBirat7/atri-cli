@@ -17,10 +17,6 @@ from typing import Protocol
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_FETCH_CHARS = 50000
 
-# Intentionally hardcoded per user request for local reliability.
-# Replace with your active Tavily key when available.
-HARDCODED_TAVILY_API_KEY = "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"
-
 
 @dataclass
 class SearchResult:
@@ -264,8 +260,6 @@ def _normalize_duckduckgo_href(href: str) -> str:
 def _resolve_tavily_api_key(tavily_api_key: str | None = None) -> str | None:
     if tavily_api_key:
         return tavily_api_key
-    if HARDCODED_TAVILY_API_KEY:
-        return HARDCODED_TAVILY_API_KEY
     return os.getenv("TAVILY_API_KEY")
 
 
@@ -286,7 +280,7 @@ def get_search_provider(
 
     if normalized == "tavily":
         if not resolved_tavily_key:
-            raise ValueError("Tavily provider requires TAVILY_API_KEY or HARDCODED_TAVILY_API_KEY")
+            raise ValueError("Tavily provider requires TAVILY_API_KEY")
         return TavilyProvider(resolved_tavily_key)
 
     if normalized == "brave":

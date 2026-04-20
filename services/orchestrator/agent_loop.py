@@ -814,7 +814,7 @@ class AgentLoop:
     def _build_system_prompt(self) -> str:
         """Build system prompt for the agent."""
         prompt = (
-            "You are Tarbar_AI, a general-purpose assistant for local and remote tasks.\n"
+            "You are Atri Code, a general-purpose assistant for local and remote tasks.\n"
             "Follow these rules:\n"
             "- Be accurate, concise, and useful.\n"
             "- Use tools whenever they materially improve correctness, freshness, or access to local state.\n"

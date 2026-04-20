@@ -1,21 +1,33 @@
-# Tarbar_AI Quick Start Guide
+# Atri Code Quick Start Guide
 
-Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orchestration, and web UI.
+Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orchestration, and CLI UI.
 
 ## Branch Mode
 
-You are on the Web-focused branch (`web`) aligned to a Claude Desktop-style workflow.
+You are on the CLI-focused `master` branch aligned to an Atri Code terminal workflow.
 
 Single-step setup for other users:
 
 Linux/macOS:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
+tarbar
 ```
 
 Windows PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
+```
+
+Linux/macOS compatibility wrapper (installs + launches):
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
+```
+
+From an existing local clone:
+```bash
+make cli-up
+atri-cli doctor
 ```
 
 ## Production Cleanliness
@@ -32,18 +44,16 @@ powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.c
 - Python 3.10+
 - Node.js 18+
 - llama.cpp built (or pre-built binary)
-- Gemma 4 E2B model (2.9GB GGUF file)
+- Gemma 4 E2B model (auto-downloaded GGUF file if missing)
 
 **Setup:**
 ```bash
 # Install dependencies
 make install
 
-# Verify model exists
-ls models/gemma-4-e2b-it-Q4_K_M.gguf
-
-# If missing, download from:
-# https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF
+# The CLI installer downloads the model automatically when needed.
+# Manual source:
+# https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/blob/main/gemma-4-E2B-it-Q4_K_M.gguf
 ```
 
 ### Option 2: Containerized (Docker Compose)
@@ -197,7 +207,7 @@ File: `services/orchestrator/.env`
 ```env
 # LLM Configuration
 LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_API_KEY=secret
+LLM_API_KEY=__SET_ME__
 LLM_MODEL=local-model
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=2048

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Python-first installer for the Tarbar CLI.
+"""Python-first installer for the Atri Code CLI.
 
 This script can install from:
 - local repository path (developer mode)
 - source archive URL (end-user mode)
 
 It installs:
-- Python package files into ~/.local/share/tarbar-cli/
-- launcher binary ~/.local/bin/tarbar
+- Python package files into ~/.local/share/atri-code-cli/
+- launcher binary ~/.local/bin/atri-cli
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ DEFAULT_ARCHIVE_URL = os.environ.get(
     "TARBAR_INSTALL_ARCHIVE_URL",
     "https://github.com/ToniBirat7/Agentic_AI/archive/refs/heads/main.tar.gz",
 )
+PRIMARY_LAUNCHER = "atri-cli"
+COMPAT_LAUNCHER = "tarbar"
 
 
 def _ensure_python_version() -> None:
@@ -60,6 +62,19 @@ def _write_launcher(bin_path: Path, package_root: Path) -> None:
     bin_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _write_compat_launcher(bin_path: Path, primary_bin: Path) -> None:
+    launcher = textwrap.dedent(
+        f"""\
+        #!/usr/bin/env sh
+        echo "[deprecated] 'tarbar' is a compatibility alias. Use 'atri-cli' instead." >&2
+        exec {str(primary_bin)!r} "$@"
+        """
+    )
+    bin_path.write_text(launcher, encoding="utf-8")
+    current_mode = bin_path.stat().st_mode
+    bin_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def _install_from_repo(repo_root: Path, install_root: Path, bin_root: Path) -> Path:
     src_package = repo_root / "apps" / "cli" / "tarbar_cli"
     if not src_package.exists():
@@ -72,8 +87,12 @@ def _install_from_repo(repo_root: Path, install_root: Path, bin_root: Path) -> P
     _safe_rmtree(target_package)
     shutil.copytree(src_package, target_package)
 
-    launcher_path = bin_root / "tarbar"
+    launcher_path = bin_root / PRIMARY_LAUNCHER
     _write_launcher(launcher_path, install_root)
+
+    compat_launcher_path = bin_root / COMPAT_LAUNCHER
+    _write_compat_launcher(compat_launcher_path, launcher_path)
+
     return launcher_path
 
 
@@ -106,7 +125,7 @@ def install_from_archive(archive_url: str, install_root: Path, bin_root: Path) -
 
 
 def _print_success(launcher_path: Path, bin_root: Path) -> None:
-    print("Tarbar CLI installed successfully.")
+    print("Atri Code CLI installed successfully.")
     print(f"Launcher: {launcher_path}")
 
     path_entries = os.environ.get("PATH", "").split(":")
@@ -118,13 +137,14 @@ def _print_success(launcher_path: Path, bin_root: Path) -> None:
 
     print()
     print("Try:")
-    print("  tarbar --help")
+    print("  atri-cli --help")
+    print("  atri-cli doctor")
 
 
 def main() -> None:
     _ensure_python_version()
 
-    parser = argparse.ArgumentParser(description="Install Tarbar CLI")
+    parser = argparse.ArgumentParser(description="Install Atri Code CLI")
     parser.add_argument(
         "--archive-url",
         default=DEFAULT_ARCHIVE_URL,
@@ -136,7 +156,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--install-root",
-        default=os.path.expanduser("~/.local/share/tarbar-cli"),
+        default=os.path.expanduser("~/.local/share/atri-code-cli"),
         help="Install root for Python package files",
     )
     parser.add_argument(

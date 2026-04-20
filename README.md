@@ -1,54 +1,54 @@
-# Tarbar AI (Web Branch)
+# Atri Code (CLI Branch)
 
-This branch is the production Web experience of Tarbar AI: a local-first agent platform that combines llama.cpp inference, an orchestrator API, MCP tool execution, and a Next.js chat UI.
+This branch is the production CLI experience of Atri Code: a local-first agent system powered by llama.cpp, orchestrator policy/control loops, and MCP tool calling, delivered through a terminal-native interface.
 
 ## What This Project Is
 
-Tarbar AI is an agentic runtime designed for private, local operation. It keeps model execution and tool calling on your machine while exposing a modern chat workflow through the browser.
+Atri Code is an on-device agent architecture for private, controllable AI workflows.
 
-Core goals:
-- Local LLM inference through llama.cpp
-- Structured agent orchestration with persistence and policy controls
-- MCP-based tool integration for safe, explicit tool calls
-- Single-command bootstrap for repeatable setup
+Design goals:
+- Keep LLM inference local with llama.cpp
+- Execute tools through explicit MCP routes
+- Provide auditable agent/tool interactions
+- Offer a single-command bootstrap for reproducible setup
 
-## Web Branch Scope
+## CLI Branch Scope
 
-This `web` branch is optimized for browser-first usage.
+This `master` branch is optimized for terminal-first usage.
 
 Primary entrypoint:
-- `apps/frontend` (Next.js chat UI)
+- `apps/cli` (interactive and print-mode command-line client)
 
 Runtime services:
-- `runtime/llm/llama.cpp` (local model runtime)
-- `services/orchestrator` (agent loop, policy, tool routing, persistence)
-- `services/mcp` (MCP servers and tool adapters)
+- `runtime/llm/llama.cpp` (local model inference)
+- `services/orchestrator` (agent loop, policies, turn lifecycle, persistence)
+- `services/mcp` (tool execution layer)
 
 ## Technology Stack
 
-- Model runtime: llama.cpp
-- Agent/backend: Python + FastAPI/Uvicorn (orchestrator)
-- Tooling protocol: MCP (FastMCP-based service layer)
-- Frontend: Next.js + Node.js
-- Bootstrap/build: Bash/PowerShell + Python + CMake
-- Persistence: SQLite local state by default (or PostgreSQL in containerized deployments)
+- Inference runtime: llama.cpp
+- Orchestration API: Python + FastAPI/Uvicorn
+- Tool protocol: MCP (FastMCP)
+- CLI client: Python (`apps/cli/tarbar_cli`)
+- Build/bootstrap: Bash/PowerShell + Python + CMake
+- Persistence: SQLite local state by default
 
 ## Model Runtime
 
-Tarbar AI is built around a local GGUF model that runs entirely on your machine through `llama.cpp`.
+Atri Code runs a local GGUF instruct model through `llama.cpp`.
 
 Primary model:
 - Model: Gemma 4 E2B Instruct
 - Format: GGUF
 - Quantization: Q4_K_M
 - Local file: `models/gemma-4-e2b-it-Q4_K_M.gguf`
-- Approximate model size: 2.9 GB
+- Approximate model size: 3.1 GB download
 - Model type: text-only instruct model
 
 Runtime behavior:
-- `llama.cpp` serves the model through an OpenAI-compatible HTTP API at `http://127.0.0.1:8000/v1`
-- The orchestrator reads the model response, decides whether tool use is needed, and sends tool calls to MCP
-- Tool outputs are merged back into the model context until the final response is ready
+- The CLI installer downloads the model automatically from Hugging Face if it is missing
+- `llama.cpp` exposes the model through the OpenAI-compatible API on `http://127.0.0.1:8000/v1`
+- The orchestrator manages prompt policy, tool calls, and turn state around the model
 - The default model identifier exposed to the orchestrator is `local-model`
 
 Resource expectations:
@@ -56,96 +56,112 @@ Resource expectations:
 - Disk usage is roughly 5 GB once the model cache and runtime files are included
 - The bootstrap script builds `llama-server` and `llama-cli`, then selects a CPU or CUDA build based on whether NVIDIA tooling is available
 
-What the model is good at:
-- Conversational question answering
-- Tool-aware agent workflows
-- Local/private reasoning over files, searches, and orchestrator state
-- Returning grounded results instead of free-form guesses when tools are available
+## How the CLI Runtime Works
 
-## How It Works
+1. User prompt enters through `atri-cli`.
+2. CLI sends request to orchestrator (`/chat` or `/chat/stream`).
+3. Orchestrator asks llama.cpp for reasoning/action output.
+4. If tool calls are required, orchestrator dispatches to MCP.
+5. MCP executes tools and returns structured results.
+6. Orchestrator loops model + tool outputs until final answer.
+7. CLI renders response, timeline, and session metadata.
 
-At runtime, each user message flows through a deterministic pipeline:
+The model is not a standalone endpoint in this setup. The CLI uses the orchestrator as the control layer, and the orchestrator decides when to ask the model for a response versus when to call tools and feed results back into the model.
 
-1. Browser sends prompt to orchestrator API.
-2. Orchestrator builds model context and policy constraints.
-3. Orchestrator asks llama.cpp for next action/response.
-4. If model emits tool calls, orchestrator routes those calls to MCP.
-5. MCP executes tool(s), returns structured results.
-6. Orchestrator feeds tool outputs back to model.
-7. Final grounded answer is returned to browser.
-
-The key design idea is that the model never acts alone. It is paired with the orchestrator, which applies prompt policy, tool routing, persistence, and response validation before anything reaches the UI.
-
-## Web Architecture Diagram
+## CLI Architecture Diagram
 
 ```mermaid
 flowchart LR
-	U[User in Browser] --> F[Next.js Frontend<br/>apps/frontend]
-	F --> O[Orchestrator API<br/>services/orchestrator]
+	U[Developer in Terminal] --> C[Atri Code CLI<br/>apps/cli]
+	C --> O[Orchestrator API<br/>services/orchestrator]
 	O --> L[llama.cpp Server<br/>runtime/llm/llama.cpp]
 
 	O --> M[MCP Service Layer<br/>services/mcp]
 	M --> T1[Filesystem Tools]
-	M --> T2[Web Search Tools]
-	M --> T3[Custom Tool Adapters]
+	M --> T2[Search / Retrieval Tools]
+	M --> T3[Custom MCP Adapters]
 
-	O --> D[(SQLite / Postgres<br/>Conversation + Turn State)]
+	O --> D[(SQLite / Postgres<br/>Conversation State)]
 
 	L --> O
 	M --> O
-	O --> F
+	O --> C
 ```
 
 ## MCP and Tool Calls
 
-Tool calling is explicit and audited by the orchestrator.
+Tool execution path:
+- Model emits a tool request.
+- Orchestrator validates policy + permissions.
+- Request is routed to MCP tool endpoint(s).
+- Tool outputs are normalized and appended to turn context.
+- Final answer is returned only after tool-grounded completion.
 
-Operational behavior:
-- Tool calls are emitted by the model as structured requests.
-- Orchestrator validates and dispatches to MCP.
-- MCP returns normalized outputs (data/errors/metadata).
-- Orchestrator records turn + tool trace and continues reasoning.
-
-This allows the model to stay grounded in real local operations instead of hallucinating external state.
+CLI capabilities include session operations, streaming, permission mode controls, and MCP tool/service inspection.
 
 ## One-Command Install and Run
 
-Linux/macOS (web mode):
+Linux/macOS (CLI mode):
 
 ```bash
-curl -fsSL https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/web_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
+tarbar
 ```
 
-Linux/macOS (full branch bootstrap):
-
-```bash
-curl -fsSL https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/local_up.sh | bash
-```
-
-Windows PowerShell (web mode):
+Windows PowerShell (CLI mode):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/web_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
 ```
+
+Compatibility wrapper (installs and launches in one command on Linux/macOS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
+```
+
+The installer creates a `tarbar` launcher and attempts to create a `claude` alias when that command name is not already claimed by another tool.
 
 ## Local Development
 
-From an existing clone on this branch:
+From an existing local clone on this branch:
 
 ```bash
 make install
-make web-up
+make cli-up
 ```
 
-Useful commands:
-- `make local-up` for full pipeline bootstrap
-- `make dev-up` / `make dev-down` for service lifecycle
-- `make health` for service checks
+Run CLI module directly:
+
+```bash
+cd apps/cli
+python -m tarbar_cli.main
+```
+
+Installed launcher:
+
+```bash
+atri-cli --help
+atri-cli doctor
+```
+
+Credential safety note:
+- Use environment variables or local `.env` files for keys/secrets.
+- Keep placeholder defaults like `__SET_ME__` until you inject real values locally.
+
+Compatibility note:
+- `tarbar` remains available as a compatibility alias for one release cycle.
+
+Print mode example:
+
+```bash
+python -m tarbar_cli.main -p "Explain this repository"
+```
 
 ## Runtime Ports (Default)
 
-- Frontend: `http://127.0.0.1:3000`
-- Orchestrator: `http://127.0.0.1:8001`
+- CLI client: local terminal process
+- Orchestrator API: `http://127.0.0.1:8001`
 - llama.cpp API: `http://127.0.0.1:8000`
 
 ## Prerequisites
@@ -159,10 +175,10 @@ Useful commands:
 
 ## Production Notes
 
-- Bootstrap scripts support branch-aware install/update.
-- Runtime state defaults to local persistent storage.
-- Install pipeline includes post-start pruning and cache cleanup for lean deployment footprints.
-- Keep model artifacts in `models/` locally; large binaries stay out of git.
+- Branch-aware bootstrap scripts standardize installation and startup.
+- Runtime state defaults to durable local persistence.
+- Post-start pruning and cache cleanup keep deployment footprints lean.
+- Large model binaries remain local and out of version control.
 
 ## Production File Policy
 
@@ -173,7 +189,7 @@ Useful commands:
 
 ## Branch Strategy
 
-- `web` (this branch): browser-first workflow.
-- `master`: CLI-first workflow.
+- `master` (this branch): CLI-first workflow.
+- `web`: browser-first workflow.
 
-If you need the terminal experience, use the `master` branch installer.
+If you need the Web UX, run installers from the `web` branch.

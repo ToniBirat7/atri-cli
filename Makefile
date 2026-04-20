@@ -142,7 +142,7 @@ env: ## Create .env files with defaults
 		cp services/orchestrator/.env.example services/orchestrator/.env 2>/dev/null || \
 		printf '%s\n' \
 			"LLM_BASE_URL=http://127.0.0.1:$(LLAMA_PORT)/v1" \
-			"LLM_API_KEY=secret" \
+			"LLM_API_KEY=__SET_ME__" \
 			"LLM_MODEL=local-model" \
 			"LLM_TEMPERATURE=1.0" \
 			"LLM_TOP_P=0.95" \

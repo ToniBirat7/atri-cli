@@ -33,6 +33,30 @@ Optional environment variables:
 - `LLM_BENCH_BASE_URL` (default: `http://127.0.0.1:8000`)
 - `LLM_BENCH_API_KEY` (default: `secret`)
 
+## Phase 6 Release Matrix
+
+Run release-readiness matrix scenarios:
+
+```bash
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python" scripts/e2e/release_readiness_matrix.py --scenario fresh-install --python "/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python"
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python" scripts/e2e/release_readiness_matrix.py --scenario first-run --python "/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python"
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python" scripts/e2e/release_readiness_matrix.py --scenario restart --python "/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python"
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python" scripts/e2e/release_readiness_matrix.py --scenario recovery --python "/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python"
+```
+
+## Packaging Channels
+
+Build both release channels (bundled zipapp and script-installer bundle):
+
+```bash
+"/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/.venv/bin/python" scripts/package_cli_bundle.py
+```
+
+Artifacts:
+
+- `dist/atri-cli.pyz`
+- `dist/atri-cli-installer.tar.gz`
+
 ## Live Readiness Harness
 
 Boot orchestrator, run CLI smoke checks, run live stream checks (including MCP tool-call success rate),
