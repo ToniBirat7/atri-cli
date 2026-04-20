@@ -540,9 +540,9 @@ def _run_interactive(
     output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
-    print(_style("Tarbar CLI", color="cyan", bold=True) + " interactive mode")
+    _TUI.print_welcome_dashboard(permission_state.mode, client.base_url)
     print(_style("Type /help for commands.", dim=True))
-    print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
+    print(_style("Use /mode or /mode <name> to inspect/change permission mode for this session.", dim=True))
     if conversation_id:
         _print_info(f"Resuming conversation: {conversation_id}")
 

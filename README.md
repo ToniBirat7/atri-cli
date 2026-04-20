@@ -104,14 +104,23 @@ CLI capabilities include session operations, streaming, permission mode controls
 Linux/macOS (CLI mode):
 
 ```bash
-curl -fsSL https://github.com/ToniBirat7/Agentic_AI/raw/master/scripts/cli_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
+tarbar
 ```
 
 Windows PowerShell (CLI mode):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://github.com/ToniBirat7/Agentic_AI/raw/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
 ```
+
+Compatibility wrapper (installs and launches in one command on Linux/macOS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
+```
+
+The installer creates a `tarbar` launcher and attempts to create a `claude` alias when that command name is not already claimed by another tool.
 
 ## Local Development
 

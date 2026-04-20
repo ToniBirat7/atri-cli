@@ -20,7 +20,7 @@ from pathlib import Path
 
 installer_url = os.environ.get(
     "TARBAR_INSTALLER_URL",
-    "https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/scripts/install_cli.py",
+    "https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/install_cli.py",
 )
 
 with tempfile.TemporaryDirectory(prefix="tarbar-bootstrap-") as tmp:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -118,6 +119,45 @@ class TUIRenderer:
         print(self.style(border, dim=True))
         print(self.style(header, dim=True))
         print(self.style(border, dim=True))
+
+    def print_welcome_dashboard(self, mode: str, api_url: str) -> None:
+        width = shutil.get_terminal_size((100, 24)).columns
+        width = max(72, min(width, 120))
+        left_width = max(28, int(width * 0.45))
+        right_width = width - left_width - 3
+
+        left_lines = [
+            self.style("Welcome to Tarbar CLI", color="cyan", bold=True),
+            "",
+            "Local-first coding agent runtime",
+            f"Permission mode: {mode}",
+            f"API endpoint: {api_url}",
+        ]
+        right_lines = [
+            self.style("Tips", color="yellow", bold=True),
+            "",
+            "Type /help for commands",
+            "Type /mode to inspect policy mode",
+            "Type /timeline minimal|normal|debug",
+            "Type /exit to quit",
+        ]
+
+        def _fit(line: str, max_width: int) -> str:
+            if len(line) <= max_width:
+                return line
+            if max_width <= 3:
+                return line[:max_width]
+            return line[: max_width - 3] + "..."
+
+        total_rows = max(len(left_lines), len(right_lines))
+        print(self.style("=" * width, dim=True))
+        for idx in range(total_rows):
+            left_raw = left_lines[idx] if idx < len(left_lines) else ""
+            right_raw = right_lines[idx] if idx < len(right_lines) else ""
+            left = _fit(left_raw, left_width).ljust(left_width)
+            right = _fit(right_raw, right_width).ljust(right_width)
+            print(f"{left} {self.style('|', dim=True)} {right}")
+        print(self.style("=" * width, dim=True))
 
     def should_render_timeline(self, event_type: str) -> bool:
         if self.timeline_verbosity == "debug":

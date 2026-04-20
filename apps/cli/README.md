@@ -27,16 +27,24 @@ python -m tarbar_cli.main --help
 The installer bootstrap is shell-only for startup; all installation logic runs in Python.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 ```
 
 Optional override for custom installer/archives:
 
 ```bash
-TARBAR_INSTALLER_URL="https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/scripts/install_cli.py" \
-TARBAR_INSTALL_ARCHIVE_URL="https://github.com/ToniBirat7/Agentic_AI/archive/refs/heads/main.tar.gz" \
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
+TARBAR_INSTALLER_URL="https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/install_cli.py" \
+TARBAR_INSTALL_ARCHIVE_URL="https://github.com/ToniBirat7/Agentic_AI/archive/refs/heads/master.tar.gz" \
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 ```
+
+After installation:
+
+```bash
+tarbar
+```
+
+The installer also attempts to create a `claude` alias when safe. If `claude` is already installed on your machine, the alias is skipped to avoid clobbering an existing command.
 
 Examples:
 
