@@ -1,4 +1,4 @@
-.PHONY: help dev-up dev-down logs clean install test build
+.PHONY: help dev-up dev-down logs clean install test build local-up cli-up web-up
 
 # Model runtime toggle
 ENABLE_THINKING ?= false
@@ -27,6 +27,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(YELLOW)Local Development:$(NC)"
 	@echo "  make dev-up              Start all services (llama, orchestrator, frontend)"
+	@echo "  make local-up            Auto-detect GPU/CPU and run full local pipeline"
+	@echo "  make cli-up              Auto-detect GPU/CPU and run CLI pipeline"
+	@echo "  make web-up              Auto-detect GPU/CPU and run Web pipeline"
 	@echo "  make dev-down            Stop all services"
 	@echo "  make logs                View logs from all services"
 	@echo ""
@@ -48,6 +51,15 @@ help: ## Show this help message
 	@echo "  make env                 Create .env files with defaults"
 
 # ===== Development Workflow =====
+
+local-up: ## Auto-detect GPU/CPU, build, and start full local pipeline
+	@python3 scripts/local_up.py --repo-dir . --skip-clone
+
+cli-up: ## Auto-detect GPU/CPU, build, and start CLI-focused pipeline
+	@python3 scripts/local_up.py --repo-dir . --skip-clone --mode cli
+
+web-up: ## Auto-detect GPU/CPU, build, and start Web-focused pipeline
+	@python3 scripts/local_up.py --repo-dir . --skip-clone --mode web
 
 dev-up: env ## Start all services (llama + orchestrator + frontend)
 	@echo "$(GREEN)Starting Tarbar_AI services...$(NC)"
@@ -160,6 +172,9 @@ env: ## Create .env files with defaults
 			"AGENT_ENABLE_TOOL_USE=true" \
 			"AGENT_ENABLE_THINKING=$(ENABLE_THINKING)" \
 			"AGENT_STREAM_RESPONSES=false" \
+			"" \
+			"ORCHESTRATOR_DATABASE_URL=sqlite:///runtime/state/orchestrator.db" \
+			"ORCHESTRATOR_ENABLE_PERSISTENCE=true" \
 			"" \
 			"LOG_LEVEL=INFO" \
 			"ENABLE_OBSERVABILITY=true" > services/orchestrator/.env; \
