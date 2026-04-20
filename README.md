@@ -166,6 +166,13 @@ python -m tarbar_cli.main -p "Explain this repository"
 - Post-start pruning and cache cleanup keep deployment footprints lean.
 - Large model binaries remain local and out of version control.
 
+## Production File Policy
+
+- Keep only production code, required docs, and deployment assets in git.
+- Keep runtime artifacts local only: databases, logs, cache directories, and model binaries.
+- Use `make clean` (or remove local runtime directories) before packaging or publishing snapshots.
+- Avoid committing ad-hoc planning notes or generated reports at repository root.
+
 ## Branch Strategy
 
 - `master` (this branch): CLI-first workflow.
