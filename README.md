@@ -44,13 +44,13 @@ curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/w
 Linux/macOS (full pipeline):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/local_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/local_up.sh | bash
 ```
 
 Linux/macOS (CLI-focused optional flow):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/cli_up.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
 ```
 
 Windows (PowerShell, Web-focused):
@@ -62,13 +62,13 @@ powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.c
 Windows PowerShell (full pipeline):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/cli/scripts/local_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/local_up.ps1 -UseBasicParsing | iex"
 ```
 
 Windows PowerShell (CLI-focused optional flow):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/cli_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
 ```
 
 From an existing local clone (Web-focused default):
@@ -87,8 +87,7 @@ make cli-up
 Prerequisites (both Linux and Windows): Git, Python 3.10+, Node.js 20+, npm, CMake. CUDA is optional; when available (nvidia-smi + nvcc), GPU build is used automatically, otherwise CPU-optimized build is used.
 
 Branch strategy:
-- `master`: complete pipeline for end-to-end local usage on other devices.
-- `cli`: CLI-focused branch for Claude Code-style terminal workflow.
+- `master`: CLI-focused branch for Claude Code-style terminal workflow.
 - `web`: this branch, Web-focused for Claude Desktop-style browser workflow.
 
 1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
