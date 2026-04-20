@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.c
 
 From an existing local clone:
 ```bash
-make local-up
+make cli-up
 ```
 
 ## Prerequisites
