@@ -58,10 +58,80 @@ class _FakeMCPOrchestrator:
     def get_server_status(self):
         return self._status
 
+    def get_startup_trace_summary(self):
+        return {
+            "initialized_servers": ["local-mcp"],
+            "failed_servers": [],
+            "servers": {"local-mcp": {"status": "initialized"}},
+            "recommendations": [],
+        }
+
+    def get_discovery_cache_status(self):
+        return {}
+
+
+class _FakeMCPOrchestratorPhase4:
+    def __init__(self):
+        self.refresh_calls = []
+
+    async def refresh_tools(self, tool_registry, *, force_refresh=True, clear_cache=False):
+        self.refresh_calls.append({"force_refresh": force_refresh, "clear_cache": clear_cache})
+        return {"filesystem": 2, "shell": 0}
+
+    def get_last_refresh_metadata(self):
+        return {
+            "filesystem": {
+                "status": "ok",
+                "source": "fresh",
+                "tool_count": 2,
+                "cache": {},
+            },
+            "shell": {
+                "status": "error",
+                "source": "error",
+                "tool_count": 0,
+                "error_code": "MCP_INTERNAL_ERROR",
+                "retryable": True,
+                "recommended_fix": "Inspect orchestrator logs",
+            },
+        }
+
+    async def reconnect_server(self, server_name):
+        if server_name == "filesystem":
+            return SimpleNamespace(
+                status="reconnected",
+                success=True,
+                error_code=None,
+                reason=None,
+                retryable=None,
+                attempts_used=1,
+                attempts_remaining=5,
+                next_retry_after_seconds=None,
+                recommended_fix=None,
+            )
+        return SimpleNamespace(
+            status="backoff_active",
+            success=False,
+            error_code="MCP_RECONNECT_BACKOFF_ACTIVE",
+            reason="Reconnect is temporarily delayed by backoff policy",
+            retryable=True,
+            attempts_used=2,
+            attempts_remaining=3,
+            next_retry_after_seconds=1.25,
+            recommended_fix="Wait for backoff window and retry",
+        )
+
 
 class _FakeToolRegistry:
     def list_all_tools(self):
-        return []
+        return [
+            SimpleNamespace(name="set_allowed_directory"),
+            SimpleNamespace(name="list_directory"),
+            SimpleNamespace(name="read_file"),
+        ]
+
+    def clear(self):
+        return None
 
 
 class _FakeConversationStore:
@@ -515,3 +585,59 @@ async def test_worktree_fork_response_model():
     assert response.success is True
     assert response.new_conversation_id == "conv_forked"
     assert response.worktree_path == "/tmp/wt_fork"
+
+
+@pytest.mark.asyncio
+async def test_refresh_tools_returns_partial_failure_error_code(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    fake_mcp = _FakeMCPOrchestratorPhase4()
+    monkeypatch.setattr(api, "mcp_orchestrator", fake_mcp)
+    monkeypatch.setattr(api, "tool_registry", _FakeToolRegistry())
+
+    response = await api.refresh_tools(
+        _FakeRequest(path="/tools/refresh"),
+        force_refresh=True,
+        clear_cache=False,
+    )
+
+    assert response.status == "partial_failure"
+    assert response.error_code == "MCP_REFRESH_PARTIAL_FAILURE"
+    assert response.refresh_metadata["shell"]["error_code"] == "MCP_INTERNAL_ERROR"
+    assert fake_mcp.refresh_calls == [{"force_refresh": True, "clear_cache": False}]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_endpoint_returns_structured_result(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestratorPhase4())
+
+    response = await api.reconnect_mcp_server(
+        api.MCPReconnectRequest(server="shell"),
+        _FakeRequest(path="/mcp/reconnect"),
+    )
+
+    assert response.status == "backoff_active"
+    assert response.success is False
+    assert response.error_code == "MCP_RECONNECT_BACKOFF_ACTIVE"
+    assert response.retryable is True
+    assert response.attempts_used == 2
+    assert response.attempts_remaining == 3
+    assert response.next_retry_after_seconds == 1.25
+    assert response.recommended_fix == "Wait for backoff window and retry"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_endpoint_success_includes_attempt_counters(monkeypatch):
+    monkeypatch.setattr(api, "config", _FakeConfig())
+    monkeypatch.setattr(api, "mcp_orchestrator", _FakeMCPOrchestratorPhase4())
+
+    response = await api.reconnect_mcp_server(
+        api.MCPReconnectRequest(server="filesystem"),
+        _FakeRequest(path="/mcp/reconnect"),
+    )
+
+    assert response.status == "reconnected"
+    assert response.success is True
+    assert response.error_code is None
+    assert response.attempts_used == 1
+    assert response.attempts_remaining == 5

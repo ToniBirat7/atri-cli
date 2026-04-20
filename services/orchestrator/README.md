@@ -1,12 +1,12 @@
 # Orchestrator Service
 
-**Phase 1 of 10-phase architecture** — Core LLM + MCP orchestration for Tarbar_AI.
+**Phase 1 of 10-phase architecture** — Core LLM + MCP orchestration for Atri Code.
 
 For the production-oriented service reference, see [docs/services/orchestrator.md](../../docs/services/orchestrator.md).
 
 ## Overview
 
-The orchestrator service is the **brain** of Tarbar_AI. It coordinates:
+The orchestrator service is the **brain** of Atri Code. It coordinates:
 
 1. **LLM Inference** (llama.cpp) — Chat completions with tool calling
 2. **Tool Execution** (MCP) — Routing and executing tools from MCP servers
@@ -23,7 +23,7 @@ Configuration schema using Pydantic. Loads from environment variables:
 **Environment variables:**
 ```bash
 LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_API_KEY=secret
+LLM_API_KEY=__SET_ME__
 LLM_TEMPERATURE=0.7
 MCP_TOOL_TIMEOUT_SECONDS=10
 AGENT_MAX_TURNS=10
@@ -200,7 +200,7 @@ Create `.env` file in `services/orchestrator/`:
 ```env
 # llama.cpp
 LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_API_KEY=secret
+LLM_API_KEY=__SET_ME__
 LLM_MODEL=local-model
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=2048

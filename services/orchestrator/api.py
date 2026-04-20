@@ -117,6 +117,10 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="Service status")
     llm_connected: bool = Field(..., description="LLM endpoint reachable")
     mcp_servers: Dict[str, Dict[str, Any]] = Field(..., description="MCP server statuses")
+    ready: bool = Field(default=False, description="Whether required MCP readiness checks pass")
+    readiness_issues: List[str] = Field(default_factory=list, description="Readiness validation issues")
+    startup_summary: Dict[str, Any] = Field(default_factory=dict, description="MCP startup trace summary")
+    discovery_cache: Dict[str, Any] = Field(default_factory=dict, description="MCP tool discovery cache status")
 
 
 class ToolInfo(BaseModel):
@@ -138,6 +142,8 @@ class ToolRefreshResponse(BaseModel):
     status: str = Field(..., description="Refresh status (success, partial_failure, failure)")
     servers: Dict[str, int] = Field(..., description="Server name -> tool count discovered")
     total_discovered: int = Field(..., description="Total new tools discovered")
+    error_code: Optional[str] = Field(None, description="Compact error code for aggregate refresh result")
+    refresh_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Per-server refresh metadata")
 
 
 class MCPReconnectRequest(BaseModel):
@@ -149,7 +155,13 @@ class MCPReconnectResponse(BaseModel):
     """Response from MCP server reconnection."""
     status: str = Field(..., description="Reconnection attempt status")
     success: bool = Field(..., description="Whether reconnection succeeded")
+    error_code: Optional[str] = Field(None, description="Compact reconnection error code")
     reason: Optional[str] = Field(None, description="Failure reason if not successful")
+    retryable: Optional[bool] = Field(None, description="Whether the request is safe to retry")
+    attempts_used: int = Field(default=0, description="Reconnect attempts consumed for this server")
+    attempts_remaining: int = Field(default=0, description="Remaining reconnect attempts")
+    next_retry_after_seconds: Optional[float] = Field(None, description="Recommended wait time before retry")
+    recommended_fix: Optional[str] = Field(None, description="Suggested fix for current reconnect failure")
 
 
 class MCPDeferredDiscoveryRequest(BaseModel):
@@ -162,6 +174,11 @@ class MCPDeferredDiscoveryResponse(BaseModel):
     """Response from deferred discovery configuration."""
     status: str = Field(..., description="Configuration status")
     enabled: bool = Field(..., description="Current deferred discovery state")
+
+
+class MCPStartupSummaryResponse(BaseModel):
+    status: str = Field(..., description="Summary status")
+    summary: Dict[str, Any] = Field(default_factory=dict, description="MCP startup summary details")
 
 
 class WorktreeInfoResponse(BaseModel):
@@ -279,10 +296,13 @@ class ConversationsResponse(BaseModel):
 # Global state (Phase 1)
 # In production (Phase 9), move to database/session management
 app = FastAPI(
-    title="Tarbar_AI Orchestrator",
+    title="Atri Code Orchestrator",
     version="0.1.0",
     description="Orchestrates LLM + MCP for local agentic AI",
 )
+
+MCP_REQUIRED_SERVER = "local-mcp"
+MCP_REQUIRED_TOOLS = {"set_allowed_directory", "list_directory", "read_file"}
 
 config: Optional[OrchestratorConfig] = None
 llm_adapter: Optional[LLMAdapter] = None
@@ -397,7 +417,7 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
         normalized_profile = normalize_prompt_profile(selected_profile)
         system_prompt = build_system_prompt(
             normalized_profile,
-            assistant_name="Tarbar_AI",
+            assistant_name="Atri Code",
             model_name=config.llm.model,
             enable_thinking=config.agent_loop.enable_thinking,
             fallback_text=config.prompt_policy.fallback_text,
@@ -465,6 +485,45 @@ def _chunk_text(text: str, chunk_size: int = 96) -> List[str]:
     if not text:
         return []
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+
+def _mcp_readiness_issues() -> List[str]:
+    issues: List[str] = []
+    if mcp_orchestrator is None or tool_registry is None:
+        return ["orchestrator_not_initialized"]
+
+    status = mcp_orchestrator.get_server_status()
+    required_server = status.get(MCP_REQUIRED_SERVER)
+    if required_server is None:
+        issues.append(f"missing_required_server:{MCP_REQUIRED_SERVER}")
+    elif required_server.get("status") != "initialized":
+        issues.append(
+            f"required_server_not_initialized:{MCP_REQUIRED_SERVER}:{required_server.get('status', 'unknown')}"
+        )
+
+    available_tools = {tool.name for tool in tool_registry.list_all_tools()}
+    missing_tools = [name for name in sorted(MCP_REQUIRED_TOOLS) if name not in available_tools]
+    if missing_tools:
+        issues.append(f"missing_required_tools:{','.join(missing_tools)}")
+
+    return issues
+
+
+def _build_not_ready_detail(issues: List[str]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    if mcp_orchestrator is not None:
+        summary = mcp_orchestrator.get_startup_trace_summary()
+    return {
+        "status": "not_ready",
+        "issues": issues,
+        "startup_summary": summary,
+    }
+
+
+def _enforce_runtime_ready_for_chat() -> None:
+    issues = _mcp_readiness_issues()
+    if issues:
+        raise HTTPException(status_code=503, detail=_build_not_ready_detail(issues))
 
 
 async def _run_agent_request(
@@ -669,12 +728,18 @@ async def startup():
     )
     await rate_limiter.initialize()
     setup_tracing(
-        service_name="tarbar-orchestrator",
+        service_name="atri-code-orchestrator",
         otlp_endpoint=config.telemetry.otlp_endpoint,
         enabled=config.telemetry.enabled,
     )
     llm_adapter = LLMAdapter(config.llm)
     mcp_orchestrator = MCPOrchestrator()
+    mcp_orchestrator.configure_runtime(
+        startup_max_attempts=config.mcp.startup_max_attempts,
+        startup_initial_backoff_seconds=config.mcp.startup_initial_backoff_seconds,
+        startup_max_backoff_seconds=config.mcp.startup_max_backoff_seconds,
+        discovery_cache_ttl_seconds=config.mcp.discovery_cache_ttl_seconds,
+    )
     tool_registry = ToolRegistry()
     agent_loop = AgentLoop(
         max_turns=config.agent_loop.max_turns,
@@ -686,6 +751,7 @@ async def startup():
     )
     
     # Initialize MCP servers (single default or configured multi-server set).
+    mcp_init_errors: List[Dict[str, str]] = []
     try:
         configured_servers = config.mcp.servers or [
             {
@@ -694,6 +760,7 @@ async def startup():
                 "transport": config.mcp.default_transport,
             }
         ]
+        mcp_orchestrator.reset_startup_trace([entry.get("name", "") for entry in configured_servers])
 
         for server_entry in configured_servers:
             server_name = server_entry.get("name")
@@ -715,13 +782,60 @@ async def startup():
                 command=command,
                 transport=server_entry.get("transport", config.mcp.default_transport),
             )
-            await mcp_orchestrator.initialize_server(mcp_config)
-            discovered_tools = await mcp_orchestrator.discover_tools(server_name)
-            tool_registry.register_tools_from_mcp_discovery(server_name, discovered_tools)
-            _log_event("mcp.tools.registered", tool_count=len(discovered_tools), server=server_name)
-            _log_event("mcp.server.initialized", server=server_name)
+            try:
+                await mcp_orchestrator.initialize_server_with_retry(mcp_config)
+                discovered_tools = await mcp_orchestrator.discover_tools(server_name, force_refresh=True)
+                tool_registry.register_tools_from_mcp_discovery(server_name, discovered_tools)
+                mcp_orchestrator.update_startup_trace_server(
+                    server_name,
+                    status="initialized",
+                    tools_discovered=len(discovered_tools),
+                )
+                _log_event("mcp.tools.registered", tool_count=len(discovered_tools), server=server_name)
+                _log_event("mcp.server.initialized", server=server_name)
+            except Exception as exc:
+                summary = mcp_orchestrator.get_startup_trace_summary().get("servers", {}).get(server_name, {})
+                mcp_orchestrator.update_startup_trace_server(
+                    server_name,
+                    status="failed",
+                    error_code=str(summary.get("error_code") or "MCP_DISCOVERY_FAILED"),
+                    error=str(exc),
+                    recommended_fix=str(summary.get("recommended_fix") or "Verify discovery path and MCP module load"),
+                )
+                mcp_init_errors.append(
+                    {
+                        "server": server_name,
+                        "error": str(exc),
+                        "error_code": str(summary.get("error_code") or "MCP_INTERNAL_ERROR"),
+                        "recommended_fix": str(summary.get("recommended_fix") or "Inspect orchestrator logs"),
+                    }
+                )
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "mcp.server.init_failed",
+                            "server": server_name,
+                            "error": str(exc),
+                        },
+                        ensure_ascii=True,
+                    )
+                )
+                continue
     except Exception as e:
         logger.warning(json.dumps({"event": "mcp.server.init_failed", "error": str(e)}, ensure_ascii=True))
+    finally:
+        mcp_orchestrator.complete_startup_trace()
+
+    readiness_issues = _mcp_readiness_issues()
+    if mcp_init_errors or readiness_issues:
+        details = {
+            "event": "mcp.startup.readiness_failed",
+            "init_errors": mcp_init_errors,
+            "readiness_issues": readiness_issues,
+            "startup_summary": mcp_orchestrator.get_startup_trace_summary(),
+        }
+        logger.error(json.dumps(details, ensure_ascii=True))
+        raise RuntimeError(f"MCP readiness failed: {json.dumps(details, ensure_ascii=True)}")
     
     _log_event("orchestrator.startup.complete")
 
@@ -763,6 +877,8 @@ async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
     ):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
 
+    _enforce_runtime_ready_for_chat()
+
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
     auth_context = _authenticate_request(http_request)
@@ -798,6 +914,8 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
         or tool_registry is None
     ):
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
+
+    _enforce_runtime_ready_for_chat()
 
     await _enforce_rate_limit(http_request)
     _require_api_key(http_request)
@@ -883,13 +1001,23 @@ async def health() -> HealthResponse:
             logger.warning(f"LLM health check failed: {e}")
     
     mcp_status = {}
+    startup_summary: Dict[str, Any] = {}
+    discovery_cache: Dict[str, Any] = {}
     if mcp_orchestrator:
         mcp_status = mcp_orchestrator.get_server_status()
+        startup_summary = mcp_orchestrator.get_startup_trace_summary()
+        discovery_cache = mcp_orchestrator.get_discovery_cache_status()
+    readiness_issues = _mcp_readiness_issues()
+    ready = len(readiness_issues) == 0
     
     return HealthResponse(
-        status="healthy" if llm_connected else "degraded",
+        status="healthy" if llm_connected and ready else "degraded",
         llm_connected=llm_connected,
         mcp_servers=mcp_status,
+        ready=ready,
+        readiness_issues=readiness_issues,
+        startup_summary=startup_summary,
+        discovery_cache=discovery_cache,
     )
 
 
@@ -904,6 +1032,12 @@ async def ready() -> Dict[str, str]:
     """Readiness probe endpoint for deployment rollouts."""
     if config is None or llm_adapter is None or mcp_orchestrator is None or tool_registry is None:
         raise HTTPException(status_code=503, detail="orchestrator_not_initialized")
+    readiness_issues = _mcp_readiness_issues()
+    if readiness_issues:
+        raise HTTPException(
+            status_code=503,
+            detail=_build_not_ready_detail(readiness_issues),
+        )
     return {"status": "ready"}
 
 
@@ -935,7 +1069,11 @@ async def list_tools(http_request: Request) -> ToolsResponse:
 
 
 @app.post("/tools/refresh", response_model=ToolRefreshResponse)
-async def refresh_tools(http_request: Request) -> ToolRefreshResponse:
+async def refresh_tools(
+    http_request: Request,
+    force_refresh: bool = True,
+    clear_cache: bool = False,
+) -> ToolRefreshResponse:
     """Refresh tool discovery from all active MCP servers."""
     if tool_registry is None or mcp_orchestrator is None:
         raise HTTPException(status_code=500, detail="Orchestrator not fully initialized")
@@ -946,10 +1084,26 @@ async def refresh_tools(http_request: Request) -> ToolRefreshResponse:
     
     # Clear existing tools and rediscover
     tool_registry.clear()
-    refresh_results = await mcp_orchestrator.refresh_tools(tool_registry)
+    refresh_results = await mcp_orchestrator.refresh_tools(
+        tool_registry,
+        force_refresh=force_refresh,
+        clear_cache=clear_cache,
+    )
+    refresh_metadata = mcp_orchestrator.get_last_refresh_metadata()
     
     total_discovered = sum(refresh_results.values())
-    status = "success" if all(count > 0 for count in refresh_results.values()) else "partial_failure"
+    has_error = any((refresh_metadata.get(server_name) or {}).get("status") == "error" for server_name in refresh_results.keys())
+    has_success = any((refresh_metadata.get(server_name) or {}).get("status") == "ok" for server_name in refresh_results.keys())
+
+    if has_error and has_success:
+        status = "partial_failure"
+        error_code = "MCP_REFRESH_PARTIAL_FAILURE"
+    elif has_error and not has_success:
+        status = "failure"
+        error_code = "MCP_REFRESH_FAILED"
+    else:
+        status = "success"
+        error_code = None
     
     _log_event("tools.refreshed", servers=len(refresh_results), total=total_discovered)
     
@@ -957,6 +1111,23 @@ async def refresh_tools(http_request: Request) -> ToolRefreshResponse:
         status=status,
         servers=refresh_results,
         total_discovered=total_discovered,
+        error_code=error_code,
+        refresh_metadata=refresh_metadata,
+    )
+
+
+@app.get("/mcp/startup-summary", response_model=MCPStartupSummaryResponse)
+async def mcp_startup_summary(http_request: Request) -> MCPStartupSummaryResponse:
+    if mcp_orchestrator is None:
+        raise HTTPException(status_code=500, detail="MCP orchestrator not initialized")
+
+    await _enforce_rate_limit(http_request)
+    _require_api_key(http_request)
+    _authenticate_request(http_request)
+
+    return MCPStartupSummaryResponse(
+        status="ok",
+        summary=mcp_orchestrator.get_startup_trace_summary(),
     )
 
 
@@ -971,13 +1142,25 @@ async def reconnect_mcp_server(req: MCPReconnectRequest, http_request: Request) 
     _authenticate_request(http_request)
     
     try:
-        success = await mcp_orchestrator.reconnect_server(req.server)
-        _log_event("mcp.reconnect_attempted", server=req.server, success=success)
+        reconnect_result = await mcp_orchestrator.reconnect_server(req.server)
+        _log_event(
+            "mcp.reconnect_attempted",
+            server=req.server,
+            success=reconnect_result.success,
+            status=reconnect_result.status,
+            error_code=reconnect_result.error_code,
+        )
         
         return MCPReconnectResponse(
-            status="reconnected" if success else "failed",
-            success=success,
-            reason=None if success else "Reconnection failed or max attempts exceeded"
+            status=reconnect_result.status,
+            success=reconnect_result.success,
+            error_code=reconnect_result.error_code,
+            reason=reconnect_result.reason,
+            retryable=reconnect_result.retryable,
+            attempts_used=reconnect_result.attempts_used,
+            attempts_remaining=reconnect_result.attempts_remaining,
+            next_retry_after_seconds=reconnect_result.next_retry_after_seconds,
+            recommended_fix=reconnect_result.recommended_fix,
         )
     except Exception as e:
         logger.error(f"Reconnection error for {req.server}: {e}")
@@ -1346,7 +1529,7 @@ async def permissions_evaluate(
 async def root():
     """Root endpoint."""
     return {
-        "service": "Tarbar_AI Orchestrator",
+        "service": "Atri Code Orchestrator",
         "version": "0.1.0",
         "endpoints": [
             "POST /chat — Execute agent loop",
@@ -1355,6 +1538,7 @@ async def root():
             "GET /live — Liveness probe",
             "GET /ready — Readiness probe",
             "GET /tools — List available tools",
+            "GET /mcp/startup-summary — MCP startup trace summary",
             "GET /conversations — List stored conversations",
             "GET /conversations/{id} — Conversation details",
             "POST /conversations/{id}/resume — Validate resumable conversation",

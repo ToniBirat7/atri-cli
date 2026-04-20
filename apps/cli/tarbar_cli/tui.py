@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
+import textwrap
 from typing import Any, Optional
 
 TIMELINE_VERBOSITY_LEVELS = ("minimal", "normal", "debug")
@@ -18,6 +19,19 @@ class TurnStatus:
     output_tokens: int
     tool_calls: int
     phase: str
+
+
+@dataclass
+class DashboardFrame:
+    title: str
+    subtitle: str
+    mode: str
+    status: Optional[TurnStatus]
+    conversation: list[str]
+    tool_events: list[str]
+    command_hints: list[str]
+    footer: list[str]
+    reduced_motion: bool = False
 
 
 class TUIRenderer:
@@ -38,6 +52,127 @@ class TUIRenderer:
     @staticmethod
     def is_tty() -> bool:
         return sys.stdout.isatty()
+
+    @staticmethod
+    def terminal_size(default: tuple[int, int] = (120, 40)) -> tuple[int, int]:
+        size = shutil.get_terminal_size(default)
+        return size.columns, size.lines
+
+    def fullscreen_supported(self) -> bool:
+        return self.supports_color() and self.is_tty()
+
+    def clear_screen(self) -> None:
+        if not self.is_tty():
+            return
+        print("\033[2J\033[H", end="", flush=True)
+
+    def _wrap_lines(self, text: str, width: int) -> list[str]:
+        if width <= 0:
+            return [text]
+        wrapped = textwrap.wrap(
+            text,
+            width=width,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        return wrapped or [""]
+
+    def _panel(self, title: str, lines: list[str], width: int) -> list[str]:
+        inner_width = max(12, width - 2)
+        safe_title = f" {title} "[:inner_width]
+        top = "+" + safe_title.ljust(inner_width, "-") + "+"
+        bottom = "+" + "-" * inner_width + "+"
+        body: list[str] = []
+        for line in lines:
+            for chunk in self._wrap_lines(line, inner_width):
+                body.append("|" + chunk.ljust(inner_width) + "|")
+        if not body:
+            body.append("|" + "".ljust(inner_width) + "|")
+        return [top, *body, bottom]
+
+    def _compose_status_lines(self, status: Optional[TurnStatus], subtitle: str, mode: str) -> list[str]:
+        if status is None:
+            return [subtitle, f"mode: {mode}", "waiting for input"]
+        return [
+            subtitle,
+            f"turn: {status.turn_number}",
+            f"phase: {status.phase}",
+            f"elapsed: {status.elapsed_seconds:.1f}s",
+            f"input tokens: {status.input_tokens}",
+            f"output tokens: {status.output_tokens}",
+            f"tool calls: {status.tool_calls}",
+        ]
+
+    def render_fullscreen_dashboard(self, frame: DashboardFrame) -> None:
+        if not self.fullscreen_supported():
+            header = f"{frame.title} | {frame.mode}"
+            print(self.style(header, color="cyan", bold=True))
+            if frame.subtitle:
+                print(self.style(frame.subtitle, dim=True))
+            for line in frame.conversation[-4:]:
+                print(line)
+            return
+
+        self.clear_screen()
+        width, _height = self.terminal_size()
+        width = max(width, 80)
+        left_width = max(40, (width - 4) // 2)
+        right_width = width - left_width - 4
+
+        header = self.style(f" {frame.title} ", color="cyan", bold=True)
+        subtitle = self.style(frame.subtitle, dim=True)
+        status_lines = self._compose_status_lines(frame.status, frame.subtitle, frame.mode)
+        if frame.status is None:
+            status_body = ["waiting for input"]
+        else:
+            status_body = status_lines[1:]
+
+        left_lines: list[str] = [
+            f"mode: {frame.mode}",
+            f"note: {frame.subtitle}",
+            *status_body,
+            "",
+            "Recent conversation:",
+            *([f"* {line}" for line in frame.conversation[-8:]] or ["* (empty)"]),
+        ]
+
+        right_lines: list[str] = [
+            "Tool activity:",
+            *([f"* {line}" for line in frame.tool_events[-8:]] or ["* none yet"]),
+            "",
+            "Command hints:",
+            *([f"* {hint}" for hint in frame.command_hints] or ["* /help"]),
+            "",
+            "Keyboard:",
+            *([f"* {hint}" for hint in frame.footer] or ["* Tab, Ctrl-R, Ctrl-N"]),
+        ]
+
+        left_panel = self._panel("Session", left_lines, left_width)
+        right_panel = self._panel("Commands & Events", right_lines, right_width)
+
+        max_rows = max(len(left_panel), len(right_panel))
+        left_panel += [" " * left_width] * (max_rows - len(left_panel))
+        right_panel += [" " * right_width] * (max_rows - len(right_panel))
+
+        print(header)
+        if frame.subtitle:
+            print(subtitle)
+        if frame.status is not None:
+            summary_line = (
+                f"turn {frame.status.turn_number} | {frame.status.phase} | "
+                f"{frame.status.elapsed_seconds:.1f}s | in {frame.status.input_tokens} | "
+                f"out {frame.status.output_tokens} | tools {frame.status.tool_calls}"
+            )
+            print(self.style(summary_line, color="cyan", dim=True))
+        print()
+        for left_line, right_line in zip(left_panel, right_panel):
+            print(f"{left_line}  {right_line}")
+
+        if not frame.reduced_motion:
+            print()
+            print(self.style("Live status updates stay in the lower line while the session runs.", dim=True))
 
     def style(self, text: str, *, color: Optional[str] = None, bold: bool = False, dim: bool = False) -> str:
         ansi = {

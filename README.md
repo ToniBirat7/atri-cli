@@ -1,10 +1,10 @@
-# Tarbar AI (CLI Branch)
+# Atri Code (CLI Branch)
 
-This branch is the production CLI experience of Tarbar AI: a local-first agent system powered by llama.cpp, orchestrator policy/control loops, and MCP tool calling, delivered through a terminal-native interface.
+This branch is the production CLI experience of Atri Code: a local-first agent system powered by llama.cpp, orchestrator policy/control loops, and MCP tool calling, delivered through a terminal-native interface.
 
 ## What This Project Is
 
-Tarbar AI is an on-device agent architecture for private, controllable AI workflows.
+Atri Code is an on-device agent architecture for private, controllable AI workflows.
 
 Design goals:
 - Keep LLM inference local with llama.cpp
@@ -35,7 +35,7 @@ Runtime services:
 
 ## Model Runtime
 
-Tarbar AI runs a local GGUF instruct model through `llama.cpp`.
+Atri Code runs a local GGUF instruct model through `llama.cpp`.
 
 Primary model:
 - Model: Gemma 4 E2B Instruct
@@ -58,7 +58,7 @@ Resource expectations:
 
 ## How the CLI Runtime Works
 
-1. User prompt enters through `tarbar_cli`.
+1. User prompt enters through `atri-cli`.
 2. CLI sends request to orchestrator (`/chat` or `/chat/stream`).
 3. Orchestrator asks llama.cpp for reasoning/action output.
 4. If tool calls are required, orchestrator dispatches to MCP.
@@ -72,7 +72,7 @@ The model is not a standalone endpoint in this setup. The CLI uses the orchestra
 
 ```mermaid
 flowchart LR
-	U[Developer in Terminal] --> C[Tarbar CLI<br/>apps/cli]
+	U[Developer in Terminal] --> C[Atri Code CLI<br/>apps/cli]
 	C --> O[Orchestrator API<br/>services/orchestrator]
 	O --> L[llama.cpp Server<br/>runtime/llm/llama.cpp]
 
@@ -131,12 +131,26 @@ make install
 make cli-up
 ```
 
-Run CLI directly:
+Run CLI module directly:
 
 ```bash
 cd apps/cli
 python -m tarbar_cli.main
 ```
+
+Installed launcher:
+
+```bash
+atri-cli --help
+atri-cli doctor
+```
+
+Credential safety note:
+- Use environment variables or local `.env` files for keys/secrets.
+- Keep placeholder defaults like `__SET_ME__` until you inject real values locally.
+
+Compatibility note:
+- `tarbar` remains available as a compatibility alias for one release cycle.
 
 Print mode example:
 

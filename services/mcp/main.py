@@ -330,6 +330,31 @@ def read_text_file(path: str, head: int | None = None, tail: int | None = None) 
 
 
 @mcp.tool
+def read_file(path: str, start_line: int = 1, end_line: int = 200) -> dict[str, Any]:
+    """
+    Backward-compatible alias for line-ranged file reads.
+
+    This keeps compatibility with clients that call `read_file` while
+    internally reusing the `read_text_file` implementation.
+    """
+    if start_line < 1:
+        raise ValueError("start_line must be >= 1")
+    if end_line < start_line:
+        raise ValueError("end_line must be >= start_line")
+
+    payload = read_text_file(path)
+    lines = str(payload.get("content", "")).splitlines()
+    sliced = lines[start_line - 1 : end_line]
+    return {
+        "path": payload.get("path"),
+        "content": "\n".join(sliced),
+        "start_line": start_line,
+        "end_line": end_line,
+        "line_count": len(sliced),
+    }
+
+
+@mcp.tool
 def read_multiple_files(paths: list[str]) -> dict[str, Any]:
     """Read multiple text files; failures are captured per file."""
     results: list[dict[str, Any]] = []

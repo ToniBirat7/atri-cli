@@ -1,10 +1,10 @@
-# Tarbar_AI Quick Start Guide
+# Atri Code Quick Start Guide
 
 Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orchestration, and CLI UI.
 
 ## Branch Mode
 
-You are on the CLI-focused `master` branch aligned to a Claude Code-style workflow.
+You are on the CLI-focused `master` branch aligned to an Atri Code terminal workflow.
 
 Single-step setup for other users:
 
@@ -27,6 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/script
 From an existing local clone:
 ```bash
 make cli-up
+atri-cli doctor
 ```
 
 ## Production Cleanliness
@@ -206,7 +207,7 @@ File: `services/orchestrator/.env`
 ```env
 # LLM Configuration
 LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_API_KEY=secret
+LLM_API_KEY=__SET_ME__
 LLM_MODEL=local-model
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=2048

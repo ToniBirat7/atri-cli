@@ -162,6 +162,35 @@ def test_parser_supports_worktree_commands():
     assert args.worktrees_command == "clean"
 
 
+def test_parser_supports_cleanup_command():
+    parser = cli_main._build_parser()
+    args = parser.parse_args(["cleanup", "--mode", "deep", "--yes"])
+    assert args.command == "cleanup"
+    assert args.mode == "deep"
+    assert args.yes is True
+
+
+def test_main_dispatches_cleanup_command(monkeypatch):
+    called = {}
+
+    class _FakeClient:
+        def __init__(self, base_url: str, api_key=None):
+            self.base_url = base_url
+            self.api_key = api_key
+
+    def _fake_cleanup(mode: str, assume_yes: bool):
+        called["mode"] = mode
+        called["yes"] = assume_yes
+
+    monkeypatch.setattr(cli_main, "OrchestratorClient", _FakeClient)
+    monkeypatch.setattr(cli_main, "_cleanup", _fake_cleanup)
+    monkeypatch.setattr(sys, "argv", ["atri-cli", "cleanup", "--mode", "safe", "--yes"])
+
+    cli_main.main()
+
+    assert called == {"mode": "safe", "yes": True}
+
+
 def test_parser_supports_timeline_verbosity_flag():
     parser = cli_main._build_parser()
     args = parser.parse_args(["--timeline-verbosity", "debug", "--print", "--prompt", "hello"])

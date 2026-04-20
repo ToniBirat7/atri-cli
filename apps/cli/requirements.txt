@@ -1,2 +1,2 @@
-# Tarbar CLI dependencies
-# Increment 1 intentionally uses stdlib-only networking for portability.
+# Atri Code CLI dependencies
+prompt_toolkit>=3.0.43

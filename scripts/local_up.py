@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Branch-aware local bootstrap for Tarbar_AI with production cleanup.
+"""Branch-aware local bootstrap for Atri Code with production cleanup.
 
 This script can:
 - clone/update a specific branch
@@ -90,7 +90,7 @@ def _download_model(model_path: Path) -> None:
     print(f"[local-up] Downloading model to {model_path}...")
     request = urllib.request.Request(
         MODEL_DOWNLOAD_URL,
-        headers={"User-Agent": "Tarbar_AI/1.0"},
+        headers={"User-Agent": "atri-code/1.0"},
     )
 
     try:
@@ -199,7 +199,7 @@ def _write_orchestrator_env(repo_dir: Path) -> None:
         "\n".join(
             [
                 "LLM_BASE_URL=http://127.0.0.1:8000/v1",
-                "LLM_API_KEY=secret",
+                "LLM_API_KEY=__SET_ME__",
                 "LLM_MODEL=local-model",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=10",
@@ -388,17 +388,22 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str) -> None:
 
     llama_ok = _wait_health("http://127.0.0.1:8000/health", timeout_sec=90)
     orch_ok = _wait_health("http://127.0.0.1:8001/health", timeout_sec=60)
+    orch_ready = _wait_health("http://127.0.0.1:8001/ready", timeout_sec=60)
 
     print("\n[local-up] Startup summary:")
     print(f"  mode: {mode}")
     print(f"  llama health: {'ok' if llama_ok else 'failed'}")
     print(f"  orchestrator health: {'ok' if orch_ok else 'failed'}")
+    print(f"  orchestrator readiness: {'ready' if orch_ready else 'failed'}")
     if mode in {"full", "web"}:
         print("  frontend: http://127.0.0.1:3000")
 
+    if not orch_ready:
+        raise RuntimeError("orchestrator readiness failed; check orchestrator.log for MCP startup errors")
+
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Bootstrap Tarbar_AI with production cleanup")
+    parser = argparse.ArgumentParser(description="Bootstrap Atri Code with production cleanup")
     parser.add_argument("--repo-url", default=os.environ.get("TARBAR_REPO_URL", DEFAULT_REPO_URL))
     parser.add_argument("--repo-dir", default=os.environ.get("TARBAR_REPO_DIR", DEFAULT_REPO_DIR))
     parser.add_argument("--branch", default=os.environ.get("TARBAR_BRANCH", DEFAULT_BRANCH))
