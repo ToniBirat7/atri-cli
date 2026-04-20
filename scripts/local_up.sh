@@ -10,9 +10,9 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$BOOTSTRAP_URL" | "$PYTHON_BIN" - "$@"
+  curl -fsSL "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --branch web "$@"
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO- "$BOOTSTRAP_URL" | "$PYTHON_BIN" - "$@"
+  wget -qO- "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --branch web "$@"
 else
   echo "[local-up] ERROR: curl or wget is required" >&2
   exit 1
