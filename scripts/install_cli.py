@@ -43,8 +43,8 @@ def _safe_rmtree(path: Path) -> None:
 def _write_launcher(bin_path: Path, package_root: Path) -> None:
     launcher = textwrap.dedent(
         f"""\
-        {LAUNCHER_MANAGED_MARKER}
         #!/usr/bin/env python3
+        {LAUNCHER_MANAGED_MARKER}
         import os
         import subprocess
         import sys
