@@ -97,13 +97,14 @@ def _ensure_repo(repo_url: str, repo_dir: Path, branch: str, skip_clone: bool) -
     _run(["git", "pull", "--ff-only", "origin", branch], cwd=repo_dir)
 
 
-def _install_dependencies(repo_dir: Path) -> None:
+def _install_dependencies(repo_dir: Path, mode: str) -> None:
     _which_or_fail("cmake")
     _which_or_fail("node")
     _which_or_fail("npm")
 
-    print("[local-up] Installing frontend dependencies...")
-    _run(["npm", "install"], cwd=repo_dir / "apps/frontend")
+    if mode in {"full", "web"}:
+        print("[local-up] Installing frontend dependencies...")
+        _run(["npm", "install"], cwd=repo_dir / "apps/frontend")
 
     print("[local-up] Installing orchestrator dependencies...")
     _run([sys.executable, "-m", "venv", ".venv"], cwd=repo_dir / "services/orchestrator")
@@ -377,7 +378,7 @@ def main() -> int:
     repo_dir = Path(args.repo_dir).expanduser().resolve()
 
     _ensure_repo(args.repo_url, repo_dir, args.branch, args.skip_clone)
-    _install_dependencies(repo_dir)
+    _install_dependencies(repo_dir, args.mode)
     use_gpu = _detect_gpu()
     _build_llama(repo_dir, use_gpu)
     _start_services_by_mode(repo_dir, use_gpu, args.mode)
