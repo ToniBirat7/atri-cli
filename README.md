@@ -33,6 +33,35 @@ Runtime services:
 - Bootstrap/build: Bash/PowerShell + Python + CMake
 - Persistence: SQLite local state by default (or PostgreSQL in containerized deployments)
 
+## Model Runtime
+
+Tarbar AI is built around a local GGUF model that runs entirely on your machine through `llama.cpp`.
+
+Primary model:
+- Model: Gemma 4 E2B Instruct
+- Format: GGUF
+- Quantization: Q4_K_M
+- Local file: `models/gemma-4-e2b-it-Q4_K_M.gguf`
+- Approximate model size: 2.9 GB
+- Model type: text-only instruct model
+
+Runtime behavior:
+- `llama.cpp` serves the model through an OpenAI-compatible HTTP API at `http://127.0.0.1:8000/v1`
+- The orchestrator reads the model response, decides whether tool use is needed, and sends tool calls to MCP
+- Tool outputs are merged back into the model context until the final response is ready
+- The default model identifier exposed to the orchestrator is `local-model`
+
+Resource expectations:
+- Quickstart recommends at least 4 GB of available RAM for local use
+- Disk usage is roughly 5 GB once the model cache and runtime files are included
+- The bootstrap script builds `llama-server` and `llama-cli`, then selects a CPU or CUDA build based on whether NVIDIA tooling is available
+
+What the model is good at:
+- Conversational question answering
+- Tool-aware agent workflows
+- Local/private reasoning over files, searches, and orchestrator state
+- Returning grounded results instead of free-form guesses when tools are available
+
 ## How It Works
 
 At runtime, each user message flows through a deterministic pipeline:
@@ -44,6 +73,8 @@ At runtime, each user message flows through a deterministic pipeline:
 5. MCP executes tool(s), returns structured results.
 6. Orchestrator feeds tool outputs back to model.
 7. Final grounded answer is returned to browser.
+
+The key design idea is that the model never acts alone. It is paired with the orchestrator, which applies prompt policy, tool routing, persistence, and response validation before anything reaches the UI.
 
 ## Web Architecture Diagram
 
