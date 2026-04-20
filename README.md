@@ -1,112 +1,141 @@
-# Tarbar_AI
+# Tarbar AI (Web Branch)
 
-Tarbar_AI is a local-first agentic AI project that combines:
-- llama.cpp runtime for local LLM inference
-- MCP servers for tool execution
-- a web chat frontend for interaction
+This branch is the production Web experience of Tarbar AI: a local-first agent platform that combines llama.cpp inference, an orchestrator API, MCP tool execution, and a Next.js chat UI.
 
-## Service Documentation
+## What This Project Is
 
-- [Orchestrator service](docs/services/orchestrator.md) - prompt policy, auth, persistence, rate limiting, and tracing
-- [MCP service](docs/services/mcp.md) - filesystem tool execution and sandboxing
-- [Frontend service](docs/services/frontend.md) - browser chat experience and API proxying
-- [LLM runtime](docs/services/llama.md) - llama.cpp deployment, Jinja prompts, and tool calling
-- [End-to-end workflow](docs/workflows/end-to-end.md) - request flow from browser to model to tools and back
+Tarbar AI is an agentic runtime designed for private, local operation. It keeps model execution and tool calling on your machine while exposing a modern chat workflow through the browser.
 
-## Repository Structure
+Core goals:
+- Local LLM inference through llama.cpp
+- Structured agent orchestration with persistence and policy controls
+- MCP-based tool integration for safe, explicit tool calls
+- Single-command bootstrap for repeatable setup
 
-- `apps/frontend` - Next.js chat application
-- `apps/cli` - terminal client for orchestrator-backed chat and session workflows
-- `services/mcp` - FastMCP server(s)
-- `runtime/llm/llama.cpp` - local llama.cpp runtime source
-- `docs` - architecture notes, references, and notebooks
-- `models` - local model asset directory (GGUF files are ignored by git)
-- `scripts` - helper scripts for local development
+## Web Branch Scope
 
-## Quick Start
+This `web` branch is optimized for browser-first usage.
 
-This branch is Web-focused (Claude Desktop-style browser workflow).
+Primary entrypoint:
+- `apps/frontend` (Next.js chat UI)
 
-Install CLI (Python-first installer):
+Runtime services:
+- `runtime/llm/llama.cpp` (local model runtime)
+- `services/orchestrator` (agent loop, policy, tool routing, persistence)
+- `services/mcp` (MCP servers and tool adapters)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/main/install.sh | bash
+## Technology Stack
+
+- Model runtime: llama.cpp
+- Agent/backend: Python + FastAPI/Uvicorn (orchestrator)
+- Tooling protocol: MCP (FastMCP-based service layer)
+- Frontend: Next.js + Node.js
+- Bootstrap/build: Bash/PowerShell + Python + CMake
+- Persistence: SQLite local state by default (or PostgreSQL in containerized deployments)
+
+## How It Works
+
+At runtime, each user message flows through a deterministic pipeline:
+
+1. Browser sends prompt to orchestrator API.
+2. Orchestrator builds model context and policy constraints.
+3. Orchestrator asks llama.cpp for next action/response.
+4. If model emits tool calls, orchestrator routes those calls to MCP.
+5. MCP executes tool(s), returns structured results.
+6. Orchestrator feeds tool outputs back to model.
+7. Final grounded answer is returned to browser.
+
+## Web Architecture Diagram
+
+```mermaid
+flowchart LR
+	U[User in Browser] --> F[Next.js Frontend<br/>apps/frontend]
+	F --> O[Orchestrator API<br/>services/orchestrator]
+	O --> L[llama.cpp Server<br/>runtime/llm/llama.cpp]
+
+	O --> M[MCP Service Layer<br/>services/mcp]
+	M --> T1[Filesystem Tools]
+	M --> T2[Web Search Tools]
+	M --> T3[Custom Tool Adapters]
+
+	O --> D[(SQLite / Postgres<br/>Conversation + Turn State)]
+
+	L --> O
+	M --> O
+	O --> F
 ```
 
-Single-command Web pipeline (clone/update repo, install deps, auto GPU/CPU build, start llama + orchestrator + frontend):
+## MCP and Tool Calls
 
-Linux/macOS:
+Tool calling is explicit and audited by the orchestrator.
+
+Operational behavior:
+- Tool calls are emitted by the model as structured requests.
+- Orchestrator validates and dispatches to MCP.
+- MCP returns normalized outputs (data/errors/metadata).
+- Orchestrator records turn + tool trace and continues reasoning.
+
+This allows the model to stay grounded in real local operations instead of hallucinating external state.
+
+## One-Command Install and Run
+
+Linux/macOS (web mode):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.sh | bash
+curl -fsSL https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/web_up.sh | bash
 ```
 
-Linux/macOS (full pipeline):
+Linux/macOS (full branch bootstrap):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/local_up.sh | bash
+curl -fsSL https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/local_up.sh | bash
 ```
 
-Linux/macOS (CLI-focused optional flow):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
-```
-
-Windows (PowerShell, Web-focused):
+Windows PowerShell (web mode):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://github.com/ToniBirat7/Agentic_AI/raw/web/scripts/web_up.ps1 -UseBasicParsing | iex"
 ```
 
-Windows PowerShell (full pipeline):
+## Local Development
 
-```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/local_up.ps1 -UseBasicParsing | iex"
-```
-
-Windows PowerShell (CLI-focused optional flow):
-
-```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
-```
-
-From an existing local clone (Web-focused default):
+From an existing clone on this branch:
 
 ```bash
+make install
 make web-up
 ```
 
-From an existing local clone, full pipeline and CLI-focused startup are also available:
+Useful commands:
+- `make local-up` for full pipeline bootstrap
+- `make dev-up` / `make dev-down` for service lifecycle
+- `make health` for service checks
 
-```bash
-make local-up
-make cli-up
-```
+## Runtime Ports (Default)
 
-Prerequisites (both Linux and Windows): Git, Python 3.10+, Node.js 20+, npm, CMake. CUDA is optional; when available (nvidia-smi + nvcc), GPU build is used automatically, otherwise CPU-optimized build is used.
+- Frontend: `http://127.0.0.1:3000`
+- Orchestrator: `http://127.0.0.1:8001`
+- llama.cpp API: `http://127.0.0.1:8000`
 
-Branch strategy:
-- `master`: CLI-focused branch for Claude Code-style terminal workflow.
-- `web`: this branch, Web-focused for Claude Desktop-style browser workflow.
+## Prerequisites
 
-1. Start llama.cpp server from `runtime/llm/llama.cpp` with your selected model.
-2. Start MCP server from `services/mcp/main.py`.
-3. Start frontend from `apps/frontend`:
+- Git
+- Python 3.10+
+- Node.js 20+
+- npm
+- CMake
+- Optional CUDA toolchain (`nvidia-smi`, `nvcc`) for GPU acceleration
 
-```bash
-npm install
-npm run dev
-```
+## Production Notes
 
-4. Start CLI from `apps/cli`:
+- Bootstrap scripts support branch-aware install/update.
+- Runtime state defaults to local persistent storage.
+- Install pipeline includes post-start pruning and cache cleanup for lean deployment footprints.
+- Keep model artifacts in `models/` locally; large binaries stay out of git.
 
-```bash
-cd apps/cli
-python -m tarbar_cli.main --help
-```
+## Branch Strategy
 
-## Notes
+- `web` (this branch): browser-first workflow.
+- `master`: CLI-first workflow.
 
-- The root `.gitignore` is hardened for production workflows.
-- Build artifacts, local caches, logs, and model binaries are excluded from source control.
+If you need the terminal experience, use the `master` branch installer.
