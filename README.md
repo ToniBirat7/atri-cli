@@ -164,6 +164,13 @@ Useful commands:
 - Install pipeline includes post-start pruning and cache cleanup for lean deployment footprints.
 - Keep model artifacts in `models/` locally; large binaries stay out of git.
 
+## Production File Policy
+
+- Keep only production code, required docs, and deployment assets in git.
+- Keep runtime artifacts local only: databases, logs, cache directories, and model binaries.
+- Use `make clean` (or remove local runtime directories) before packaging or publishing snapshots.
+- Avoid committing ad-hoc planning notes or generated reports at repository root.
+
 ## Branch Strategy
 
 - `web` (this branch): browser-first workflow.

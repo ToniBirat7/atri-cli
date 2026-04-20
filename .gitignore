@@ -66,6 +66,8 @@ benchmark_reports/
 *.db-wal
 *.sqlite
 *.sqlite3
+orchestrator.db
+services/orchestrator/orchestrator.db*
 runtime/state/*
 !runtime/state/.gitkeep
 npm-debug.log*

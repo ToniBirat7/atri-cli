@@ -18,6 +18,12 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/web/scripts/web_up.ps1 -UseBasicParsing | iex"
 ```
 
+## Production Cleanliness
+
+- Runtime databases/logs/caches are local-only and should not be committed.
+- If you need a fresh production-like state, run `make clean` before packaging.
+- See `docs/PRODUCTION_FILE_POLICY.md` for the full repository policy.
+
 ## Prerequisites
 
 ### Option 1: Local Development (Makefile)
