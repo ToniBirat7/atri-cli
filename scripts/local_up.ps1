@@ -24,9 +24,9 @@ Set-Content -Path $tmp -Value $script -Encoding UTF8
 
 try {
     if ($python.Name -eq "py") {
-        & py $tmp @args
+        & py $tmp --branch master @args
     } else {
-        & python $tmp @args
+        & python $tmp --branch master @args
     }
 }
 finally {

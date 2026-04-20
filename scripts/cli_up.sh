@@ -10,9 +10,9 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --mode cli "$@"
+  curl -fsSL "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --branch master --mode cli "$@"
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO- "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --mode cli "$@"
+  wget -qO- "$BOOTSTRAP_URL" | "$PYTHON_BIN" - --branch master --mode cli "$@"
 else
   echo "[cli-up] ERROR: curl or wget is required" >&2
   exit 1
