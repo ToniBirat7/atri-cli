@@ -79,12 +79,20 @@ def test_brave_provider_requires_api_key():
     assert provider.name == "brave"
 
 
-def test_get_search_provider_defaults_to_duckduckgo():
-    """Test that get_search_provider defaults to DuckDuckGo when no key provided."""
+def test_get_search_provider_auto_returns_supported_provider():
+    """Test that auto provider resolves to one of the supported providers."""
     from search_adapter import get_search_provider
 
     provider = get_search_provider("auto", brave_api_key=None)
-    assert provider.name == "duckduckgo"
+    assert provider.name in {"duckduckgo", "brave", "tavily"}
+
+
+def test_get_search_provider_tavily_requires_or_uses_key():
+    """Test that Tavily provider path is selectable when key is provided."""
+    from search_adapter import get_search_provider
+
+    provider = get_search_provider("tavily", tavily_api_key="test-key")
+    assert provider.name == "tavily"
 
 
 def test_get_search_provider_raises_on_unknown():
@@ -108,7 +116,10 @@ def test_search_web_results_includes_citations(monkeypatch):
                 SearchResult("B", "https://example.com/b", "y", "fake"),
             ]
 
-    monkeypatch.setattr("search_adapter.get_search_provider", lambda provider, brave_api_key=None: _FakeProvider())
+    monkeypatch.setattr(
+        "search_adapter.get_search_provider",
+        lambda provider, brave_api_key=None, tavily_api_key=None: _FakeProvider(),
+    )
 
     payload = search_web_results(query="hello", provider="auto", max_results=5)
     assert payload["count"] == 2

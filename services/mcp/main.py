@@ -590,6 +590,7 @@ def search_web(query: str, provider: str = "auto", max_results: int = 5) -> dict
         provider=provider,
         max_results=max_results,
         brave_api_key=os.getenv("BRAVE_SEARCH_API_KEY"),
+        tavily_api_key=os.getenv("TAVILY_API_KEY"),
     )
 
 
