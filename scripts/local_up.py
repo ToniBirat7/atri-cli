@@ -25,6 +25,10 @@ DEFAULT_REPO_URL = "https://github.com/ToniBirat7/Agentic_AI.git"
 DEFAULT_REPO_DIR = "Agentic_AI"
 DEFAULT_BRANCH = "master"
 MODEL_REL_PATH = Path("models/gemma-4-e2b-it-Q4_K_M.gguf")
+MODEL_DOWNLOAD_URL = (
+    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/"
+    "gemma-4-E2B-it-Q4_K_M.gguf?download=true"
+)
 
 
 def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -75,6 +79,35 @@ def _llama_server_bin(repo_dir: Path) -> Path:
 
 def _detect_gpu() -> bool:
     return shutil.which("nvidia-smi") is not None and shutil.which("nvcc") is not None
+
+
+def _download_model(model_path: Path) -> None:
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = model_path.with_suffix(model_path.suffix + ".part")
+    if temp_path.exists():
+        temp_path.unlink()
+
+    print(f"[local-up] Downloading model to {model_path}...")
+    request = urllib.request.Request(
+        MODEL_DOWNLOAD_URL,
+        headers={"User-Agent": "Tarbar_AI/1.0"},
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, open(temp_path, "wb") as output_file:
+            shutil.copyfileobj(response, output_file)
+        temp_path.replace(model_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+
+def _ensure_model(repo_dir: Path) -> Path:
+    model_path = repo_dir / MODEL_REL_PATH
+    if not model_path.exists():
+        _download_model(model_path)
+    return model_path
 
 
 def _ensure_repo(repo_url: str, repo_dir: Path, branch: str, skip_clone: bool) -> None:
@@ -308,9 +341,9 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str) -> None:
     model_path = repo_dir / MODEL_REL_PATH
     if not model_path.exists():
         raise RuntimeError(
-            "Model file missing: "
+            "Model file missing after download attempt: "
             f"{model_path}\n"
-            "Download from: https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF"
+            f"Expected download source: {MODEL_DOWNLOAD_URL}"
         )
 
     _write_orchestrator_env(repo_dir)
@@ -379,6 +412,7 @@ def main() -> int:
 
     _ensure_repo(args.repo_url, repo_dir, args.branch, args.skip_clone)
     _install_dependencies(repo_dir, args.mode)
+    _ensure_model(repo_dir)
     use_gpu = _detect_gpu()
     _build_llama(repo_dir, use_gpu)
     _start_services_by_mode(repo_dir, use_gpu, args.mode)

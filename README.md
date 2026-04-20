@@ -33,6 +33,29 @@ Runtime services:
 - Build/bootstrap: Bash/PowerShell + Python + CMake
 - Persistence: SQLite local state by default
 
+## Model Runtime
+
+Tarbar AI runs a local GGUF instruct model through `llama.cpp`.
+
+Primary model:
+- Model: Gemma 4 E2B Instruct
+- Format: GGUF
+- Quantization: Q4_K_M
+- Local file: `models/gemma-4-e2b-it-Q4_K_M.gguf`
+- Approximate model size: 3.1 GB download
+- Model type: text-only instruct model
+
+Runtime behavior:
+- The CLI installer downloads the model automatically from Hugging Face if it is missing
+- `llama.cpp` exposes the model through the OpenAI-compatible API on `http://127.0.0.1:8000/v1`
+- The orchestrator manages prompt policy, tool calls, and turn state around the model
+- The default model identifier exposed to the orchestrator is `local-model`
+
+Resource expectations:
+- Quickstart recommends at least 4 GB of available RAM for local use
+- Disk usage is roughly 5 GB once the model cache and runtime files are included
+- The bootstrap script builds `llama-server` and `llama-cli`, then selects a CPU or CUDA build based on whether NVIDIA tooling is available
+
 ## How the CLI Runtime Works
 
 1. User prompt enters through `tarbar_cli`.
@@ -42,6 +65,8 @@ Runtime services:
 5. MCP executes tools and returns structured results.
 6. Orchestrator loops model + tool outputs until final answer.
 7. CLI renders response, timeline, and session metadata.
+
+The model is not a standalone endpoint in this setup. The CLI uses the orchestrator as the control layer, and the orchestrator decides when to ask the model for a response versus when to call tools and feed results back into the model.
 
 ## CLI Architecture Diagram
 

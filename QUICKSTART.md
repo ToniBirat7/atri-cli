@@ -31,18 +31,16 @@ make cli-up
 - Python 3.10+
 - Node.js 18+
 - llama.cpp built (or pre-built binary)
-- Gemma 4 E2B model (2.9GB GGUF file)
+- Gemma 4 E2B model (auto-downloaded GGUF file if missing)
 
 **Setup:**
 ```bash
 # Install dependencies
 make install
 
-# Verify model exists
-ls models/gemma-4-e2b-it-Q4_K_M.gguf
-
-# If missing, download from:
-# https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF
+# The CLI installer downloads the model automatically when needed.
+# Manual source:
+# https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/blob/main/gemma-4-E2B-it-Q4_K_M.gguf
 ```
 
 ### Option 2: Containerized (Docker Compose)
