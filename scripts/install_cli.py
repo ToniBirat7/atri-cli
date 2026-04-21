@@ -20,12 +20,13 @@ import sys
 import tarfile
 import tempfile
 import textwrap
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 DEFAULT_ARCHIVE_URL = os.environ.get(
     "TARBAR_INSTALL_ARCHIVE_URL",
-    "https://github.com/ToniBirat7/Agentic_AI/archive/refs/heads/main.tar.gz",
+    "https://github.com/ToniBirat7/Agentic_AI/archive/refs/heads/master.tar.gz",
 )
 PRIMARY_LAUNCHER = "atri-cli"
 COMPAT_LAUNCHER = "tarbar"
@@ -97,10 +98,28 @@ def _install_from_repo(repo_root: Path, install_root: Path, bin_root: Path) -> P
 
 
 def _download_archive(archive_url: str, destination: Path) -> None:
-    req = urllib.request.Request(archive_url, headers={"User-Agent": "tarbar-installer/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as response:
-        data = response.read()
-    destination.write_bytes(data)
+    archive_candidates = [archive_url]
+    if archive_url.endswith("/master.tar.gz"):
+        archive_candidates.append(archive_url.replace("/master.tar.gz", "/main.tar.gz"))
+    elif archive_url.endswith("/main.tar.gz"):
+        archive_candidates.append(archive_url.replace("/main.tar.gz", "/master.tar.gz"))
+
+    last_error = None
+    for candidate_url in archive_candidates:
+        req = urllib.request.Request(candidate_url, headers={"User-Agent": "tarbar-installer/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = response.read()
+            destination.write_bytes(data)
+            return
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 404:
+                raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unable to download installer archive from configured URLs")
 
 
 def _extract_repo_root_from_archive(archive_path: Path, extract_dir: Path) -> Path:
