@@ -11,10 +11,12 @@ Design goals:
 from __future__ import annotations
 
 import fnmatch
+import importlib.util
 import json
 import logging
 import os
 import shutil
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,19 @@ from typing import Any
 try:
     from .search_adapter import fetch_web_content, search_web_results
 except ImportError:
-    from search_adapter import fetch_web_content, search_web_results
+    try:
+        from search_adapter import fetch_web_content, search_web_results
+    except ImportError:
+        # Support in-process loading via importlib without package context.
+        adapter_path = Path(__file__).with_name("search_adapter.py")
+        spec = importlib.util.spec_from_file_location("tarbar_search_adapter", str(adapter_path))
+        if spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault("tarbar_search_adapter", module)
+        spec.loader.exec_module(module)
+        fetch_web_content = module.fetch_web_content
+        search_web_results = module.search_web_results
 
 try:
     from fastmcp import FastMCP
