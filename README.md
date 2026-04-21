@@ -120,6 +120,12 @@ Compatibility wrapper (installs and launches in one command on Linux/macOS):
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
 ```
 
+Fresh full local runtime bootstrap (llama + orchestrator, CLI mode):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/local_up.sh | bash -s -- --mode cli
+```
+
 The installer creates a `tarbar` launcher and attempts to create a `claude` alias when that command name is not already claimed by another tool.
 
 ## Local Development

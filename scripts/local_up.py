@@ -110,17 +110,47 @@ def _ensure_model(repo_dir: Path) -> Path:
     return model_path
 
 
+def _backup_existing_dir(repo_dir: Path) -> Path:
+    suffix = int(time.time())
+    backup_dir = repo_dir.with_name(f"{repo_dir.name}_backup_{suffix}")
+    shutil.move(str(repo_dir), str(backup_dir))
+    return backup_dir
+
+
+def _prepare_clone_target(repo_dir: Path) -> None:
+    if not repo_dir.exists():
+        return
+
+    git_dir = repo_dir / ".git"
+    if git_dir.exists() and git_dir.is_dir():
+        return
+
+    # Keep user data safe by moving aside non-git content instead of deleting it.
+    if any(repo_dir.iterdir()):
+        backup_dir = _backup_existing_dir(repo_dir)
+        print(f"[local-up] Existing non-git directory moved to: {backup_dir}")
+        return
+
+    repo_dir.rmdir()
+
+
 def _ensure_repo(repo_url: str, repo_dir: Path, branch: str, skip_clone: bool) -> None:
     _which_or_fail("git")
+    git_repo_exists = (repo_dir / ".git").exists()
+
+    if skip_clone and not git_repo_exists:
+        print(
+            "[local-up] --skip-clone requested but target is not a git repository; "
+            "falling back to clone mode."
+        )
+        skip_clone = False
 
     if skip_clone:
-        if not (repo_dir / ".git").exists():
-            raise RuntimeError(f"Not a git repository: {repo_dir}")
-    elif (repo_dir / ".git").exists():
+        pass
+    elif git_repo_exists:
         print(f"[local-up] Using existing repo: {repo_dir}")
     else:
-        if repo_dir.exists() and not any(repo_dir.iterdir()):
-            repo_dir.rmdir()
+        _prepare_clone_target(repo_dir)
         print(f"[local-up] Cloning branch '{branch}' into: {repo_dir}")
         _run(["git", "clone", "--single-branch", "--branch", branch, repo_url, str(repo_dir)])
 
