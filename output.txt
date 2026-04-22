@@ -1,1 +1,30 @@
 /run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI
+commit ae6ba2b2a32b7c076e34879c3e329b481c83265c
+Author: ToniBirat7 <gotofreelancing1@gmail.com>
+Date:   Wed Apr 22 20:14:07 2026 +0545
+
+    Testing pipeline integrity
+
+commit f940d89ea18fd8a3661bb5bcabbbf8a8dcb6a6a8
+Author: ToniBirat7 <gotofreelancing1@gmail.com>
+Date:   Wed Apr 22 20:02:58 2026 +0545
+
+    Fix: Add --recurse-submodules to git clone and submodule update in local_up.py
+
+commit e12bdb9ef133f728fbad1c7baac2eb90f5bcae47
+Author: ToniBirat7 <gotofreelancing1@gmail.com>
+Date:   Wed Apr 22 20:00:35 2026 +0545
+
+    Visibility Reset
+
+commit 74bbee096775a95e9e18c362f2e5a0a46fb45d66
+Author: ToniBirat7 <gotofreelancing1@gmail.com>
+Date:   Wed Apr 22 19:51:27 2026 +0545
+
+    Fix model download rename error by using shutil.move
+
+commit 8a9d219b1d923f15a3d9db07926285d8db88964f
+Author: ToniBirat7 <gotofreelancing1@gmail.com>
+Date:   Wed Apr 22 19:44:49 2026 +0545
+
+    Final push: Restore resilient bootstrap and fresh install command
