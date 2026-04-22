@@ -96,7 +96,10 @@ def _download_model(model_path: Path) -> None:
     try:
         with urllib.request.urlopen(request, timeout=60) as response, open(temp_path, "wb") as output_file:
             shutil.copyfileobj(response, output_file)
-        temp_path.replace(model_path)
+        
+        # Ensure the destination directory exists again just in case, though it was created above.
+        # Use shutil.move for better cross-filesystem support if os.rename/Path.replace fails.
+        shutil.move(str(temp_path), str(model_path))
     except Exception:
         if temp_path.exists():
             temp_path.unlink()
