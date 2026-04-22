@@ -155,12 +155,13 @@ def _ensure_repo(repo_url: str, repo_dir: Path, branch: str, skip_clone: bool) -
     else:
         _prepare_clone_target(repo_dir)
         print(f"[local-up] Cloning branch '{branch}' into: {repo_dir}")
-        _run(["git", "clone", "--single-branch", "--branch", branch, repo_url, str(repo_dir)])
+        _run(["git", "clone", "--recurse-submodules", "--single-branch", "--branch", branch, repo_url, str(repo_dir)])
 
     print(f"[local-up] Syncing branch '{branch}'")
     _run(["git", "fetch", "origin"], cwd=repo_dir)
     _run(["git", "checkout", branch], cwd=repo_dir)
     _run(["git", "pull", "--ff-only", "origin", branch], cwd=repo_dir)
+    _run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
 
 
 def _install_dependencies(repo_dir: Path, mode: str) -> None:
