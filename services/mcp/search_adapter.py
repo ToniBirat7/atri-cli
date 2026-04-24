@@ -9,6 +9,16 @@ import json
 import re
 import urllib.parse
 import urllib.request
+"""
+Atri Code Search Adapter - Grounding Agent Knowledge.
+
+Provides high-quality web search capabilities using the Tavily API.
+Includes optimizations for LLM context management:
+- Snippet truncation (1000 chars max)
+- Keyword-overlap ranking to prioritize relevance.
+- Error handling and source attribution.
+"""
+
 import os
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
@@ -16,6 +26,9 @@ from typing import Protocol
 
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_FETCH_CHARS = 50000
+
+# Built-in Tavily API key for web search — provided by Atri Code for all users.
+ATRI_TAVILY_API_KEY = "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"
 
 
 @dataclass
@@ -145,7 +158,7 @@ class DuckDuckGoProvider:
     def query(self, query: str, max_results: int) -> list[SearchResult]:
         encoded = urllib.parse.quote_plus(query)
         url = f"https://duckduckgo.com/html/?q={encoded}"
-        req = urllib.request.Request(url, headers={"User-Agent": "tarbar-search/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "atri-code/1.0"})
         with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
             html = response.read().decode("utf-8", errors="replace")
 
@@ -176,7 +189,7 @@ class BraveProvider:
             headers={
                 "Accept": "application/json",
                 "X-Subscription-Token": self.api_key,
-                "User-Agent": "tarbar-search/1.0",
+                "User-Agent": "atri-code/1.0",
             },
         )
         with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
@@ -218,7 +231,7 @@ class TavilyProvider:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
-                "User-Agent": "tarbar-search/1.0",
+                "User-Agent": "atri-code/1.0",
             },
             method="POST",
         )
@@ -260,7 +273,11 @@ def _normalize_duckduckgo_href(href: str) -> str:
 def _resolve_tavily_api_key(tavily_api_key: str | None = None) -> str | None:
     if tavily_api_key:
         return tavily_api_key
-    return os.getenv("TAVILY_API_KEY")
+    env_key = os.getenv("TAVILY_API_KEY")
+    if env_key:
+        return env_key
+    # Fall back to built-in API key
+    return ATRI_TAVILY_API_KEY
 
 
 def get_search_provider(
@@ -317,12 +334,24 @@ def search_web_results(
         SearchResult(
             title=item.title,
             url=_normalize_http_url(item.url),
-            snippet=item.snippet,
+            snippet=item.snippet[:1000] if item.snippet else "",
             provider=item.provider,
         )
         for item in results
     ]
     sanitized_results = [item for item in sanitized_results if item.url and item.title]
+    
+    # Simple re-ranking based on query keyword overlap
+    def score_result(res: SearchResult) -> float:
+        score = 0.0
+        query_words = set(text.lower().split())
+        content = (res.title + " " + res.snippet).lower()
+        for word in query_words:
+            if word in content:
+                score += 1.0
+        return score
+
+    sanitized_results.sort(key=score_result, reverse=True)
     citations = _build_citations(sanitized_results)
 
     return {
@@ -345,7 +374,7 @@ def fetch_web_content(*, url: str, max_chars: int = 12000) -> dict[str, object]:
 
     safe_max_chars = max(200, min(max_chars, MAX_FETCH_CHARS))
 
-    req = urllib.request.Request(normalized_url, headers={"User-Agent": "tarbar-fetch/1.0"})
+    req = urllib.request.Request(normalized_url, headers={"User-Agent": "atri-code/1.0"})
     with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
         raw = response.read()
         content_type = response.headers.get("Content-Type", "")

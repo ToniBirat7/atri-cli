@@ -1,25 +1,25 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: tarbar-postgres
+    container_name: atri-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: tarbar
-      POSTGRES_USER: tarbar
-      POSTGRES_PASSWORD: tarbar
+      POSTGRES_DB: atri
+      POSTGRES_USER: atri
+      POSTGRES_PASSWORD: atri
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U tarbar -d tarbar']
+      test: ['CMD-SHELL', 'pg_isready -U atri -d atri']
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - tarbar-network
+      - atri-network
 
   redis:
     image: redis:7-alpine
-    container_name: tarbar-redis
+    container_name: atri-redis
     restart: unless-stopped
     command: ['redis-server', '--appendonly', 'yes']
     volumes:
@@ -30,11 +30,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - tarbar-network
+      - atri-network
 
   tempo:
     image: grafana/tempo:2.6.1
-    container_name: tarbar-tempo
+    container_name: atri-tempo
     restart: unless-stopped
     command: ['-config.file=/etc/tempo.yaml']
     volumes:
@@ -43,13 +43,13 @@ services:
     ports:
       - '3200:3200'
     networks:
-      - tarbar-network
+      - atri-network
 
   llama:
     build:
       context: ./runtime/llm/llama.cpp
       dockerfile: Dockerfile
-    container_name: tarbar-llama
+    container_name: atri-llama
     restart: unless-stopped
     ports:
       - '8000:8000'
@@ -68,13 +68,13 @@ services:
       start_period: 20s
       retries: 3
     networks:
-      - tarbar-network
+      - atri-network
 
   orchestrator:
     build:
       context: ./services/orchestrator
       dockerfile: Dockerfile
-    container_name: tarbar-orchestrator
+    container_name: atri-orchestrator
     restart: unless-stopped
     ports:
       - '8001:8001'
@@ -100,18 +100,18 @@ services:
       AGENT_MAX_TOOL_CALLS_PER_TURN: '3'
       LOG_LEVEL: INFO
       ENABLE_OBSERVABILITY: 'true'
-      ORCHESTRATOR_DATABASE_URL: postgresql://tarbar:tarbar@postgres:5432/tarbar
+      ORCHESTRATOR_DATABASE_URL: postgresql://atri:atri@postgres:5432/atri
       ORCHESTRATOR_ENABLE_PERSISTENCE: 'true'
       ORCHESTRATOR_AUTH_MODE: hybrid
       ORCHESTRATOR_JWT_SECRET: ${ORCHESTRATOR_JWT_SECRET:-replace-with-a-long-random-secret}
-      ORCHESTRATOR_JWT_ISSUER: tarbar-ai
-      ORCHESTRATOR_JWT_AUDIENCE: tarbar-ai-orchestrator
+      ORCHESTRATOR_JWT_ISSUER: atri-code
+      ORCHESTRATOR_JWT_AUDIENCE: atri-code-orchestrator
       ORCHESTRATOR_SERVICE_SUBJECT: orchestrator-service
       ORCHESTRATOR_REDIS_URL: redis://redis:6379/0
       ORCHESTRATOR_REDIS_ENABLED: 'true'
       ORCHESTRATOR_RATE_LIMIT_PER_MINUTE: '60'
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: tarbar-orchestrator
+      OTEL_SERVICE_NAME: atri-orchestrator
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:8001/health']
@@ -119,13 +119,13 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      - tarbar-network
+      - atri-network
 
   frontend:
     build:
       context: ./apps/frontend
       dockerfile: Dockerfile
-    container_name: tarbar-frontend
+    container_name: atri-frontend
     restart: unless-stopped
     ports:
       - '3000:3000'
@@ -141,10 +141,10 @@ services:
       NEXT_PUBLIC_DEFAULT_ALLOWED_DIRECTORY: ${PWD}
       NODE_ENV: production
     networks:
-      - tarbar-network
+      - atri-network
 
 networks:
-  tarbar-network:
+  atri-network:
     driver: bridge
 
 volumes:

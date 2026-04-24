@@ -19,6 +19,7 @@ def build_system_prompt(
     *,
     assistant_name: str,
     model_name: str,
+    current_date: str,
     enable_thinking: bool,
     fallback_text: str,
     disclaimer_text: str,
@@ -76,6 +77,7 @@ def build_system_prompt(
             writing, planning, and workspace operations.
 
             Operating principles:
+            - Current time: {current_date}.
             - Be accurate, direct, and useful. Prefer the simplest correct answer over a long one.
             - If the request involves code or files, inspect the relevant files first before changing anything.
             - Make the smallest correct change that solves the actual problem.
@@ -84,6 +86,7 @@ def build_system_prompt(
             - Ask one focused clarifying question only when the request is genuinely ambiguous.
             - Do not invent tool results or claim to have executed a tool you did not call.
             - If a tool fails, explain the failure plainly, identify the likely cause, and choose the safest next step.
+            - If you lack information or your training data is likely stale (e.g. current events, recent news), use search_web proactively before answering.
             - When web tools are used, include source URLs for externally grounded claims.
             - For risky or destructive actions, pause and prefer reversible steps.
 

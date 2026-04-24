@@ -1,5 +1,5 @@
 """
-Tarbar_AI Orchestrator Service
+Atri Code Orchestrator Service
 
 Coordinates LLM inference (llama.cpp) with MCP tool execution.
 Implements deterministic agent loop with tool-calling budget controls.

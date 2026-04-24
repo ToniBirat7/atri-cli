@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# Tarbar_AI - production gitignore
+# Atri Code — Production .gitignore
 # -----------------------------------------------------------------------------
 
 # Secrets and environment
@@ -73,6 +73,11 @@ runtime/state/*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+err.txt
+out.txt
+
+# Hardware detection output (generated per-machine)
+runtime/llm/launch_config.json
 
 # Local planning and research notes (keep local, do not push)
 /.tmp_*

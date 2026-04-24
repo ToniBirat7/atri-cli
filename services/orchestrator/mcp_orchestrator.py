@@ -280,7 +280,7 @@ class MCPOrchestrator:
             logger.warning("Local MCP module not found for command: %s", command)
             return None
 
-        spec = importlib.util.spec_from_file_location("tarbar_local_mcp", str(module_path))
+        spec = importlib.util.spec_from_file_location("atri_local_mcp", str(module_path))
         if spec is None or spec.loader is None:
             logger.warning("Failed to create import spec for local MCP module")
             return None

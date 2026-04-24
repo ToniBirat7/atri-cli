@@ -1,2 +1,3 @@
 # Atri Code CLI dependencies
 prompt_toolkit>=3.0.43
+rich>=14.0.0

@@ -46,6 +46,12 @@ class ToolUse:
 # Alias for backward compatibility
 ToolCall = ToolUse
 
+# Regex to match <think>...</think> blocks (Gemma 4 reasoning output)
+_THINKING_BLOCK_RE = re.compile(
+    r"<think>.*?</think>\s*",
+    re.DOTALL,
+)
+
 
 class LLMAdapter:
     """
@@ -261,7 +267,35 @@ class LLMAdapter:
             return tool_calls
 
         content = message.get("content") or ""
+        # Strip thinking blocks from content before extracting tool calls
+        content = self.strip_thinking_blocks(content)
         return self._extract_native_tool_calls(content)
+
+    @staticmethod
+    def strip_thinking_blocks(text: str) -> str:
+        """Remove <think>...</think> reasoning blocks from LLM output.
+
+        When reasoning mode is enabled, Gemma 4 wraps its internal chain-of-thought
+        in <think>...</think> tags. We strip these from user-facing output but
+        log them at DEBUG level for diagnostics.
+        """
+        if "<think>" not in text:
+            return text
+        thinking_matches = _THINKING_BLOCK_RE.findall(text)
+        for block in thinking_matches:
+            logger.debug(json.dumps({
+                "event": "llm.thinking_block",
+                "content": block[:500],
+            }, ensure_ascii=True))
+        cleaned = _THINKING_BLOCK_RE.sub("", text).strip()
+        return cleaned
+
+    def extract_response_text(self, completion: dict) -> str:
+        """Extract the assistant's text response, stripping thinking blocks."""
+        choice = completion.get("choices", [{}])[0]
+        message = choice.get("message", {}) or {}
+        content = message.get("content") or ""
+        return self.strip_thinking_blocks(content)
 
     def _extract_native_tool_calls(self, text: str) -> List[ToolUse]:
         """Fallback parser for Gemma 4 native tool-call tokens in assistant text."""

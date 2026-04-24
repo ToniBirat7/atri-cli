@@ -49,7 +49,7 @@ class DistributedRateLimiter:
         if self._client is None:
             return await self._check_local_fallback(key)
 
-        redis_key = f"tarbar:rate:{key}"
+        redis_key = f"atri:rate:{key}"
         async with self._lock:
             current = await self._client.incr(redis_key)
             if current == 1:

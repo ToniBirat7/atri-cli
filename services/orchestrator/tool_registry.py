@@ -200,8 +200,16 @@ class ToolRegistry:
         """
         tools_to_convert = tools or self.list_all_tools()
         
-        result = []
+        # Deduplicate by (server, source_name) to avoid passing both 'tool' and 'server.tool' to LLM
+        unique_tools: Dict[Tuple[str, str], Tool] = {}
         for tool in tools_to_convert:
+            key = (tool.server_name, tool.source_name or tool.name)
+            existing = unique_tools.get(key)
+            if not existing or len(tool.name) < len(existing.name):
+                unique_tools[key] = tool
+        
+        result = []
+        for tool in unique_tools.values():
             result.append({
                 "type": "function",
                 "function": {

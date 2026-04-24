@@ -262,7 +262,7 @@ class TUIRenderer:
         right_width = width - left_width - 3
 
         left_lines = [
-            self.style("Welcome to Tarbar CLI", color="cyan", bold=True),
+            self.style("Welcome to Atri Code", color="cyan", bold=True),
             "",
             "Local-first coding agent runtime",
             f"Permission mode: {mode}",

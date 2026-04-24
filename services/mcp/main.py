@@ -14,6 +14,17 @@ import fnmatch
 import importlib.util
 import json
 import logging
+"""
+Atri Code MCP Server - Model Context Protocol Implementation.
+
+This module exposes a suite of tools to the LLM orchestrator:
+- Filesystem: read, write, edit, list, search files.
+- Utilities: command execution, environment info.
+- Search: web search via adapters (Tavily, etc).
+
+Built using the FastMCP framework for high-performance tool dispatch.
+"""
+
 import os
 import shutil
 import sys
@@ -30,11 +41,11 @@ except ImportError:
     except ImportError:
         # Support in-process loading via importlib without package context.
         adapter_path = Path(__file__).with_name("search_adapter.py")
-        spec = importlib.util.spec_from_file_location("tarbar_search_adapter", str(adapter_path))
+        spec = importlib.util.spec_from_file_location("atri_search_adapter", str(adapter_path))
         if spec is None or spec.loader is None:
             raise
         module = importlib.util.module_from_spec(spec)
-        sys.modules.setdefault("tarbar_search_adapter", module)
+        sys.modules.setdefault("atri_search_adapter", module)
         spec.loader.exec_module(module)
         fetch_web_content = module.fetch_web_content
         search_web_results = module.search_web_results
@@ -62,7 +73,7 @@ except ImportError:
             )
 
 
-LOGGER = logging.getLogger("tarbar.mcp.filesystem")
+LOGGER = logging.getLogger("atri.mcp.filesystem")
 logging.basicConfig(level=os.getenv("MCP_LOG_LEVEL", "INFO"))
 
 
@@ -124,7 +135,7 @@ class _RuntimePolicy:
 
 POLICY = _RuntimePolicy(INITIAL_ALLOWED_DIRS)
 
-mcp = FastMCP("Tarbar Filesystem MCP")
+mcp = FastMCP("Atri Code MCP")
 
 
 def _is_under_allowed_dirs(path: Path) -> bool:
@@ -409,7 +420,7 @@ def create_directory(path: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def write_file(path: str, content: str, overwrite: bool = True) -> dict[str, Any]:
+def write_file(path: str, content: Optional[str] = None, text: Optional[str] = None, overwrite: bool = True) -> dict[str, Any]:
     """
     Write text to file (UTF-8).
 
@@ -417,6 +428,10 @@ def write_file(path: str, content: str, overwrite: bool = True) -> dict[str, Any
     - Refuses writes larger than MCP_MAX_WRITE_BYTES
     - Atomic replace through temp file
     """
+    if content is None and text is None:
+        raise ValueError("Missing required argument: 'content' (or 'text')")
+    
+    content = content if content is not None else text
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_WRITE_BYTES:
         raise ValueError(
@@ -458,19 +473,41 @@ def append_file(path: str, content: str) -> dict[str, Any]:
     return {
         "ok": True,
         "path": _to_relative_display(target),
-        "bytes_appended": len(encoded),
+"bytes_appended": len(encoded),
     }
 
 
 @mcp.tool
-def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) -> dict[str, Any]:
+def edit_file(
+    path: str,
+    old_text: Optional[str] = None,
+    new_text: Optional[str] = None,
+    old_content: Optional[str] = None,
+    new_content: Optional[str] = None,
+    target_content: Optional[str] = None,
+    replacement_content: Optional[str] = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """
     Replace text in a file.
-
-    This is intentionally simple and deterministic:
-    - exact text replacement, all occurrences
-    - dry_run previews count and size delta
+    
+    Arguments:
+        path: Path to the file.
+        old_text / old_content / target_content: The exact text to find and replace.
+        new_text / new_content / replacement_content: The new text to insert.
     """
+    # Resolve aliases
+    actual_old = old_text or old_content or target_content
+    actual_new = new_text or new_content or replacement_content
+
+    if actual_old is None:
+        raise ValueError("Missing required argument: 'old_text' (or 'old_content'/'target_content')")
+    if actual_new is None:
+        raise ValueError("Missing required argument: 'new_text' (or 'new_content'/'replacement_content')")
+        
+    old_text = actual_old
+    new_text = actual_new
+
     if old_text == "":
         raise ValueError("old_text cannot be empty")
 
@@ -559,8 +596,8 @@ def delete_path(path: str, recursive: bool = False) -> dict[str, Any]:
 
 @mcp.tool
 def search_files(
-    path: str,
     pattern: str,
+    path: str = ".",
     exclude_patterns: list[str] | None = None,
     max_results: int = MAX_SEARCH_RESULTS,
 ) -> dict[str, Any]:
@@ -619,7 +656,11 @@ def search_files(
 
 @mcp.tool
 def search_web(query: str, provider: str = "auto", max_results: int = 5) -> dict[str, Any]:
-    """Search the web with a provider-neutral adapter."""
+    """Search the web for real-time information, news, current events, or general knowledge.
+    
+    Use this tool when you need information that is not available in your local workspace or training data,
+    especially for topics that change frequently like weather, news, or recent developments in technology.
+    """
     if max_results < 1:
         raise ValueError("max_results must be >= 1")
     max_results = min(max_results, MAX_WEB_SEARCH_RESULTS)
@@ -643,7 +684,7 @@ def fetch_url(url: str, max_chars: int = MAX_FETCH_CHARS) -> dict[str, Any]:
 def server_status() -> dict[str, Any]:
     """Operational status and safety config summary for auditing/debugging."""
     return {
-        "name": "Tarbar Filesystem MCP",
+        "name": "Atri Code MCP",
         "allowed_directories": [str(p) for p in POLICY.get_allowed_dirs()],
         "max_read_bytes": MAX_READ_BYTES,
         "max_write_bytes": MAX_WRITE_BYTES,

@@ -29,7 +29,7 @@ Runtime services:
 - Inference runtime: llama.cpp
 - Orchestration API: Python + FastAPI/Uvicorn
 - Tool protocol: MCP (FastMCP)
-- CLI client: Python (`apps/cli/tarbar_cli`)
+- CLI client: Python (`apps/cli/atri_cli`)
 - Build/bootstrap: Bash/PowerShell + Python + CMake
 - Persistence: SQLite local state by default
 
@@ -141,7 +141,7 @@ Run CLI module directly:
 
 ```bash
 cd apps/cli
-python -m tarbar_cli.main
+python -m atri_cli.main
 ```
 
 Installed launcher:
@@ -161,7 +161,7 @@ Compatibility note:
 Print mode example:
 
 ```bash
-python -m tarbar_cli.main -p "Explain this repository"
+python -m atri_cli.main -p "Explain this repository"
 ```
 
 ## Runtime Ports (Default)

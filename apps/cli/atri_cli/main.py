@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+"""
+Atri Code CLI - The main entry point for the local agentic coding assistant.
+
+This module handles:
+- Command-line argument parsing
+- Interactive TUI lifecycle
+- Background service management (start/stop/doctor)
+- Session and history management
+- MCP tool discovery and configuration
+"""
+
 import argparse
 import os
+import signal
 import sys
 import json
 import time
@@ -14,6 +26,8 @@ from typing import Any, Optional
 from .client import OrchestratorClient
 from .telemetry import SessionTelemetry
 from .tui import DashboardFrame, TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
+from .rich_tui import RichTUI
+from .service_manager import ServiceManager
 
 try:
     from prompt_toolkit import PromptSession
@@ -60,10 +74,15 @@ PATH_INPUT_KEYS = {
 
 
 _TUI = TUIRenderer()
+_RICH = RichTUI()
 
 SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/help": "Show interactive command help",
     "/mode": "Show or set permission mode",
+    "/compact": "Toggle compact output mode",
+    "/model": "Show model and hardware info",
+    "/cost": "Show session token usage",
+    "/clear": "Clear terminal screen",
     "/timeline": "Show or set timeline verbosity",
     "/exit": "Exit interactive mode",
     "/quit": "Exit interactive mode",
@@ -119,11 +138,19 @@ def _emit_error(output_format: str, message: str) -> None:
 
 
 def _interactive_help_text() -> str:
+    # Use Rich help if available
+    if RichTUI.is_available():
+        _RICH.render_help()
+        return ""
     return (
         "Commands:\n"
         "  /help               Show this help\n"
         "  /mode               Show current permission mode\n"
         "  /mode <name>        Set permission mode\n"
+        "  /compact            Toggle compact output mode\n"
+        "  /model              Show model and hardware info\n"
+        "  /cost               Show session token usage\n"
+        "  /clear              Clear terminal screen\n"
         "  /timeline           Show timeline verbosity\n"
         "  /timeline <level>   Set timeline verbosity (minimal/normal/debug)\n"
         "  /exit | /quit       Exit interactive mode\n"
@@ -138,7 +165,8 @@ def _fullscreen_tui_enabled() -> bool:
     flag = _env_first("ATRI_FULLSCREEN_TUI", "TARBAR_FULLSCREEN_TUI")
     if flag is not None:
         return flag.strip().lower() not in {"0", "false", "no", "off"}
-    return _TUI.fullscreen_supported()
+    # Default to False for Claude Code-like scrolling experience
+    return False
 
 
 def _reduced_motion_enabled() -> bool:
@@ -367,6 +395,17 @@ def _print_turn_card(turn_number: int, mode: str) -> None:
 def _render_timeline_event(event: dict[str, Any], output_format: str, quiet: bool = False) -> None:
     if quiet:
         return
+    if output_format == "text" and RichTUI.is_available():
+        etype = event.get("type")
+        if etype == "tool_call_start":
+            _RICH.render_tool_call(event.get("tool_name", "tool"), event.get("tool_input", {}))
+            return
+        if etype == "tool_call_result":
+            res = event.get("tool_result")
+            if res is not None and not isinstance(res, str):
+                res = json.dumps(res, indent=2)
+            _RICH.render_tool_result(event.get("tool_name", "tool"), res or "", success=not event.get("is_error", False))
+            return
     _TUI.render_timeline_event(event, output_format)
 
 
@@ -484,11 +523,13 @@ def _prompt_write_target(tool_name: str, target_path: str) -> bool:
 
 def _handle_interactive_local_command(user_input: str, permission_state: PermissionState) -> bool:
     if user_input in {"/help", "/?"}:
-        print(_interactive_help_text())
+        help_text = _interactive_help_text()
+        if help_text:
+            print(help_text)
         return True
 
     if user_input == "/mode":
-        print(
+        _RICH.render_info(
             f"permission_mode={permission_state.mode} "
             f"allow={len(permission_state.allow)} ask={len(permission_state.ask)} deny={len(permission_state.deny)}"
         )
@@ -498,28 +539,65 @@ def _handle_interactive_local_command(user_input: str, permission_state: Permiss
         requested = user_input.split(None, 1)[1].strip()
         if requested not in PERMISSION_MODES:
             valid = ", ".join(sorted(PERMISSION_MODES))
-            print(f"Unknown mode: {requested}. Valid modes: {valid}")
+            _RICH.render_warning(f"Unknown mode: {requested}. Valid modes: {valid}")
             return True
         permission_state.mode = requested
-        print(f"permission_mode set to {requested}")
+        _RICH.render_success(f"Permission mode set to {requested}")
+        return True
+
+    if user_input == "/compact":
+        is_compact = _RICH.toggle_compact()
+        _RICH.render_info(f"Compact mode {'enabled' if is_compact else 'disabled'}")
+        return True
+
+    if user_input == "/model":
+        info = {
+            "Model": "Gemma 4 E2B Instruct (Q4_K_M)",
+            "Runtime": "llama.cpp",
+            "Reasoning": "enabled",
+        }
+        # Try to load hardware config
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            config_path = repo_root / "runtime" / "llm" / "launch_config.json"
+            if config_path.exists():
+                hw = json.loads(config_path.read_text(encoding="utf-8"))
+                info["GPU"] = hw.get("gpu_name", "unknown")
+                info["VRAM"] = f"{hw.get('gpu_vram_mb', 0)} MB"
+                info["Context"] = f"{hw.get('recommended_ctx_size', 0)} tokens"
+                info["Flash Attn"] = "✓" if hw.get("flash_attn") else "✗"
+                info["KV Cache"] = hw.get("kv_cache_type_k", "f16")
+                info["Threads"] = str(hw.get("recommended_threads", "?"))
+        except Exception:
+            pass
+        _RICH.render_model_info(info)
+        return True
+
+    if user_input == "/cost":
+        # Access telemetry from the outer scope — this is handled by printing
+        _RICH.render_info("Use --telemetry flag at startup or check session summary after exit.")
+        return True
+
+    if user_input == "/clear":
+        _RICH.clear_screen()
         return True
 
     if user_input == "/timeline":
-        print(f"timeline_verbosity={_TUI.timeline_verbosity}")
+        _RICH.render_info(f"timeline_verbosity={_TUI.timeline_verbosity}")
         return True
 
     if user_input.startswith("/timeline "):
         requested = user_input.split(None, 1)[1].strip()
         if requested not in TIMELINE_VERBOSITY_LEVELS:
             valid = ", ".join(TIMELINE_VERBOSITY_LEVELS)
-            print(f"Unknown timeline verbosity: {requested}. Valid levels: {valid}")
+            _RICH.render_warning(f"Unknown timeline verbosity: {requested}. Valid levels: {valid}")
             return True
         _TUI.set_timeline_verbosity(requested)
-        print(f"timeline_verbosity set to {requested}")
+        _RICH.render_success(f"Timeline verbosity set to {requested}")
         return True
 
     if user_input.startswith("/"):
-        print(f"Unknown command: {user_input}. Type /help for available commands.")
+        _RICH.render_warning(f"Unknown command: {user_input}. Type /help for available commands.")
         return True
 
     return False
@@ -691,17 +769,19 @@ def _print_stream_response(
             if effective_output_format == "stream-json":
                 print(json.dumps({"type": "content", "text": text}))
             elif effective_output_format == "text":
+                _RICH.print_streaming_token(text, is_first=first_content_chunk)
                 if first_content_chunk:
                     _status_clear()
-                    print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
-                    first_content_chunk = False
                     content_started = True
-                print(text, end="", flush=True)
+                    first_content_chunk = False
             chunks.append(text)
             continue
 
     response_text = "".join(chunks)
     _status_clear()
+    
+    if effective_output_format == "text":
+        _RICH.finish_streaming()
     turn_duration = time.time() - turn_start
     
     # Record telemetry
@@ -808,15 +888,14 @@ def _run_interactive(
             reduced_motion=reduced_motion,
         )
     else:
-        print(_style("Atri Code CLI", color="cyan", bold=True) + " interactive mode")
-        print(_style("Type /help for commands.", dim=True))
-        print("Use /mode or /mode <name> to inspect/change permission mode for this session.")
-        if PROMPT_TOOLKIT_AVAILABLE:
-            print(_style("Interactive shell: prompt_toolkit (Tab completion, Ctrl-R history, Ctrl-N newline)", dim=True))
-        else:
-            print(_style("Interactive shell: basic fallback (install prompt_toolkit for autocomplete/history)", dim=True))
+        _RICH.render_welcome(
+            api_url=client.base_url,
+            permission_mode=permission_state.mode,
+            model="Gemma 4 E2B Instruct (Q4_K_M)",
+            reasoning=True,
+        )
         if conversation_id:
-            _print_info(f"Resuming conversation: {conversation_id}")
+            _RICH.render_info(f"Resuming conversation: {conversation_id}")
 
     active_conversation_id = conversation_id
     turn_number = 0
@@ -841,6 +920,9 @@ def _run_interactive(
 
         if not user_input:
             continue
+            
+        if not fullscreen_mode:
+            _RICH.render_user_message(user_input)
         if user_input in {"/exit", "/quit"}:
             _print_success("Goodbye.")
             return
@@ -995,11 +1077,10 @@ def _run_interactive(
                 if effective_output_format == "stream-json":
                     print(json.dumps({"type": "content", "text": text}))
                 elif effective_output_format == "text" and not fullscreen_mode:
+                    _RICH.print_streaming_token(text, is_first=not chunks)
                     if not chunks:
                         _status_clear()
-                        print(_style("assistant> ", color="cyan", bold=True), end="", flush=True)
                         content_started = True
-                    print(text, end="", flush=True)
                 else:
                     pass
                 chunks.append(text)
@@ -1073,6 +1154,8 @@ def _run_interactive(
                 )
             else:
                 print()
+                if not fullscreen_mode:
+                    _RICH.finish_streaming()
                 _print_turn_status_summary(
                     turn_number,
                     turn_start,
@@ -1337,6 +1420,61 @@ def _cleanup(mode: str, assume_yes: bool) -> None:
         raise RuntimeError(f"cleanup failed (mode={mode}, exit={completed.returncode})")
 
 
+def _stop_services():
+    """Explicitly stop background services."""
+    manager = ServiceManager()
+    status = manager.status()
+    
+    _RICH.render_info("Stopping Atri Code services...")
+    
+    # We need to manually terminate existing processes by port since we might not 'own' them in this instance
+    def kill_port(port):
+        import signal
+        try:
+            # Use fuser or lsof to find PIDs
+            res = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True)
+            for pid in res.stdout.strip().split():
+                if pid:
+                    os.kill(int(pid), signal.SIGTERM)
+        except Exception:
+            pass
+
+    kill_port(manager.llama_port)
+    kill_port(manager.orch_port)
+    
+    _RICH.render_success("Services stopped")
+
+
+def _upgrade():
+    """
+    Downloads and executes the latest Atri Code installer from GitHub.
+    This provides a seamless way to receive performance updates and model adapters.
+    """
+    import urllib.request
+    import subprocess
+    
+    _RICH.render_info("Checking for updates...")
+    installer_url = "https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh"
+    
+    try:
+        req = urllib.request.Request(installer_url, headers={"User-Agent": "atri-cli/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            script_content = resp.read().decode("utf-8")
+            
+        _RICH.render_info("Update found! Running installer...")
+        # Run the script via bash
+        proc = subprocess.Popen(["bash"], stdin=subprocess.PIPE, text=True)
+        proc.communicate(input=script_content)
+        
+        if proc.returncode == 0:
+            _RICH.render_success("Atri Code upgraded successfully")
+        else:
+            _RICH.render_error(f"Upgrade failed with exit code {proc.returncode}")
+            
+    except Exception as e:
+        _RICH.render_error(f"Upgrade failed: {e}")
+
+
 def _doctor(client: OrchestratorClient, output_format: str) -> None:
     checks: list[dict[str, Any]] = []
 
@@ -1355,16 +1493,15 @@ def _doctor(client: OrchestratorClient, output_format: str) -> None:
     all_ok = all(item["ok"] for item in checks)
     if output_format in {"json", "stream-json"}:
         print(json.dumps({"type": "doctor", "ok": all_ok, "checks": checks}))
+    elif RichTUI.is_available():
+        _RICH.render_doctor(checks)
     else:
         print(_style("Atri Code doctor", color="cyan", bold=True))
         for item in checks:
             status = "ok" if item["ok"] else "failed"
             prefix = _style("[ok]", color="green", bold=True) if item["ok"] else _style("[failed]", color="red", bold=True)
             print(f"{prefix} {item['name']} {item['path']} -> {status}")
-            if item["ok"]:
-                if item["name"] == "readiness":
-                    print(f"  response={item['response']}")
-            else:
+            if not item["ok"]:
                 print(f"  error={item['error']}")
 
         if all_ok:
@@ -1477,6 +1614,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_sub.add_parser("status", help="Show MCP server health and status")
     mcp_sub.add_parser("startup-summary", help="Show MCP startup trace summary")
     refresh = mcp_sub.add_parser("refresh", help="Refresh tool discovery from all MCP servers")
+    
+    subparsers.add_parser("stop", help="Stop all background services (llama-server, orchestrator)")
+    subparsers.add_parser("upgrade", help="Upgrade Atri Code to the latest version")
+    subparsers.add_parser("doctor", help="Run health diagnostics and auto-start services")
     refresh.add_argument(
         "--cached",
         action="store_true",
@@ -1514,7 +1655,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip confirmation prompt",
     )
 
-    subparsers.add_parser("doctor", help="Run connectivity and readiness diagnostics")
+
 
     return parser
 
@@ -1522,13 +1663,21 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     argv = sys.argv[1:]
-    known_commands = {"sessions", "permissions", "mcp", "worktrees", "doctor", "cleanup"}
+    known_commands = {"sessions", "permissions", "mcp", "worktrees", "doctor", "cleanup", "stop", "upgrade"}
     if argv and not argv[0].startswith("-") and argv[0] not in known_commands:
         # Convenience mode: `atri-cli "prompt"` maps to print mode.
         prompt = " ".join(argv)
         args = parser.parse_args(["--print", "--prompt", prompt])
     else:
         args = parser.parse_args()
+
+    # ── Auto-start services ────────────────────────────────────────────
+    svc = ServiceManager()
+
+    # Doctor command can run even without services
+    if args.command not in {"cleanup", "stop"}:
+        if not svc.ensure_services(tui=_RICH):
+            raise SystemExit(1)
 
     client = OrchestratorClient(base_url=args.api_url, api_key=args.api_key)
     permission_state = PermissionState(
@@ -1547,6 +1696,16 @@ def main() -> None:
     )
     output_format = args.output_format or ("stream-json" if args.stream_json else "text")
     _TUI.set_timeline_verbosity(args.timeline_verbosity)
+
+    def _graceful_exit(signum=None, frame=None):
+        """Handle Ctrl+C cleanly."""
+        print()  # newline after ^C
+        _RICH.render_info("Shutting down...")
+        svc.shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _graceful_exit)
+    signal.signal(signal.SIGTERM, _graceful_exit)
 
     try:
         if args.command == "sessions":
@@ -1606,6 +1765,14 @@ def main() -> None:
                 _worktrees_clean()
                 return
 
+        if args.command == "stop":
+            _stop_services()
+            return
+
+        if args.command == "upgrade":
+            _upgrade()
+            return
+
         if args.command == "doctor":
             _doctor(client, output_format=output_format)
             return
@@ -1661,9 +1828,13 @@ def main() -> None:
         if args.telemetry:
             if output_format != "json":
                 print("\n" + telemetry.summary())
+    except KeyboardInterrupt:
+        _graceful_exit()
     except RuntimeError as exc:
         _emit_error(output_format, str(exc))
         raise SystemExit(1)
+    finally:
+        svc.shutdown()
 
 
 if __name__ == "__main__":

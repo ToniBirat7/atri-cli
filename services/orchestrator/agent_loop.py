@@ -22,6 +22,17 @@ Phase 7: Full observability with structured logging and tracing.
 from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable
 from dataclasses import dataclass, field
 from enum import Enum
+"""
+Atri Code Agent Loop - The core reasoning engine.
+
+Implements a multi-turn ReAct loop that:
+1. Receives user queries and system context.
+2. Interacts with the LLM to decide on actions.
+3. Executes MCP tools (filesystem, search, shell).
+4. Maintains state and conversation history.
+5. Handles fallback logic and error recovery.
+"""
+
 import asyncio
 import json
 import ast
@@ -56,12 +67,16 @@ class TurnOutcome(str, Enum):
 
 @dataclass
 class Turn:
-    """Represents a single turn in the agent loop."""
+    """
+    Represents a single discrete turn in the agent reasoning loop.
+    Contains the model's response, any tool calls initiated, and the eventual outcome.
+    """
     turn_number: int
     user_input: Optional[str] = None
     llm_response: Optional[str] = None
     tool_calls_requested: int = 0
     tool_calls_executed: int = 0
+    tool_calls: List[str] = field(default_factory=list)
     outcome: Optional[TurnOutcome] = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -274,6 +289,7 @@ class AgentLoop:
 
                     tool_calls = await llm_adapter.extract_tool_calls(completion)
                     turn.tool_calls_requested = len(tool_calls)
+                    turn.tool_calls = [tc.tool_name for tc in tool_calls]
 
                     if not tool_calls:
                         if self.state.total_tool_calls == 0:
@@ -424,6 +440,7 @@ class AgentLoop:
                                     "type": "tool_call_result",
                                     "turn": self.state.turn,
                                     "tool_name": tool_call.tool_name,
+                                    "tool_result": result,
                                     "status": "ok",
                                 },
                             )
@@ -589,6 +606,18 @@ class AgentLoop:
 
         normalized = content.strip().lower()
         if not self._looks_like_shell_directory_response(normalized):
+            return None
+
+        # Only trigger fallback if the last tool was a filesystem-oriented tool
+        # (where the model might be tempted to just echo 'ls')
+        filesystem_tools = {"list_directory", "ls", "find", "tree", "dir", "search_files"}
+        latest_tool = ""
+        for msg in reversed(self.state.messages):
+            if msg.get("role") == "tool":
+                latest_tool = msg.get("name", "")
+                break
+        
+        if latest_tool not in filesystem_tools:
             return None
 
         return self._fallback_from_latest_tool_result()

@@ -30,7 +30,7 @@ class LLMConfig(BaseModel):
         description="Model identifier"
     )
     temperature: float = Field(
-        default=1.0,
+        default=0.7,
         ge=0.0,
         le=2.0,
         description="Sampling temperature"
@@ -47,12 +47,12 @@ class LLMConfig(BaseModel):
         description="Top-k sampling cutoff"
     )
     max_tokens: int = Field(
-        default=2048,
+        default=4096,
         ge=1,
         description="Maximum tokens per response"
     )
     timeout_seconds: int = Field(
-        default=30,
+        default=120,
         ge=1,
         description="Request timeout in seconds"
     )
@@ -115,12 +115,12 @@ class AgentLoopConfig(BaseModel):
     """Agent loop and tool-calling budget configuration."""
 
     max_turns: int = Field(
-        default=10,
+        default=15,
         ge=1,
         description="Maximum agent loop turns"
     )
     max_tool_calls_per_turn: int = Field(
-        default=3,
+        default=5,
         ge=1,
         description="Max tool calls per agent turn"
     )
@@ -129,7 +129,7 @@ class AgentLoopConfig(BaseModel):
         description="Enable tool-calling mode"
     )
     enable_thinking: bool = Field(
-        default=False,
+        default=True,
         description="Enable Gemma 4 reasoning mode"
     )
     stream_responses: bool = Field(
@@ -187,11 +187,11 @@ class AuthConfig(BaseModel):
         description="Shared secret for signing and validating HMAC JWTs"
     )
     jwt_issuer: str = Field(
-        default="tarbar-ai",
+        default="atri-code",
         description="Expected JWT issuer"
     )
     jwt_audience: str = Field(
-        default="tarbar-ai-orchestrator",
+        default="atri-code-orchestrator",
         description="Expected JWT audience"
     )
     service_subject: str = Field(
@@ -343,8 +343,8 @@ class OrchestratorConfig(BaseModel):
             auth=AuthConfig(
                 mode=os.getenv("ORCHESTRATOR_AUTH_MODE", "hybrid"),
                 jwt_secret=os.getenv("ORCHESTRATOR_JWT_SECRET"),
-                jwt_issuer=os.getenv("ORCHESTRATOR_JWT_ISSUER", "tarbar-ai"),
-                jwt_audience=os.getenv("ORCHESTRATOR_JWT_AUDIENCE", "tarbar-ai-orchestrator"),
+                jwt_issuer=os.getenv("ORCHESTRATOR_JWT_ISSUER", "atri-code"),
+                jwt_audience=os.getenv("ORCHESTRATOR_JWT_AUDIENCE", "atri-code-orchestrator"),
                 service_subject=os.getenv("ORCHESTRATOR_SERVICE_SUBJECT", "orchestrator-service"),
             ),
             redis=RedisConfig(

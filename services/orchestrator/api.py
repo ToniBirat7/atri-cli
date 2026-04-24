@@ -110,6 +110,7 @@ class ChatResponse(BaseModel):
     tool_calls: int = Field(..., description="Total tool calls executed")
     model: str = Field(..., description="LLM model used")
     request_id: str = Field(..., description="Request correlation ID")
+    history: Optional[List[Dict[str, Any]]] = Field(None, description="Detailed turn history")
 
 
 class HealthResponse(BaseModel):
@@ -387,8 +388,8 @@ def _authenticate_request(http_request: Request) -> AuthContext:
         try:
             return JwtAuth(
                 jwt_secret,
-                issuer=getattr(auth_config, "jwt_issuer", "tarbar-ai"),
-                audience=getattr(auth_config, "jwt_audience", "tarbar-ai-orchestrator"),
+                issuer=getattr(auth_config, "jwt_issuer", "atri-code"),
+                audience=getattr(auth_config, "jwt_audience", "atri-code-orchestrator"),
             ).verify(token)
         except Exception as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -415,10 +416,13 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
 
     try:
         normalized_profile = normalize_prompt_profile(selected_profile)
+        import datetime
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         system_prompt = build_system_prompt(
             normalized_profile,
             assistant_name="Atri Code",
             model_name=config.llm.model,
+            current_date=current_date,
             enable_thinking=config.agent_loop.enable_thinking,
             fallback_text=config.prompt_policy.fallback_text,
             disclaimer_text=config.prompt_policy.disclaimer_text,
@@ -444,6 +448,7 @@ def _serialize_turn_history(state: Any) -> list[dict[str, Any]]:
                 "llm_response": turn.llm_response,
                 "tool_calls_requested": turn.tool_calls_requested,
                 "tool_calls_executed": turn.tool_calls_executed,
+                "tool_calls": getattr(turn, "tool_calls", []),
                 "outcome": turn.outcome.value if getattr(turn, "outcome", None) else None,
                 "error": turn.error,
                 "metadata": turn.metadata,
@@ -669,6 +674,7 @@ async def _run_agent_request(
             tool_calls=state.total_tool_calls,
             model=config.llm.model,
             request_id=request_id,
+            history=_serialize_turn_history(state),
         )
     except asyncio.CancelledError:
         chat_requests_failed += 1
