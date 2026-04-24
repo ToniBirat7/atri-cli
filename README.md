@@ -1,23 +1,22 @@
-# Atri Code (CLI Branch)
+# ✦ Atri Code
 
-This branch is the production CLI experience of Atri Code: a local-first agent system powered by llama.cpp, orchestrator policy/control loops, and MCP tool calling, delivered through a terminal-native interface.
+**The local-first agentic coding infrastructure. Optimized for speed, security, and hardware efficiency.**
 
-## What This Project Is
+Atri Code is an on-device agent architecture that combines `llama.cpp` inference, `MCP` tool-calling, and high-performance reasoning into a single terminal-native product.
 
-Atri Code is an on-device agent architecture for private, controllable AI workflows.
+---
 
-Design goals:
-- Keep LLM inference local with llama.cpp
-- Execute tools through explicit MCP routes
-- Provide auditable agent/tool interactions
-- Offer a single-command bootstrap for reproducible setup
+## 🚀 One-Command Installation
 
-## CLI Branch Scope
+Install **Atri Code** and all its dependencies (llama.cpp, model adapters, and background services) with a single command:
 
-This `master` branch is optimized for terminal-first usage.
+```bash
+curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
+```
 
-Primary entrypoint:
-- `apps/cli` (interactive and print-mode command-line client)
+---
+
+## Features
 
 Runtime services:
 - `runtime/llm/llama.cpp` (local model inference)

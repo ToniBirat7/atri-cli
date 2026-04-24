@@ -11,12 +11,11 @@ Single-step setup for other users:
 Linux/macOS:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
-tarbar
 ```
 
 Windows PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.ps1 -UseBasicParsing | iex"
 ```
 
 Linux/macOS compatibility wrapper (installs + launches):
