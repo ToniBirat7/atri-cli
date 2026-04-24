@@ -1,200 +1,100 @@
-# ✦ Atri Code
+# Atri Code
 
-**The local-first agentic coding infrastructure. Optimized for speed, security, and hardware efficiency.**
+Atri Code is a high-performance, local-first agentic coding infrastructure. It combines state-of-the-art LLM inference through `llama.cpp` with a robust Model Context Protocol (MCP) orchestration layer to provide a secure, private, and extremely fast agentic coding experience directly in your terminal.
 
-Atri Code is an on-device agent architecture that combines `llama.cpp` inference, `MCP` tool-calling, and high-performance reasoning into a single terminal-native product.
+## Core Architecture
 
----
-
-## 🚀 One-Command Installation
-
-Install **Atri Code** and all its dependencies (llama.cpp, model adapters, and background services) with a single command:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
-```
-
----
-
-## Features
-
-Runtime services:
-- `runtime/llm/llama.cpp` (local model inference)
-- `services/orchestrator` (agent loop, policies, turn lifecycle, persistence)
-- `services/mcp` (tool execution layer)
-
-## Technology Stack
-
-- Inference runtime: llama.cpp
-- Orchestration API: Python + FastAPI/Uvicorn
-- Tool protocol: MCP (FastMCP)
-- CLI client: Python (`apps/cli/atri_cli`)
-- Build/bootstrap: Bash/PowerShell + Python + CMake
-- Persistence: SQLite local state by default
-
-## Model Runtime
-
-Atri Code runs a local GGUF instruct model through `llama.cpp`.
-
-Primary model:
-- Model: Gemma 4 E2B Instruct
-- Format: GGUF
-- Quantization: Q4_K_M
-- Local file: `models/gemma-4-e2b-it-Q4_K_M.gguf`
-- Approximate model size: 3.1 GB download
-- Model type: text-only instruct model
-
-Runtime behavior:
-- The CLI installer downloads the model automatically from Hugging Face if it is missing
-- `llama.cpp` exposes the model through the OpenAI-compatible API on `http://127.0.0.1:8000/v1`
-- The orchestrator manages prompt policy, tool calls, and turn state around the model
-- The default model identifier exposed to the orchestrator is `local-model`
-
-Resource expectations:
-- Quickstart recommends at least 4 GB of available RAM for local use
-- Disk usage is roughly 5 GB once the model cache and runtime files are included
-- The bootstrap script builds `llama-server` and `llama-cli`, then selects a CPU or CUDA build based on whether NVIDIA tooling is available
-
-## How the CLI Runtime Works
-
-1. User prompt enters through `atri-cli`.
-2. CLI sends request to orchestrator (`/chat` or `/chat/stream`).
-3. Orchestrator asks llama.cpp for reasoning/action output.
-4. If tool calls are required, orchestrator dispatches to MCP.
-5. MCP executes tools and returns structured results.
-6. Orchestrator loops model + tool outputs until final answer.
-7. CLI renders response, timeline, and session metadata.
-
-The model is not a standalone endpoint in this setup. The CLI uses the orchestrator as the control layer, and the orchestrator decides when to ask the model for a response versus when to call tools and feed results back into the model.
-
-## CLI Architecture Diagram
+Atri Code is designed as a decoupled, multi-service system to ensure sub-second responsiveness and reliable tool execution.
 
 ```mermaid
-flowchart LR
-	U[Developer in Terminal] --> C[Atri Code CLI<br/>apps/cli]
-	C --> O[Orchestrator API<br/>services/orchestrator]
-	O --> L[llama.cpp Server<br/>runtime/llm/llama.cpp]
-
-	O --> M[MCP Service Layer<br/>services/mcp]
-	M --> T1[Filesystem Tools]
-	M --> T2[Search / Retrieval Tools]
-	M --> T3[Custom MCP Adapters]
-
-	O --> D[(SQLite / Postgres<br/>Conversation State)]
-
-	L --> O
-	M --> O
-	O --> C
+graph TD
+    User([User Terminal]) --> CLI[Atri CLI - TUI/Interactive]
+    CLI --> Manager[Service Manager]
+    Manager --> Daemon[Background Orchestrator Daemon]
+    Daemon --> Adapter[LLM Adapter]
+    Adapter --> Llama[llama-server - Inference]
+    Daemon --> MCP[MCP Tool Registry]
+    MCP --> FS[Filesystem Tools]
+    MCP --> Search[Search Adapter - Tavily]
+    MCP --> Shell[Shell/Command Tools]
+    Daemon --> DB[(Internal Session DB)]
 ```
 
-## MCP and Tool Calls
+### 1. Orchestration Layer (The Brain)
+The core reasoning engine implements an advanced **multi-turn ReAct loop**. It manages conversation state, persists session history in a hardened SQLite database, and handles the "Chain of Thought" required to solve complex coding tasks. 
+- **Deterministic Fallbacks**: Integrated heuristics to handle ambiguous LLM outputs.
+- **State Persistence**: Conversations are stored in `runtime/state/.internal.db` with strict `0700` permissions.
 
-Tool execution path:
-- Model emits a tool request.
-- Orchestrator validates policy + permissions.
-- Request is routed to MCP tool endpoint(s).
-- Tool outputs are normalized and appended to turn context.
-- Final answer is returned only after tool-grounded completion.
+### 2. Inference Engine (The Muscle)
+Powered by a customized build of `llama.cpp`, Atri Code leverages your local hardware (NVIDIA GPUs, Apple Silicon, or high-core CPUs) to run quantized GGUF models. 
+- **Default Model**: Gemma 4 (Q4_K_M) - Optimized for coding and reasoning.
+- **Context Management**: 16K context window with proactive snippet truncation to maintain high throughput.
 
-CLI capabilities include session operations, streaming, permission mode controls, and MCP tool/service inspection.
+### 3. Model Context Protocol - MCP (The Senses)
+Atri Code follows the Model Context Protocol to interface with your local environment. This abstraction layer ensures that the agent can interact with your filesystem and the web through a unified, secure interface.
+- **Proactive Web Search**: Grounding agent knowledge with real-time data via Tavily integration.
+- **Atomic File Operations**: Safe, verified file writes and edits to prevent workspace corruption.
 
-## One-Command Install and Run
+---
 
-Linux/macOS (CLI mode):
+## Installation
+
+Install Atri Code and all its optimized dependencies with a single command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
-tarbar
 ```
 
-Windows PowerShell (CLI mode):
+## System Requirements
 
-```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.ps1 -UseBasicParsing | iex"
-```
+| Component | Minimum | Recommended |
+| :--- | :--- | :--- |
+| **GPU** | 4GB VRAM (CUDA/Metal) | 8GB+ VRAM |
+| **RAM** | 8GB | 16GB+ |
+| **Storage** | 10GB (SSD) | 20GB+ (NVMe) |
+| **OS** | Linux (Ubuntu/Arch) / macOS | Linux with NVIDIA GPU |
 
-Compatibility wrapper (installs and launches in one command on Linux/macOS):
+---
 
+## Technical Features
+
+### Service Persistence
+Unlike standard CLI tools, Atri Code utilizes a **detached daemon architecture**. Background services (`llama-server` and the orchestrator) remain active after the CLI process terminates. This eliminates model loading latency for subsequent commands, enabling sub-second response times.
+
+### Security and Hardening
+- **Bytecode Abstraction**: All Python source code is compiled to `.pyc` during installation to prevent tampering and protect intellectual property.
+- **Data Isolation**: Runtime state, session databases, and logs are kept in a restricted `runtime/` directory inaccessible to other users on the system.
+
+### Advanced Tooling
+- **Search Adapter**: Implements keyword-based re-ranking and snippet optimization to provide the LLM with the most relevant grounding data.
+- **Atomic Edits**: High-fidelity file refactoring using exact-match replacement patterns to ensure code integrity.
+
+---
+
+## Usage
+
+Start an interactive session:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
+atri-cli
 ```
 
-Fresh full local runtime bootstrap (llama + orchestrator, CLI mode):
-
+Run a single-shot command:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/local_up.sh | bash -s -- --mode cli
+atri-cli "Refactor the authentication logic in services/orchestrator/auth.py"
 ```
 
-The installer creates a `tarbar` launcher and attempts to create a `claude` alias when that command name is not already claimed by another tool.
-
-## Local Development
-
-From an existing local clone on this branch:
-
+Verify system health and background daemons:
 ```bash
-make install
-make cli-up
-```
-
-Run CLI module directly:
-
-```bash
-cd apps/cli
-python -m atri_cli.main
-```
-
-Installed launcher:
-
-```bash
-atri-cli --help
 atri-cli doctor
 ```
 
-Credential safety note:
-- Use environment variables or local `.env` files for keys/secrets.
-- Keep placeholder defaults like `__SET_ME__` until you inject real values locally.
-
-Compatibility note:
-- `tarbar` remains available as a compatibility alias for one release cycle.
-
-Print mode example:
-
+Stop background services:
 ```bash
-python -m atri_cli.main -p "Explain this repository"
+atri-cli stop
 ```
 
-## Runtime Ports (Default)
+---
 
-- CLI client: local terminal process
-- Orchestrator API: `http://127.0.0.1:8001`
-- llama.cpp API: `http://127.0.0.1:8000`
+## License
 
-## Prerequisites
-
-- Git
-- Python 3.10+
-- Node.js 20+
-- npm
-- CMake
-- Optional CUDA toolchain (`nvidia-smi`, `nvcc`) for GPU acceleration
-
-## Production Notes
-
-- Branch-aware bootstrap scripts standardize installation and startup.
-- Runtime state defaults to durable local persistence.
-- Post-start pruning and cache cleanup keep deployment footprints lean.
-- Large model binaries remain local and out of version control.
-
-## Production File Policy
-
-- Keep only production code, required docs, and deployment assets in git.
-- Keep runtime artifacts local only: databases, logs, cache directories, and model binaries.
-- Use `make clean` (or remove local runtime directories) before packaging or publishing snapshots.
-- Avoid committing ad-hoc planning notes or generated reports at repository root.
-
-## Branch Strategy
-
-- `master` (this branch): CLI-first workflow.
-- `web`: browser-first workflow.
-
-If you need the Web UX, run installers from the `web` branch.
+Atri Code is released under the MIT License. See `LICENSE` for details.

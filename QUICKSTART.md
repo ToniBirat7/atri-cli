@@ -1,386 +1,54 @@
 # Atri Code Quick Start Guide
 
-Complete local agentic AI system with LLM inference (llama.cpp), MCP tool orchestration, and CLI UI.
+This guide provides the technical steps required to initialize and verify the Atri Code environment.
 
-## Branch Mode
+## Installation
 
-You are on the CLI-focused `master` branch aligned to an Atri Code terminal workflow.
+Run the official one-line installer to configure the environment, build the local inference engine, and deploy background services:
 
-Single-step setup for other users:
-
-Linux/macOS:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 ```
 
-Windows PowerShell:
-```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.ps1 -UseBasicParsing | iex"
-```
+## Post-Installation Verification
 
-Linux/macOS compatibility wrapper (installs + launches):
-```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/scripts/cli_up.sh | bash
-```
+### 1. System Health Check
+Use the `doctor` command to verify that the local LLM server, orchestrator, and MCP tool registry are operational:
 
-From an existing local clone:
 ```bash
-make cli-up
 atri-cli doctor
 ```
 
-## Production Cleanliness
+### 2. Basic Interaction
+Initialize a session to verify connectivity with the local inference engine:
 
-- Runtime databases/logs/caches are local-only and should not be committed.
-- If you need a fresh production-like state, run `make clean` before packaging.
-- See `docs/PRODUCTION_FILE_POLICY.md` for the full repository policy.
-
-## Prerequisites
-
-### Option 1: Local Development (Makefile)
-
-**Requirements:**
-- Python 3.10+
-- Node.js 18+
-- llama.cpp built (or pre-built binary)
-- Gemma 4 E2B model (auto-downloaded GGUF file if missing)
-
-**Setup:**
 ```bash
-# Install dependencies
-make install
-
-# The CLI installer downloads the model automatically when needed.
-# Manual source:
-# https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/blob/main/gemma-4-E2B-it-Q4_K_M.gguf
+atri-cli "What is the current version of Atri Code?"
 ```
 
-### Option 2: Containerized (Docker Compose)
+## Service Management
 
-**Requirements:**
-- Docker 20.10+
-- Docker Compose 2.0+
-- 4GB+ available RAM
-- ~5GB disk space (model cache)
+Atri Code operates using persistent background daemons to ensure low-latency performance.
+
+| Action | Command |
+| :--- | :--- |
+| **Start/Update Services** | `atri-cli doctor` |
+| **Stop Services** | `atri-cli stop` |
+| **View Service Status** | `atri-cli status` |
+
+## Core Commands
+
+- **Interactive Mode**: Launch the full TUI with `atri-cli`.
+- **Permission Management**: Toggle security levels with `/mode` within the TUI.
+- **Session Clear**: Reset conversation context with `/clear`.
+- **System Upgrade**: Pull the latest performance optimizations with `atri-cli upgrade`.
 
 ---
 
-## Quick Start
-
-### Option 1: Using Makefile (Recommended for Development)
-
-```bash
-# Start all services (llama + orchestrator + frontend)
-make dev-up
-
-# In browser, open:
-http://127.0.0.1:3000
-```
-
-**Service URLs:**
-- **Frontend (Chat UI):** http://127.0.0.1:3000
-- **Orchestrator (API):** http://127.0.0.1:8001
-  - Health: `GET /health`
-  - Tools: `GET /tools`
-  - Chat: `POST /chat`
-- **llama.cpp (LLM):** http://127.0.0.1:8000/v1
-
-**Stopping services:**
-```bash
-make dev-down
-```
-
-**Viewing logs:**
-```bash
-make logs
-```
-
-### Option 2: Using Docker Compose (Recommended for Production)
-
-```bash
-# Start all services in containers
-docker-compose up -d
-
-# Verify health
-docker-compose ps
-curl http://127.0.0.1:8001/health | jq
-
-# Stop services
-docker-compose down
-```
-
-**View logs:**
-```bash
-docker-compose logs -f
-```
-
----
-
-## Architecture Overview
-
-```
-User Browser (3000)
-        ↓
-    [Frontend]
-      React/Next.js
-        ↓
-    [Orchestrator API] (8001)
-   /          \
-  /            \
-[llama.cpp]   [MCP]
-(8000)        (stdio)
-  LLM ←→ Tools
-```
-
-**Data Flow:**
-1. User sends message via chat UI
-2. Frontend calls `POST /chat` on orchestrator
-3. Orchestrator calls llama.cpp with available tools
-4. LLM generates response, optionally requests tool execution
-5. Orchestrator executes tool via MCP server
-6. Tool result sent back to LLM for context
-7. Repeat until LLM provides final response
-8. Response streamed back to frontend
-
----
-
-## Common Commands
-
-### Development Workflow
-
-```bash
-# Start everything
-make dev-up
-
-# Start individual services
-make llama              # LLM inference only
-make orchestrator       # Orchestrator API only
-make frontend           # Frontend dev server only
-
-# Health checks
-make health             # Check service status
-
-# Cleanup
-make clean              # Stop services and remove artifacts
-make dev-down           # Stop services only
-```
-
-### Testing
-
-```bash
-# Health check
-curl http://127.0.0.1:8001/health
-
-# List available tools
-curl http://127.0.0.1:8001/tools
-
-# Chat with agent
-curl -X POST http://127.0.0.1:8001/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Hello, what tools do you have?",
-    "max_turns": 5
-  }'
-```
-
-### Model Management
-
-```bash
-# Download model (if missing)
-mkdir -p models
-cd models
-wget https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF/resolve/main/gemma-4-e2b-it-Q4_K_M.gguf
-
-# Verify model
-ls -lh models/gemma-4-e2b-it-Q4_K_M.gguf
-```
-
----
-
-## Environment Configuration
-
-### For Makefile (Local Development)
-
-File: `services/orchestrator/.env`
-
-```env
-# LLM Configuration
-LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_API_KEY=__SET_ME__
-LLM_MODEL=local-model
-LLM_TEMPERATURE=0.7
-LLM_MAX_TOKENS=2048
-
-# Agent Loop Budgets
-AGENT_MAX_TURNS=10
-AGENT_MAX_TOOL_CALLS_PER_TURN=3
-AGENT_ENABLE_TOOL_USE=true
-
-# Logging
-LOG_LEVEL=INFO
-```
-
-Auto-generated by `make env`.
-
-### For Docker Compose
-
-Edit `docker-compose.yml` environment variables under each service.
-
----
-
-## Troubleshooting
-
-### Service won't start
-
-**llama.cpp not running:**
-```bash
-# Check if process is running
-ps aux | grep llama-server
-
-# Verify model file exists
-ls -lh models/gemma-4-e2b-it-Q4_K_M.gguf
-
-# Check if port 8000 is already in use
-lsof -i :8000
-```
-
-**Orchestrator won't start:**
-```bash
-# Check Python dependencies
-cd services/orchestrator
-python -c "import fastapi; import httpx; import pydantic"
-
-# Install if missing
-pip install -r requirements.txt
-
-# Check port 8001 availability
-lsof -i :8001
-```
-
-**Frontend won't start:**
-```bash
-# Check Node dependencies
-cd apps/frontend
-npm install
-
-# Check port 3000 availability
-lsof -i :3000
-```
-
-### Connection errors
-
-**"Connection refused" from frontend:**
-- Verify orchestrator is running: `curl http://127.0.0.1:8001/health`
-- Check frontend is using correct API URL
-
-**"Connection refused" from orchestrator to llama:**
-- Verify llama.cpp is running: `curl http://127.0.0.1:8000/v1/models`
-- Verify API key is correct (default: `secret`)
-
-**Tool execution timeouts:**
-- Increase `MCP_TOOL_TIMEOUT_SECONDS` in `.env` (default: 10s)
-- Ensure MCP server (services/mcp) is responding
-
-### Performance issues
-
-- **Slow responses:** Check CPU/GPU load, adjust `LLM_TEMPERATURE` or `LLM_MAX_TOKENS`
-- **High memory:** llama.cpp uses model size + buffer; ensure 8GB+ available for Gemma 4
-- **Slow frontend:** Check browser console for errors, ensure orchestrator is healthy
-
----
-
-## Next Steps
-
-### Phase 2: Expand Capabilities
-- Add more MCP tools (web search, file browser, calculator)
-- Implement streaming responses
-- Add conversation history persistence
-
-### Phase 3: Enhance Reliability
-- Add error recovery and retries
-- Implement circuit-breaker for failed services
-- Add comprehensive logging and metrics
-
-### Phase 4: Scale & Deploy
-- Multi-MCP-server support
-- Kubernetes deployment (Phase 9)
-- Production observability (Phase 7)
-
-See [Architecture Plan](docs/architecture-plan.md) for full 10-phase roadmap.
-
----
-
-## API Reference
-
-### POST /chat
-
-Execute agent loop for a user message.
-
-**Request:**
-```json
-{
-  "message": "What is the weather?",
-  "conversation_id": "conv-123",
-  "max_turns": 5
-}
-```
-
-**Response:**
-```json
-{
-  "response": "I'm an AI and don't have access to real-time data...",
-  "conversation_id": "conv-123",
-  "turns": 1,
-  "tool_calls": 0,
-  "model": "local-model"
-}
-```
-
-### GET /health
-
-Health check endpoint.
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "llm_connected": true,
-  "mcp_servers": {
-    "local-mcp": { "status": "initialized" }
-  }
-}
-```
-
-### GET /tools
-
-List available tools.
-
-**Response:**
-```json
-{
-  "tools": [
-    {
-      "name": "greet",
-      "description": "Greet a person",
-      "server": "local-mcp",
-      "category": null
-    }
-  ],
-  "total": 1
-}
-```
-
----
-
-## Resources
-
-- [Orchestrator Service](services/orchestrator/README.md) — Core LLM + MCP coordinator
-- [MCP Service](services/mcp/README.md) — Tool provider
-- [Frontend](apps/frontend/README.md) — Chat UI
-- [Architecture Plan](docs/architecture-plan.md) — 10-phase roadmap
-
----
-
-## License
-
-See LICENSE file for details.
+## Directory Structure (Production)
+
+- `apps/cli/atri_cli`: Primary terminal interface and service manager.
+- `services/orchestrator`: Core agent loop and reasoning logic.
+- `services/mcp`: Tool registry and environment adapters.
+- `runtime/`: Persistent state, logs, and compiled bytecode.
+- `models/`: Optimized GGUF model binaries.
