@@ -27,10 +27,10 @@ async def test_health_check():
         for name, url in services.items():
             try:
                 resp = await client.get(url)
-                status = "✓" if resp.status_code < 400 else "✗"
+                status = "ok" if resp.status_code < 400 else "error"
                 print(f"  {status} {name:15} {url:40} [{resp.status_code}]")
             except Exception as e:
-                print(f"  ✗ {name:15} {str(e)[:50]}")
+                print(f"  error {name:15} {str(e)[:50]}")
 
 async def test_tool_listing():
     """Test getting available tools"""
@@ -43,13 +43,13 @@ async def test_tool_listing():
             resp = await client.get("http://127.0.0.1:8001/tools")
             if resp.status_code == 200:
                 tools = resp.json()
-                print(f"  ✓ Retrieved {len(tools.get('tools', []))} tools")
+                print(f"  ok Retrieved {len(tools.get('tools', []))} tools")
                 for tool in tools.get('tools', [])[:3]:
                     print(f"    - {tool.get('function', {}).get('name', 'unknown')}")
             else:
-                print(f"  ✗ Failed to get tools [{resp.status_code}]")
+                print(f"  error Failed to get tools [{resp.status_code}]")
     except Exception as e:
-        print(f"  ✗ Error: {e}")
+        print(f"  error Error: {e}")
 
 async def test_simple_chat():
     """Test simple chat without tools"""
@@ -74,14 +74,14 @@ async def test_simple_chat():
             if resp.status_code == 200:
                 data = resp.json()
                 response = data.get('response', '')
-                print(f"  ✓ Chat completed in {elapsed:.2f}s")
+                print(f"  ok Chat completed in {elapsed:.2f}s")
                 print(f"  Response: {response[:100]}{'...' if len(response) > 100 else ''}")
                 print(f"  Turns: {data.get('turns', 0)}")
             else:
-                print(f"  ✗ Chat failed [{resp.status_code}]")
+                print(f"  error Chat failed [{resp.status_code}]")
                 print(f"    {resp.text[:200]}")
     except Exception as e:
-        print(f"  ✗ Error: {e}")
+        print(f"  error Error: {e}")
 
 async def test_tool_calling():
     """Test chat with tool calling"""
@@ -107,14 +107,14 @@ async def test_tool_calling():
                 data = resp.json()
                 response = data.get('response', '')
                 tools_used = data.get('tools_used', 0)
-                print(f"  ✓ Chat completed in {elapsed:.2f}s")
+                print(f"  ok Chat completed in {elapsed:.2f}s")
                 print(f"  Response: {response[:100]}{'...' if len(response) > 100 else ''}")
                 print(f"  Tools used: {tools_used}")
             else:
-                print(f"  ✗ Chat failed [{resp.status_code}]")
+                print(f"  error Chat failed [{resp.status_code}]")
                 print(f"    {resp.text[:200]}")
     except Exception as e:
-        print(f"  ✗ Error: {e}")
+        print(f"  error Error: {e}")
 
 async def test_gpu_status():
     """Check GPU utilization"""
@@ -133,12 +133,12 @@ async def test_gpu_status():
         
         if result.returncode == 0:
             info = result.stdout.strip()
-            print(f"  ✓ GPU Status:")
+            print(f"  ok GPU Status:")
             print(f"    {info}")
         else:
-            print(f"  ⚠ nvidia-smi not available")
+            print(f"  warning nvidia-smi not available")
     except Exception as e:
-        print(f"  ⚠ GPU check skipped: {e}")
+        print(f"  warning GPU check skipped: {e}")
 
 async def main():
     """Run all validation tests"""

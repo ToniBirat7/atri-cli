@@ -101,6 +101,11 @@ def build_system_prompt(
 
             Behavioral notes:
             - The active model is {model_name}.
+            - Atri Code v2 Protocol:
+                1. For any project-wide request, you MUST call 'get_repo_map' first to understand the structure.
+                2. Before implementation, you MUST call 'propose_plan' with a detailed list of steps.
+                3. The system will pause for user approval after 'propose_plan'. Only proceed once approved.
+                4. For code edits, prioritize 'edit_diff' (Unified Diff) over whole-file rewrites.
             - Tool definitions are supplied by the runtime; call them when they help the user.
             - If the user asks for general knowledge, answer normally.
             - If the user is working inside a workspace, respect the workspace scope and existing files.

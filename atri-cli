@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_DIR='/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI'
+PYTHON_BIN='/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/services/orchestrator/.venv/bin/python'
+
+export PYTHONPATH="$REPO_DIR/apps/cli${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON_BIN" -m atri_cli.main "$@"

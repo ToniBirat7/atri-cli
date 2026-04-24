@@ -21,6 +21,7 @@ import math
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+import tempfile
 from typing import Any, Optional
 
 from .client import OrchestratorClient
@@ -50,6 +51,7 @@ PERMISSION_MODES = {
     "dontAsk",
     "bypassPermissions",
     "acceptEdits",
+    "review",
 }
 
 WRITE_LIKE_TOOLS = {
@@ -752,7 +754,32 @@ def _print_stream_response(
                 allowed_directory=allowed_directory,
                 interactive=interactive,
             )
+            
+            if event_type == "plan_proposed":
+                plan = event["event"].get("plan", {})
+                goal = plan.get("goal", "Execute task")
+                steps = plan.get("steps", [])
+                _status_clear()
+                _RICH.stop_thinking()
+                approved = _RICH.render_plan(goal, steps)
+                if approved:
+                    return "PLAN_APPROVED"
+                else:
+                    return "PLAN_REJECTED"
+            
             continue
+        
+        if "plan" in event:
+            plan = event["plan"]
+            goal = plan.get("goal", "Execute task")
+            steps = plan.get("steps", [])
+            _status_clear()
+            _RICH.stop_thinking()
+            approved = _RICH.render_plan(goal, steps)
+            if approved:
+                return "PLAN_APPROVED"
+            else:
+                return "PLAN_REJECTED"
         if "conversation_id" in event:
             active_conversation_id = event["conversation_id"]
             if telemetry:
@@ -860,6 +887,61 @@ def _run_print_mode(
         output_format=output_format,
         stream_json=stream_json,
     )
+
+
+def _handle_diff_review(event: dict[str, Any]) -> tuple[str, Optional[str]]:
+    """Handles the side-by-side diff review in VS Code."""
+    review_data = event.get("review", {})
+    path = review_data.get("path")
+    before = review_data.get("before", "")
+    after = review_data.get("after", "")
+    
+    _status_clear()
+    _RICH.stop_thinking()
+    
+    _RICH.render_review_header(path)
+    
+    file_basename = os.path.basename(path)
+    
+    # Create temp files for comparison
+    with tempfile.NamedTemporaryFile(mode='w', suffix=f'.original.{file_basename}', delete=False) as f_base:
+        f_base.write(before)
+        base_path = f_base.name
+        
+    with tempfile.NamedTemporaryFile(mode='w', suffix=f'.proposed.{file_basename}', delete=False) as f_head:
+        f_head.write(after)
+        head_path = f_head.name
+        
+    try:
+        # Launch VS Code Diff
+        subprocess.run(["code", "--wait", "--diff", base_path, head_path], check=False)
+    except Exception:
+        _print_warning("VS Code CLI ('code') not found or failed to launch. Falling back to terminal diff.")
+        subprocess.run(["diff", "-u", base_path, head_path])
+        
+    try:
+        prompt = _style(f"\nApply changes to {path}? ", color="cyan", bold=True)
+        resp = input(f"{prompt}[y/N/e (manual edit)]: ").strip().lower()
+        
+        if resp == "y":
+            with open(head_path, "r", encoding="utf-8") as f:
+                final_content = f.read()
+            return "EDIT_APPROVED", final_content
+        elif resp == "e":
+            _RICH.render_info("Opening proposed file for manual editing...")
+            try:
+                subprocess.run(["code", "--wait", head_path], check=False)
+            except Exception:
+                _print_error("Failed to re-open VS Code for manual edit.")
+            with open(head_path, "r", encoding="utf-8") as f:
+                final_content = f.read()
+            return "EDIT_APPROVED", final_content
+        else:
+            return "EDIT_REJECTED", None
+    finally:
+        for p in [base_path, head_path]:
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def _run_interactive(
@@ -972,123 +1054,173 @@ def _run_interactive(
             _print_turn_card(turn_number, permission_state.mode)
             _update_live_status(turn_number, turn_start, input_tokens, output_chars, tool_calls, "thinking")
 
+        first_content_chunk = True
         chunks: list[str] = []
-        for event in client.stream_chat(payload):
-            if event.get("done"):
-                break
-            if "event" in event and isinstance(event["event"], dict):
-                _render_timeline_event(event["event"], effective_output_format, quiet=fullscreen_mode)
-                event_type = str(event["event"].get("type") or "")
-                if event_type == "usage":
-                    exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
-                    exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
-                    has_exact_usage = True
-                    if not content_started and not fullscreen_mode:
-                        _update_live_status(
-                            turn_number,
-                            turn_start,
-                            exact_input_tokens,
-                            output_chars,
-                            tool_calls,
-                            "thinking",
-                            output_tokens_exact=exact_output_tokens,
-                        )
+        while True: # Plan approval loop
+            for event in client.stream_chat(payload):
+                if event.get("done"):
+                    break
+                if "plan" in event:
+                    plan = event["plan"]
+                    goal = plan.get("goal", "Execute task")
+                    steps = plan.get("steps", [])
+                    _status_clear()
+                    _RICH.stop_thinking()
+                    approved = _RICH.render_plan(goal, steps)
+                    if approved:
+                        payload["message"] = "Plan approved. Proceed with execution."
+                        break 
+                    else:
+                        _RICH.render_warning("Plan rejected. Returning to input.")
+                        payload = None # Signal rejection
+                        break
+                
+                if "event" in event and isinstance(event["event"], dict):
+                    _render_timeline_event(event["event"], effective_output_format, quiet=fullscreen_mode)
+                    event_type = str(event["event"].get("type") or "")
+                    
+                    if event_type == "turn_review_requested":
+                        review_result, final_content = _handle_diff_review(event["event"])
+                        if review_result == "EDIT_APPROVED":
+                            # Actually apply to the REAL file now!
+                            file_path = event["event"]["review"]["path"]
+                            try:
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    f.write(final_content)
+                                _print_success(f"Changes applied to {file_path}")
+                                payload["message"] = f"Review approved and applied to {file_path}. Proceed."
+                                break
+                            except Exception as e:
+                                _print_error(f"Failed to write to {file_path}: {e}")
+                                payload = None
+                                break
+                        else:
+                            _RICH.render_warning("Changes rejected.")
+                            payload = None
+                            break
+
+                    if event_type == "usage":
+                        exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
+                        exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
+                        has_exact_usage = True
+                        if not content_started and not fullscreen_mode:
+                            _update_live_status(
+                                turn_number,
+                                turn_start,
+                                exact_input_tokens,
+                                output_chars,
+                                tool_calls,
+                                "thinking",
+                                output_tokens_exact=exact_output_tokens,
+                            )
+                        continue
+                    if event_type == "tool_call_start":
+                        tool_calls += 1
+                        tool_name = str(event["event"].get("tool_name") or "tool")
+                        tool_names.append(tool_name)
+                        if fullscreen_mode:
+                            _append_bounded(tool_log, f"turn {turn_number}: tool started {tool_name}", 10)
+                        if not content_started and not fullscreen_mode:
+                            _update_live_status(
+                                turn_number,
+                                turn_start,
+                                exact_input_tokens if has_exact_usage else input_tokens,
+                                output_chars,
+                                tool_calls,
+                                "tool",
+                                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                            )
+                    elif event_type == "turn_complete":
+                        if not content_started and not fullscreen_mode:
+                            _update_live_status(
+                                turn_number,
+                                turn_start,
+                                exact_input_tokens if has_exact_usage else input_tokens,
+                                output_chars,
+                                tool_calls,
+                                "finalizing",
+                                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                            )
+                    else:
+                        if not content_started and not fullscreen_mode:
+                            _update_live_status(
+                                turn_number,
+                                turn_start,
+                                exact_input_tokens if has_exact_usage else input_tokens,
+                                output_chars,
+                                tool_calls,
+                                "thinking",
+                                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                            )
+                    _render_permission_event(
+                        client,
+                        event["event"],
+                        permission_state,
+                        allowed_directory=allowed_directory,
+                        interactive=True,
+                        quiet=fullscreen_mode,
+                    )
                     continue
-                if event_type == "tool_call_start":
-                    tool_calls += 1
-                    tool_name = str(event["event"].get("tool_name") or "tool")
-                    tool_names.append(tool_name)
+                if "conversation_id" in event:
+                    active_conversation_id = event["conversation_id"]
+                    if telemetry:
+                        telemetry.conversation_id = active_conversation_id
+                    continue
+                if "error" in event:
+                    _status_clear()
+                    if telemetry:
+                        telemetry.errors.append(event["error"])
+                    _emit_error(effective_output_format, str(event["error"]))
                     if fullscreen_mode:
-                        _append_bounded(tool_log, f"turn {turn_number}: tool started {tool_name}", 10)
-                    if not content_started and not fullscreen_mode:
-                        _update_live_status(
-                            turn_number,
-                            turn_start,
-                            exact_input_tokens if has_exact_usage else input_tokens,
-                            output_chars,
-                            tool_calls,
-                            "tool",
-                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                        _append_bounded(tool_log, f"turn {turn_number}: error {event['error']}", 10)
+                        current_status = TurnStatus(
+                            turn_number=turn_number,
+                            elapsed_seconds=max(0.0, time.time() - turn_start),
+                            input_tokens=exact_input_tokens if has_exact_usage else input_tokens,
+                            output_tokens=exact_output_tokens if has_exact_usage else _estimate_tokens("".join(chunks)),
+                            tool_calls=tool_calls,
+                            phase="error",
                         )
-                elif event_type == "turn_complete":
-                    if not content_started and not fullscreen_mode:
-                        _update_live_status(
-                            turn_number,
-                            turn_start,
-                            exact_input_tokens if has_exact_usage else input_tokens,
-                            output_chars,
-                            tool_calls,
-                            "finalizing",
-                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+                        _render_interactive_dashboard(
+                            conversation_id=active_conversation_id,
+                            permission_state=permission_state,
+                            status=current_status,
+                            conversation_log=conversation_log,
+                            tool_log=tool_log,
+                            note=f"turn {turn_number} failed",
+                            reduced_motion=reduced_motion,
                         )
-                else:
-                    if not content_started and not fullscreen_mode:
-                        _update_live_status(
-                            turn_number,
-                            turn_start,
-                            exact_input_tokens if has_exact_usage else input_tokens,
-                            output_chars,
-                            tool_calls,
-                            "thinking",
-                            output_tokens_exact=exact_output_tokens if has_exact_usage else None,
-                        )
-                _render_permission_event(
-                    client,
-                    event["event"],
-                    permission_state,
-                    allowed_directory=allowed_directory,
-                    interactive=True,
-                    quiet=fullscreen_mode,
-                )
-                continue
-            if "conversation_id" in event:
-                active_conversation_id = event["conversation_id"]
-                if telemetry:
-                    telemetry.conversation_id = active_conversation_id
-                continue
-            if "error" in event:
-                _status_clear()
-                if telemetry:
-                    telemetry.errors.append(event["error"])
-                _emit_error(effective_output_format, str(event["error"]))
-                if fullscreen_mode:
-                    _append_bounded(tool_log, f"turn {turn_number}: error {event['error']}", 10)
-                    current_status = TurnStatus(
-                        turn_number=turn_number,
-                        elapsed_seconds=max(0.0, time.time() - turn_start),
-                        input_tokens=exact_input_tokens if has_exact_usage else input_tokens,
-                        output_tokens=exact_output_tokens if has_exact_usage else _estimate_tokens("".join(chunks)),
-                        tool_calls=tool_calls,
-                        phase="error",
-                    )
-                    _render_interactive_dashboard(
-                        conversation_id=active_conversation_id,
-                        permission_state=permission_state,
-                        status=current_status,
-                        conversation_log=conversation_log,
-                        tool_log=tool_log,
-                        note=f"turn {turn_number} failed",
-                        reduced_motion=reduced_motion,
-                    )
-                break
-            if "content" in event:
-                text = event["content"]
-                output_chars += len(text)
-                if effective_output_format == "stream-json":
-                    print(json.dumps({"type": "content", "text": text}))
-                elif effective_output_format == "text" and not fullscreen_mode:
-                    _RICH.print_streaming_token(text, is_first=not chunks)
-                    if not chunks:
-                        _status_clear()
-                        content_started = True
-                else:
-                    pass
-                chunks.append(text)
+                    break
+                if "content" in event:
+                    text = event["content"]
+                    output_chars += len(text)
+                    if effective_output_format == "stream-json":
+                        print(json.dumps({"type": "content", "text": text}))
+                    elif effective_output_format == "text" and not fullscreen_mode:
+                        _RICH.print_streaming_token(text, is_first=first_content_chunk)
+                        if first_content_chunk:
+                            _status_clear()
+                            content_started = True
+                            first_content_chunk = False
+                    chunks.append(text)
+                    continue
+            
+            # Check if we should re-run the stream due to plan approval
+            if payload is None:
+                break # Rejected
+            if event.get("done"):
+                break # Normal completion
+            # If we reached here, it means we hit a 'break' inside 'if approved', so we re-run with new payload
+            pass
 
         response_text = "".join(chunks)
         _status_clear()
+        
+        if effective_output_format == "text" and not fullscreen_mode:
+            _RICH.finish_streaming()
+        
         turn_duration = time.time() - turn_start
-
+        
         if fullscreen_mode:
             _append_bounded(conversation_log, f"you: {_preview_line(user_input)}", 12)
             _append_bounded(conversation_log, f"atri: {_preview_line(response_text or '(no response)')}", 12)
@@ -1096,6 +1228,37 @@ def _run_interactive(
                 names = ", ".join(tool_names[:3])
                 suffix = " ..." if len(tool_names) > 3 else ""
                 _append_bounded(tool_log, f"turn {turn_number}: {names}{suffix}", 10)
+            
+            current_status = TurnStatus(
+                turn_number=turn_number,
+                elapsed_seconds=turn_duration,
+                input_tokens=exact_input_tokens if has_exact_usage else input_tokens,
+                output_tokens=exact_output_tokens if has_exact_usage else _estimate_tokens(response_text),
+                tool_calls=tool_calls,
+                phase="complete",
+            )
+            _render_interactive_dashboard(
+                conversation_id=active_conversation_id,
+                permission_state=permission_state,
+                status=current_status,
+                conversation_log=conversation_log,
+                tool_log=tool_log,
+                note=f"turn {turn_number} complete",
+                reduced_motion=reduced_motion,
+            )
+        elif effective_output_format == "text":
+            _print_turn_status_summary(
+                turn_number,
+                turn_start,
+                exact_input_tokens if has_exact_usage else input_tokens,
+                len(response_text),
+                tool_calls,
+                "complete",
+                output_tokens_exact=exact_output_tokens if has_exact_usage else None,
+            )
+            if active_conversation_id:
+                _print_info(f"conversation_id: {active_conversation_id}")
+
 
         if telemetry:
             if has_exact_usage:
@@ -1678,6 +1841,10 @@ def main() -> None:
     if args.command not in {"cleanup", "stop"}:
         if not svc.ensure_services(tui=_RICH):
             raise SystemExit(1)
+
+    # Resolve allowed_directory to absolute path if provided
+    if args.allowed_directory:
+        args.allowed_directory = os.path.abspath(os.path.expanduser(args.allowed_directory))
 
     client = OrchestratorClient(base_url=args.api_url, api_key=args.api_key)
     permission_state = PermissionState(

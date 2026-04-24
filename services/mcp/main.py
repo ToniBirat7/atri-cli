@@ -51,6 +51,27 @@ except ImportError:
         search_web_results = module.search_web_results
 
 try:
+    from .diff_engine import DiffEngine
+except (ImportError, ValueError):
+    try:
+        from diff_engine import DiffEngine
+    except ImportError:
+        # Fallback for dynamic loading: try to find it in the same directory
+        import importlib.util
+        _engine_path = Path(__file__).parent / "diff_engine.py"
+        if _engine_path.exists():
+            _spec = importlib.util.spec_from_file_location("diff_engine", str(_engine_path))
+            if _spec and _spec.loader:
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                DiffEngine = _mod.DiffEngine
+        else:
+            class DiffEngine:
+                @staticmethod
+                def apply_diff(path: str, diff: str) -> bool:
+                    raise RuntimeError("DiffEngine not available. Unified diffs cannot be applied.")
+
+try:
     from fastmcp import FastMCP
 except ImportError:
     class FastMCP:  # type: ignore[override]
@@ -732,6 +753,53 @@ def write_json_file(path: str, data: dict[str, Any], indent: int = 2) -> dict[st
     content = json.dumps(data, ensure_ascii=False, indent=indent) + "\n"
     return write_file(path=path, content=content, overwrite=True)
 
+
+@mcp.tool
+def edit_diff(path: str, diff: str) -> str:
+    """
+    Apply a unified diff (patch) to a file.
+    This is the preferred method for editing code in v2.
+    The 'diff' parameter must be a valid unified diff string.
+    """
+    try:
+        full_path = _resolve_user_path(path)
+        if not full_path.exists():
+            return f"Error: File not found: {path}"
+
+        success = DiffEngine.apply_diff(str(full_path), diff)
+        if success:
+            return f"Successfully applied diff to {path}"
+        else:
+            return f"Error: Failed to apply diff to {path}. Ensure the hunk headers and context lines match exactly."
+    except Exception as e:
+        return f"Error applying diff: {e}"
+
+
+@mcp.tool
+def create_project(path: str, template: str = "python-basic") -> str:
+    """
+    Create a new project structure at the specified path.
+    Supported templates: python-basic, node-basic, fastapi-jwt.
+    """
+    try:
+        full_path = _resolve_user_path(path)
+        if full_path.exists():
+            return f"Error: Path already exists: {path}"
+        
+        os.makedirs(full_path, exist_ok=True)
+        
+        # Simple scaffolding for now
+        if template == "python-basic":
+            (full_path / "README.md").write_text(f"# {full_path.name}\n")
+            (full_path / "main.py").write_text("def main():\n    print('Hello World')\n\nif __name__ == '__main__':\n    main()\n")
+            (full_path / "requirements.txt").write_text("")
+        elif template == "fastapi-jwt":
+            # Just create the main file for now
+            (full_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+            
+        return f"Successfully created {template} project at {path}"
+    except Exception as e:
+        return f"Error creating project: {e}"
 
 if __name__ == "__main__":
     mcp.run()

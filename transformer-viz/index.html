@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformer Attention | Interactive Visualization</title>
+    <meta name="description" content="A premium interactive visualization of the Transformer Attention Layer mechanism.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Outfit:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="glass-container">
+        <header>
+            <h1 id="main-title">Attention Layer <span>Visualization</span></h1>
+            <p class="subtitle">Interactively explore the Query, Key, and Value mechanics.</p>
+        </header>
+
+        <main>
+            <section class="viz-wrapper">
+                <div class="matrix-container" id="attention-matrix-wrapper">
+                    <!-- Attention matrix will be rendered here -->
+                    <canvas id="viz-canvas"></canvas>
+                </div>
+                
+                    <div class="control-group">
+                        <label for="dynamic-input">Custom Input Text</label>
+                        <textarea id="dynamic-input" placeholder="Enter a sentence to tokenize..."></textarea>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="dim-slider">Dimensionality (d_k)</label>
+                        <input type="range" id="dim-slider" min="4" max="64" value="16">
+                        <span id="dim-value">16</span>
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="head-slider">Attention Heads</label>
+                        <input type="range" id="head-slider" min="1" max="12" value="4">
+                        <span id="head-value">4</span>
+                    </div>
+
+                    <div class="control-group">
+                        <label>Active Head Selection</label>
+                        <div class="head-selector" id="head-selector">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+
+                    <div class="action-buttons">
+                        <button id="step-btn" class="primary-btn">Step Forward</button>
+                        <button id="reset-btn" class="secondary-btn">Reset Data</button>
+                    </div>
+                </aside>
+            </section>
+
+            <section class="output-panel glass">
+                <label>Value Projection (Output)</label>
+                <div id="value-projection" class="output-bar-container">
+                    <!-- Weighted sum visualization -->
+                </div>
+            </section>
+
+            <section class="explanation-panel glass">
+                <div class="step-container" id="step-info">
+                    <h3 id="step-title">1. Linear Projection</h3>
+                    <p id="step-desc">Input embeddings are projected into Query, Key, and Value spaces.</p>
+                </div>
+                <div class="formula">
+                    <code id="formula-display">Attention(Q, K, V) = softmax(QK<sup>T</sup> / √d<sub>k</sub>)V</code>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Powered by Atri Code v2 Architecture</p>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

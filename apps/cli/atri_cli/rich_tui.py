@@ -42,23 +42,26 @@ TIMELINE_VERBOSITY_LEVELS = ("minimal", "normal", "debug")
 
 # ─── Color theme ───────────────────────────────────────────────────────────
 
-ATRI_THEME = Theme({
-    "atri.header": "bold bright_cyan",
-    "atri.prompt": "bold bright_cyan",
-    "atri.assistant": "bright_white",
-    "atri.success": "bold green",
-    "atri.warning": "bold yellow",
-    "atri.error": "bold red",
-    "atri.dim": "dim white",
-    "atri.tool": "bold magenta",
-    "atri.tool_result": "green",
-    "atri.thinking": "dim italic cyan",
-    "atri.tokens": "dim bright_blue",
-    "atri.mode": "bold bright_yellow",
-    "atri.separator": "dim cyan",
-    "atri.key": "bold bright_white",
-    "atri.value": "bright_white",
-})
+if RICH_AVAILABLE:
+    ATRI_THEME = Theme({
+        "atri.header": "bold bright_cyan",
+        "atri.prompt": "bold bright_cyan",
+        "atri.assistant": "bright_white",
+        "atri.success": "bold green",
+        "atri.warning": "bold yellow",
+        "atri.error": "bold red",
+        "atri.dim": "dim white",
+        "atri.tool": "bold magenta",
+        "atri.tool_result": "green",
+        "atri.thinking": "dim italic cyan",
+        "atri.tokens": "dim bright_blue",
+        "atri.mode": "bold bright_yellow",
+        "atri.separator": "dim cyan",
+        "atri.key": "bold bright_white",
+        "atri.value": "bright_white",
+    })
+else:
+    ATRI_THEME = None
 
 
 @dataclass
@@ -77,7 +80,7 @@ class RichTUI:
     def __init__(self, timeline_verbosity: str = "normal") -> None:
         self.timeline_verbosity = timeline_verbosity
         self._compact_mode = False
-        self._console = Console(theme=ATRI_THEME) if RICH_AVAILABLE else None
+        self._console = Console(theme=ATRI_THEME) if (RICH_AVAILABLE and ATRI_THEME) else (Console() if RICH_AVAILABLE else None)
         self._live: Optional[Live] = None
         self._stream_buffer = ""
 
@@ -110,7 +113,7 @@ class RichTUI:
     ) -> None:
         """Render the startup welcome banner."""
         if not RICH_AVAILABLE:
-            print("\n  ✦ Atri Code — Local AI coding agent")
+            print("\n  Atri Code — Local AI coding agent")
             print(f"  Model: {model} | Mode: {permission_mode} | API: {api_url}")
             print("  Type /help for commands\n")
             return
@@ -133,7 +136,6 @@ class RichTUI:
 
         # Build welcome content
         header = Text()
-        header.append("✦ ", style="bold bright_cyan")
         header.append("Atri Code", style="bold bright_white")
         header.append("  ", style="")
         header.append("v1.0", style="dim white")
@@ -144,7 +146,7 @@ class RichTUI:
         table.add_row("Model", model)
         table.add_row("Hardware", gpu_name)
         table.add_row("Context", ctx_size)
-        table.add_row("Reasoning", "✓ enabled" if reasoning else "✗ disabled")
+        table.add_row("Reasoning", "enabled" if reasoning else "disabled")
         table.add_row("Mode", f"[bold bright_yellow]{permission_mode}[/]")
         table.add_row("API", f"[dim]{api_url}[/]")
 
@@ -176,11 +178,11 @@ class RichTUI:
     def start_thinking(self, turn_number: int = 0) -> None:
         """Show an animated thinking spinner."""
         if not RICH_AVAILABLE:
-            print("  ◐ Thinking...", end="", flush=True)
+            print("  Thinking...", end="", flush=True)
             return
 
         label = Text()
-        label.append("  ◐ ", style="bright_cyan")
+        label.append("  ", style="")
         label.append(f"Turn {turn_number} — ", style="dim") if turn_number else None
         label.append("Thinking", style="italic bright_cyan")
         label.append("...", style="dim")
@@ -202,16 +204,13 @@ class RichTUI:
         label.append("  ", style="")
 
         if phase == "tool":
-            label.append("⚡ ", style="bright_magenta")
+            label.append("Tool: ", style="bright_magenta")
             label.append(f"Running {tool_name}", style="bold magenta")
         elif phase == "thinking":
-            label.append("◐ ", style="bright_cyan")
             label.append("Thinking", style="italic bright_cyan")
         elif phase == "finalizing":
-            label.append("✎ ", style="bright_green")
             label.append("Composing response", style="italic bright_green")
         else:
-            label.append("◐ ", style="bright_cyan")
             label.append(phase, style="italic")
 
         if elapsed > 0:
@@ -232,7 +231,7 @@ class RichTUI:
     def render_tool_call(self, tool_name: str, tool_input: dict | None = None) -> None:
         """Render a tool call in a magenta-bordered panel."""
         if not RICH_AVAILABLE:
-            print(f"  ⚡ Tool: {tool_name}")
+            print(f"  Tool: {tool_name}")
             if tool_input:
                 for k, v in tool_input.items():
                     val = str(v)[:80]
@@ -252,7 +251,7 @@ class RichTUI:
 
         panel = Panel(
             content,
-            title=f"⚡ {tool_name}",
+            title=f"Tool: {tool_name}",
             title_align="left",
             border_style="bright_magenta",
             box=ROUNDED,
@@ -263,7 +262,7 @@ class RichTUI:
     def render_tool_result(self, tool_name: str, result: str, success: bool = True) -> None:
         """Render a tool result in a green/red panel."""
         if not RICH_AVAILABLE:
-            status = "✓" if success else "✗"
+            status = "ok" if success else "error"
             print(f"  {status} {tool_name}: {result[:200]}")
             return
 
@@ -278,7 +277,7 @@ class RichTUI:
         if not self._compact_mode:
             panel = Panel(
                 Text(display, style="white"),
-                title=f"{icon} {tool_name}",
+                title=f"{tool_name}",
                 title_align="left",
                 border_style=style,
                 box=ROUNDED,
@@ -286,7 +285,7 @@ class RichTUI:
             )
             self.console.print(panel)
         else:
-            self.console.print(f"  [bold {style}]{icon}[/] {tool_name}", highlight=False)
+            self.console.print(f"  [bold {style}]{status}[/] {tool_name}", highlight=False)
 
     # ─── Assistant response ───────────────────────────────────────────────
 
@@ -325,6 +324,12 @@ class RichTUI:
 
     def print_streaming_token(self, token: str, is_first: bool = False) -> None:
         """Stream response in real-time with markdown rendering."""
+        if not RICH_AVAILABLE:
+            if is_first:
+                print(f"\natri> ", end="", flush=True)
+            print(token, end="", flush=True)
+            return
+
         self._stream_buffer += token
         
         if is_first:
@@ -342,6 +347,10 @@ class RichTUI:
 
     def finish_streaming(self) -> None:
         """Finalize streaming output."""
+        if not RICH_AVAILABLE:
+            print("\n")
+            return
+
         if self._live:
             # Final update to ensure everything is rendered
             self._live.update(Markdown(self._stream_buffer))
@@ -374,12 +383,12 @@ class RichTUI:
         status.append("  •  ", style="dim")
         status.append(f"{elapsed:.1f}s", style="bright_cyan")
         status.append("  •  ", style="dim")
-        status.append(f"↑{input_tokens}", style="dim bright_blue")
+        status.append(f"in:{input_tokens}", style="dim bright_blue")
         status.append(" ", style="")
-        status.append(f"↓{tok_out}", style="dim bright_green")
+        status.append(f"out:{tok_out}", style="dim bright_green")
         if tool_calls > 0:
             status.append("  •  ", style="dim")
-            status.append(f"⚡{tool_calls} tools", style="dim bright_magenta")
+            status.append(f"{tool_calls} tools", style="dim bright_magenta")
 
         self.console.print(status)
 
@@ -393,7 +402,7 @@ class RichTUI:
 
         panel = Panel(
             Text(message, style="bright_red"),
-            title="✗ Error",
+            title="Error",
             title_align="left",
             border_style="red",
             box=ROUNDED,
@@ -404,26 +413,93 @@ class RichTUI:
     def render_warning(self, message: str) -> None:
         """Render a warning message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [bold yellow]⚠[/] {message}")
+            self.console.print(f"  [bold yellow]warning[/] {message}")
         else:
-            print(f"  ⚠ {message}")
+            print(f"  warning {message}")
 
     def render_success(self, message: str) -> None:
         """Render a success message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [bold green]✓[/] {message}")
+            self.console.print(f"  [bold green]ok[/] {message}")
         else:
-            print(f"  ✓ {message}")
+            print(f"  ok {message}")
 
     def render_info(self, message: str) -> None:
         """Render an info message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [dim bright_cyan]ℹ[/] {message}")
+            self.console.print(f"  [dim bright_cyan]info[/] {message}")
         else:
-            print(f"  ℹ {message}")
+            print(f"  info {message}")
+
+    # ─── Plan rendering ───────────────────────────────────────────────────
+    
+    def render_plan(self, goal: str, steps: list[str]) -> bool:
+        """Render a proposed plan and ask for approval."""
+        if not RICH_AVAILABLE:
+            print(f"\n  Proposed Plan for: {goal}")
+            for i, step in enumerate(steps, 1):
+                print(f"    {i}. {step}")
+            resp = input("\n  Approve this plan? [y/N]: ").strip().lower()
+            return resp in {"y", "yes"}
+
+        content = Text()
+        content.append(f"Goal: ", style="bold bright_white")
+        content.append(f"{goal}\n\n", style="white")
+        
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("Index", style="bold bright_cyan", justify="right")
+        table.add_column("Step", style="white")
+        
+        for i, step in enumerate(steps, 1):
+            table.add_row(f"{i}.", step)
+        
+        panel = Panel(
+            Group(content, table),
+            title="Proposed Execution Plan",
+            title_align="left",
+            border_style="bright_cyan",
+            box=ROUNDED,
+            padding=(1, 2),
+        )
+        
+        self.console.print()
+        self.console.print(panel)
+        self.console.print()
+
+        try:
+            resp = input("  Approve plan and proceed? (y/n): ").strip().lower()
+            return resp in {"y", "yes"}
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    # ─── Review rendering ─────────────────────────────────────────────────
+    
+    def render_review_header(self, path: str) -> None:
+        """Render a premium header for the VS Code diff review."""
+        if not RICH_AVAILABLE:
+            print(f"\n  Reviewing changes for {path} in VS Code...")
+            return
+
+        content = Text()
+        content.append("  File: ", style="dim")
+        content.append(path, style="bold bright_white")
+        content.append("\n  Action: ", style="dim")
+        content.append("Opening side-by-side diff in VS Code", style="bright_cyan")
+        
+        panel = Panel(
+            content,
+            title="Code Review Required",
+            title_align="left",
+            border_style="bright_cyan",
+            box=ROUNDED,
+            padding=(1, 2),
+        )
+        self.console.print()
+        self.console.print(panel)
+        self.console.print()
 
     # ─── Permission prompt ────────────────────────────────────────────────
-
+    
     def render_permission_prompt(self, tool_name: str, description: str = "") -> bool:
         """Show an interactive permission prompt. Returns True if allowed."""
         if not RICH_AVAILABLE:
@@ -438,7 +514,7 @@ class RichTUI:
 
         panel = Panel(
             content,
-            title="🔐 Permission Required",
+            title="Permission Required",
             title_align="left",
             border_style="bright_yellow",
             box=ROUNDED,
@@ -473,7 +549,7 @@ class RichTUI:
             box=ROUNDED,
             border_style="dim cyan",
             padding=(0, 2),
-            title="✦ Atri Code Commands",
+            title="Atri Code Commands",
             title_style="bold bright_cyan",
         )
         table.add_column("Command", style="bold bright_white", width=16)
@@ -502,14 +578,14 @@ class RichTUI:
             return
 
         self.console.print()
-        self.console.print(Text("  ✦ Atri Code Doctor", style="bold bright_cyan"))
+        self.console.print(Text("  Atri Code Doctor", style="bold bright_cyan"))
         self.console.print()
 
         for item in checks:
             if item["ok"]:
-                self.console.print(f"  [bold green]✓[/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold green]ok[/] {item['name']} [dim]{item.get('path', '')}[/]")
             else:
-                self.console.print(f"  [bold red]✗[/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold red]error[/] {item['name']} [dim]{item.get('path', '')}[/]")
                 if item.get("error"):
                     self.console.print(f"    [dim red]{item['error']}[/]")
 
@@ -552,7 +628,7 @@ class RichTUI:
 
         panel = Panel(
             table,
-            title="✦ Model Info",
+            title="Model Info",
             title_align="left",
             border_style="bright_cyan",
             box=ROUNDED,
@@ -586,7 +662,7 @@ class RichTUI:
 
         panel = Panel(
             table,
-            title="📊 Session Summary",
+            title="Session Summary",
             title_align="left",
             border_style="bright_blue",
             box=ROUNDED,

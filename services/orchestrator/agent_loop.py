@@ -38,6 +38,24 @@ import json
 import ast
 import logging
 import re
+import os
+try:
+    from ..mcp.diff_engine import DiffEngine
+except (ImportError, ValueError):
+    import sys
+    import os
+    # Add repo root to sys.path to allow absolute imports of services.mcp
+    _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    try:
+        from services.mcp.diff_engine import DiffEngine
+    except ImportError:
+        # Fallback for different execution contexts
+        _mcp_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp"))
+        if _mcp_path not in sys.path:
+            sys.path.insert(0, _mcp_path)
+        from diff_engine import DiffEngine
 
 try:
     from .logging_context import get_request_id, set_turn_id, get_turn_id
@@ -61,8 +79,11 @@ class TurnOutcome(str, Enum):
     """Outcome of a single agent loop turn."""
     TOOL_CALLS = "tool_calls"
     NO_TOOL_CALLS = "no_tool_calls"
+    PLANNING = "planning"
+    VERIFICATION = "verification"
     MAX_TURNS_REACHED = "max_turns_reached"
     ERROR = "error"
+    REVIEW = "review"
 
 
 @dataclass
@@ -113,6 +134,7 @@ class AgentLoop:
         enable_thinking: bool = False,
         tool_timeout_seconds: int = 10,
         max_tool_call_retries: int = 2,
+        permission_mode: str = "default",
     ):
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
@@ -120,6 +142,7 @@ class AgentLoop:
         self.enable_thinking = enable_thinking
         self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_call_retries = max_tool_call_retries
+        self.permission_mode = permission_mode
         self.state = AgentState()
 
     async def _emit_event(
@@ -387,7 +410,9 @@ class AgentLoop:
                                 tool_registry=tool_registry,
                             )
                             if hasattr(tool_registry, "resolve_tool_call"):
-                                routed_server, routed_tool_name = tool_registry.resolve_tool_call(tool_call.tool_name)
+                                resolved = tool_registry.resolve_tool_call(tool_call.tool_name)
+                                if isinstance(resolved, (tuple, list)) and len(resolved) >= 2:
+                                    routed_server, routed_tool_name = resolved[0], resolved[1]
 
                             await self._emit_event(
                                 event_callback,
@@ -400,6 +425,44 @@ class AgentLoop:
                                     "tool_input": validated_input,
                                 },
                             )
+
+                            # Intercept edit tools for review mode
+                            if self.permission_mode == "review" and routed_tool_name in ["edit_diff", "edit_file"]:
+                                file_path = validated_input.get("path")
+                                if file_path and os.path.exists(file_path):
+                                    with open(file_path, "r", encoding="utf-8") as f:
+                                        before_content = f.read()
+                                    
+                                    after_content = None
+                                    if routed_tool_name == "edit_diff":
+                                        after_content = DiffEngine.get_preview(file_path, validated_input.get("diff", ""))
+                                    elif routed_tool_name == "edit_file":
+                                        # Simple text replacement for preview
+                                        old_text = validated_input.get("old_text")
+                                        new_text = validated_input.get("new_text")
+                                        if old_text and new_text:
+                                            after_content = before_content.replace(old_text, new_text)
+
+                                    if after_content is not None:
+                                        turn.outcome = TurnOutcome.REVIEW
+                                        turn.metadata["review_data"] = {
+                                            "path": file_path,
+                                            "before": before_content,
+                                            "after": after_content,
+                                            "tool": routed_tool_name,
+                                            "input": validated_input
+                                        }
+                                        await self._emit_event(
+                                            event_callback,
+                                            {
+                                                "type": "turn_review_requested",
+                                                "turn": self.state.turn,
+                                                "review": turn.metadata["review_data"]
+                                            }
+                                        )
+                                        self.state.final_response = f"Review requested for {file_path}"
+                                        self.state.turns_history.append(turn)
+                                        return self.state.final_response, self.state
 
                             result = await mcp_orchestrator.execute_tool(
                                 server_name=routed_server,
@@ -429,11 +492,6 @@ class AgentLoop:
                             )
                             turn.tool_calls_executed += 1
                             self.state.total_tool_calls += 1
-                            _log_event(
-                                "agent_loop.turn.tool_executed",
-                                tool_name=tool_call.tool_name,
-                                tool_calls_executed_in_turn=turn.tool_calls_executed,
-                            )
                             await self._emit_event(
                                 event_callback,
                                 {
@@ -444,6 +502,32 @@ class AgentLoop:
                                     "status": "ok",
                                 },
                             )
+                            
+                            # v2 Planning Interception
+                            if tool_call.tool_name in ["propose_plan", "intelligence.propose_plan"]:
+                                turn.outcome = TurnOutcome.PLANNING
+                                turn.metadata["proposed_plan"] = validated_input
+                                _log_event("agent_loop.turn.planning_triggered", plan=validated_input)
+                                
+                                # Extract goal and steps for the UI
+                                goal = validated_input.get("goal", "Execute task")
+                                steps = validated_input.get("steps", [])
+                                
+                                await self._emit_event(
+                                    event_callback,
+                                    {
+                                        "type": "plan_proposed",
+                                        "turn": self.state.turn,
+                                        "plan": {
+                                            "goal": goal,
+                                            "steps": steps
+                                        },
+                                    },
+                                )
+                                self.state.final_response = f"Plan proposed: {goal}"
+                                self.state.turns_history.append(turn)
+                                return self.state.final_response, self.state
+
                         except Exception as e:
                             import traceback
                             error_traceback = traceback.format_exc()

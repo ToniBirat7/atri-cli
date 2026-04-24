@@ -65,6 +65,10 @@ class OrchestratorClient:
             content = payload.get("content")
             return {"content": content} if isinstance(content, str) else payload
 
+        if event_type == "plan_proposed":
+            plan = payload.get("plan")
+            return {"plan": plan} if isinstance(plan, dict) else payload
+
         if event_type == "error":
             error = payload.get("error")
             return {"error": error} if isinstance(error, str) else payload

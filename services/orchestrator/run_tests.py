@@ -24,9 +24,9 @@ def run_tests():
     print()
     print("-" * 80)
     if result.returncode == 0:
-        print("✓ Integration tests PASSED")
+        print("Integration tests PASSED")
     else:
-        print("✗ Integration tests FAILED")
+        print("Integration tests FAILED")
     
     print()
     print("=" * 80)
@@ -41,9 +41,9 @@ def run_tests():
     print()
     print("-" * 80)
     if result2.returncode == 0:
-        print("✓ LLM adapter tests PASSED")
+        print("LLM adapter tests PASSED")
     else:
-        print("✗ LLM adapter tests FAILED")
+        print("LLM adapter tests FAILED")
     
     print()
     print("=" * 80)
@@ -58,9 +58,9 @@ def run_tests():
     print()
     print("-" * 80)
     if result3.returncode == 0:
-        print("✓ MCP orchestrator tests PASSED")
+        print("MCP orchestrator tests PASSED")
     else:
-        print("✗ MCP orchestrator tests FAILED")
+        print("MCP orchestrator tests FAILED")
     
     print()
     print("=" * 80)
@@ -68,9 +68,9 @@ def run_tests():
     print("=" * 80)
     all_passed = result.returncode == 0 and result2.returncode == 0 and result3.returncode == 0
     if all_passed:
-        print("✓ All test suites PASSED!")
+        print("All test suites PASSED!")
     else:
-        print("✗ Some tests FAILED - check output above")
+        print("Some tests FAILED - check output above")
     print("=" * 80)
     
     return 0 if all_passed else 1

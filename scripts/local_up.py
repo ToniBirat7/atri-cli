@@ -266,6 +266,11 @@ def _install_dependencies(repo_dir: Path, mode: str) -> None:
     _run([str(py), "-m", "pip", "install", "--upgrade", "pip"], cwd=repo_dir / "services/orchestrator")
     _run([str(py), "-m", "pip", "install", "-r", "requirements.txt"], cwd=repo_dir / "services/orchestrator")
 
+    cli_reqs = repo_dir / "apps/cli/requirements.txt"
+    if cli_reqs.exists():
+        print("[local-up] Installing CLI dependencies...")
+        _run([str(py), "-m", "pip", "install", "-r", str(cli_reqs)], cwd=repo_dir)
+
     mcp_reqs = repo_dir / "services/mcp/requirements.txt"
     if mcp_reqs.exists():
         print("[local-up] Installing MCP dependencies...")

@@ -2,9 +2,9 @@
 FastAPI server for orchestrator service.
 
 Exposes orchestrator as HTTP API:
-- POST /chat — Execute agent loop (user message → LLM → tools → response)
-- GET /health — Health check
-- GET /tools — List available tools
+- POST /chat - Execute agent loop (user message -> LLM -> tools -> response)
+- GET /health - Health check
+- GET /tools - List available tools
 
 Phase 1: Basic API for chat and health checks.
 Phase 2: Streaming responses via Server-Sent Events.
@@ -100,6 +100,7 @@ class ChatRequest(BaseModel):
         None,
         description="Prompt profile to use for this request; requires admin authentication",
     )
+    permission_mode: str = Field("default", description="Permission mode for the agent session")
 
 
 class ChatResponse(BaseModel):
@@ -556,6 +557,7 @@ async def _run_agent_request(
         await conversation_store.ensure_conversation(conversation_id, prompt_profile)
 
     original_max_turns = agent_loop.max_turns
+    original_permission_mode = agent_loop.permission_mode
     try:
         _log_event(
             "chat.request.received",
@@ -567,6 +569,8 @@ async def _run_agent_request(
 
         if request.max_turns:
             agent_loop.max_turns = request.max_turns
+        
+        agent_loop.permission_mode = request.permission_mode
 
         prior_messages: list[dict[str, str]] = []
         if conversation_store is not None and request.conversation_id:
@@ -702,6 +706,7 @@ async def _run_agent_request(
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
     finally:
         agent_loop.max_turns = original_max_turns
+        agent_loop.permission_mode = original_permission_mode
 
 
 @app.on_event("startup")
@@ -762,7 +767,12 @@ async def startup():
         configured_servers = config.mcp.servers or [
             {
                 "name": "local-mcp",
-                "command": "fastmcp run services/mcp/main.py:mcp",
+                "command": f"fastmcp run {Path(__file__).parent.parent / 'mcp' / 'main.py'}:mcp",
+                "transport": config.mcp.default_transport,
+            },
+            {
+                "name": "local-mcp-intelligence",
+                "command": f"fastmcp run {Path(__file__).parent.parent / 'mcp' / 'intelligence.py'}:mcp",
                 "transport": config.mcp.default_transport,
             }
         ]
@@ -1538,19 +1548,19 @@ async def root():
         "service": "Atri Code Orchestrator",
         "version": "0.1.0",
         "endpoints": [
-            "POST /chat — Execute agent loop",
-            "POST /chat/stream — Stream chat response",
-            "GET /health — Health check",
-            "GET /live — Liveness probe",
-            "GET /ready — Readiness probe",
-            "GET /tools — List available tools",
-            "GET /mcp/startup-summary — MCP startup trace summary",
-            "GET /conversations — List stored conversations",
-            "GET /conversations/{id} — Conversation details",
-            "POST /conversations/{id}/resume — Validate resumable conversation",
-            "POST /conversations/{id}/fork — Create conversation fork",
-            "POST /permissions/evaluate — Evaluate permission decision",
-            "GET /metrics — Runtime metrics",
+            "POST /chat - Execute agent loop",
+            "POST /chat/stream - Stream chat response",
+            "GET /health - Health check",
+            "GET /live - Liveness probe",
+            "GET /ready - Readiness probe",
+            "GET /tools - List available tools",
+            "GET /mcp/startup-summary - MCP startup trace summary",
+            "GET /conversations - List stored conversations",
+            "GET /conversations/{id} - Conversation details",
+            "POST /conversations/{id}/resume - Validate resumable conversation",
+            "POST /conversations/{id}/fork - Create conversation fork",
+            "POST /permissions/evaluate - Evaluate permission decision",
+            "GET /metrics - Runtime metrics",
         ]
     }
 
