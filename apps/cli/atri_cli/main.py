@@ -404,9 +404,16 @@ def _render_timeline_event(event: dict[str, Any], output_format: str, quiet: boo
             return
         if etype == "tool_call_result":
             res = event.get("tool_result")
+            status = event.get("status", "ok")
+            is_success = status != "error"
+            
+            if not is_success and not res:
+                res = event.get("error", "Unknown error")
+
             if res is not None and not isinstance(res, str):
                 res = json.dumps(res, indent=2)
-            _RICH.render_tool_result(event.get("tool_name", "tool"), res or "", success=not event.get("is_error", False))
+            
+            _RICH.render_tool_result(event.get("tool_name", "tool"), res or "", success=is_success)
             return
     _TUI.render_timeline_event(event, output_format)
 

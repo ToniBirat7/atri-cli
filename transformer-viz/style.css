@@ -137,7 +137,7 @@ input[type="range"] {
     padding: 6px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--glass-border);
-    border-radius: 6px;
+    border-radius: 50%;
     text-align: center;
     font-size: 0.75rem;
     cursor: pointer;
@@ -158,9 +158,9 @@ input[type="range"] {
 }
 
 @keyframes pulse-glow {
-    0% { box-shadow: 0 0 5px rgba(0, 242, 255, 0.4); }
-    50% { box-shadow: 0 0 20px rgba(0, 242, 255, 0.8); }
-    100% { box-shadow: 0 0 5px rgba(0, 242, 255, 0.4); }
+    0% { filter: drop-shadow(0 0 5px var(--accent-cyan)); }
+    50% { filter: drop-shadow(0 0 20px var(--accent-cyan)); }
+    100% { filter: drop-shadow(0 0 5px var(--accent-cyan)); }
 }
 
 .action-buttons {

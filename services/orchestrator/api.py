@@ -593,13 +593,13 @@ async def _run_agent_request(
             {
                 "tool_name": selected_tool,
                 "server": selected_server,
-                "input": {"path": selected_allowed_directory},
+                "input": {"target_directory_path": selected_allowed_directory},
             },
         )
         await mcp_orchestrator.execute_tool(
             server_name=selected_server,
             tool_name=selected_tool,
-            tool_input={"path": selected_allowed_directory},
+            tool_input={"target_directory_path": selected_allowed_directory},
         )
         hook_manager.emit(
             "PostToolUse",

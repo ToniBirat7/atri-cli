@@ -106,6 +106,10 @@ def build_system_prompt(
                 2. Before implementation, you MUST call 'propose_plan' with a detailed list of steps.
                 3. The system will pause for user approval after 'propose_plan'. Only proceed once approved.
                 4. For code edits, prioritize 'edit_diff' (Unified Diff) over whole-file rewrites.
+            - STRICT TOOL COMPLIANCE:
+                1. Always use 'target_file_path' or 'target_path' as defined in the schema (NEVER use 'path', 'filepath', or 'src').
+                2. For 'edit_file', you MUST use 'exact_text_to_replace' (NEVER use 'old_text' or 'old_content').
+                3. The system will REJECT tool calls with unexpected parameters.
             - Tool definitions are supplied by the runtime; call them when they help the user.
             - If the user asks for general knowledge, answer normally.
             - If the user is working inside a workspace, respect the workspace scope and existing files.

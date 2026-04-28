@@ -243,13 +243,13 @@ def list_allowed_directories() -> list[str]:
 
 
 @mcp.tool
-def set_allowed_directory(path: str) -> dict[str, Any]:
+def set_allowed_directory(target_directory_path: str) -> dict[str, Any]:
     """
     Set a single active allowed directory at runtime.
 
     Intended for user-selected workspace roots from frontend/orchestrator.
     """
-    validated = _validate_directories([path])
+    validated = _validate_directories([target_directory_path])
     POLICY.set_allowed_dirs(validated)
     return {
         "ok": True,
@@ -280,13 +280,13 @@ def reset_allowed_directories() -> dict[str, Any]:
 
 
 @mcp.tool
-def list_directory(path: str = ".") -> dict[str, Any]:
+def list_directory(target_path: str = ".") -> dict[str, Any]:
     """List immediate directory contents."""
-    directory = _resolve_user_path(path)
+    directory = _resolve_user_path(target_path)
     if not directory.exists():
-        raise FileNotFoundError(f"Directory not found: {path}")
+        raise FileNotFoundError(f"Directory not found: {target_path}")
     if not directory.is_dir():
-        raise NotADirectoryError(f"Not a directory: {path}")
+        raise NotADirectoryError(f"Not a directory: {target_path}")
 
     entries: list[dict[str, Any]] = []
     for item in sorted(directory.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
@@ -329,20 +329,21 @@ def _build_tree(path: Path, depth: int) -> dict[str, Any]:
 
 
 @mcp.tool
-def directory_tree(path: str = ".", max_depth: int = 4) -> dict[str, Any]:
+def directory_tree(target_path: str = ".", max_depth: int = 4) -> dict[str, Any]:
     """Return a recursive JSON tree of directories/files."""
     if max_depth < 1 or max_depth > 12:
         raise ValueError("max_depth must be between 1 and 12")
-    root = _resolve_user_path(path)
+    root = _resolve_user_path(target_path)
     if not root.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
+        raise FileNotFoundError(f"Path not found: {target_path}")
     return _build_tree(root, max_depth)
 
 
 @mcp.tool
-def read_text_file(path: str, head: int | None = None, tail: int | None = None) -> dict[str, Any]:
+def read_text_file(target_file_path: str, head: int | None = None, tail: int | None = None) -> dict[str, Any]:
     """
     Read UTF-8 text content from a file.
+    REQUIRED: 'target_file_path' is the path to the file.
 
     Optional slicing:
     - head: first N lines
@@ -351,9 +352,9 @@ def read_text_file(path: str, head: int | None = None, tail: int | None = None) 
     if head is not None and tail is not None:
         raise ValueError("Specify only one of head or tail")
 
-    file_path = _resolve_user_path(path)
+    file_path = _resolve_user_path(target_file_path)
     if not file_path.exists() or not file_path.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(f"File not found: {target_file_path}")
 
     content = _read_text(file_path)
     lines = content.splitlines()
@@ -376,7 +377,7 @@ def read_text_file(path: str, head: int | None = None, tail: int | None = None) 
 
 
 @mcp.tool
-def read_file(path: str, start_line: int = 1, end_line: int = 200) -> dict[str, Any]:
+def read_file(target_file_path: str, start_line: int = 1, end_line: int = 200) -> dict[str, Any]:
     """
     Backward-compatible alias for line-ranged file reads.
 
@@ -388,7 +389,7 @@ def read_file(path: str, start_line: int = 1, end_line: int = 200) -> dict[str, 
     if end_line < start_line:
         raise ValueError("end_line must be >= start_line")
 
-    payload = read_text_file(path)
+    payload = read_text_file(target_file_path=target_file_path)
     lines = str(payload.get("content", "")).splitlines()
     sliced = lines[start_line - 1 : end_line]
     return {
@@ -406,7 +407,7 @@ def read_multiple_files(paths: list[str]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for p in paths:
         try:
-            result = read_text_file(p)
+            result = read_text_file(target_file_path=p)
             results.append({"path": p, "ok": True, "result": result})
         except Exception as exc:
             results.append({"path": p, "ok": False, "error": str(exc)})
@@ -414,11 +415,11 @@ def read_multiple_files(paths: list[str]) -> dict[str, Any]:
 
 
 @mcp.tool
-def get_file_info(path: str) -> dict[str, Any]:
+def get_file_info(target_path: str) -> dict[str, Any]:
     """Get metadata for a file or directory."""
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(target_path)
     if not target.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
+        raise FileNotFoundError(f"Path not found: {target_path}")
 
     stat = target.stat()
     return {
@@ -433,26 +434,24 @@ def get_file_info(path: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def create_directory(path: str) -> dict[str, Any]:
+def create_directory(target_directory_path: str) -> dict[str, Any]:
     """Create directory recursively; succeeds if it already exists."""
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(target_directory_path)
     target.mkdir(parents=True, exist_ok=True)
     return {"ok": True, "path": _to_relative_display(target)}
 
 
 @mcp.tool
-def write_file(path: str, content: Optional[str] = None, text: Optional[str] = None, overwrite: bool = True) -> dict[str, Any]:
+def write_file(target_file_path: str, content: str, overwrite: bool = True) -> dict[str, Any]:
     """
     Write text to file (UTF-8).
+    REQUIRED: 'target_file_path' is the path to the file.
+    REQUIRED: 'content' is the text to write.
 
     Safety:
     - Refuses writes larger than MCP_MAX_WRITE_BYTES
     - Atomic replace through temp file
     """
-    if content is None and text is None:
-        raise ValueError("Missing required argument: 'content' (or 'text')")
-    
-    content = content if content is not None else text
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_WRITE_BYTES:
         raise ValueError(
@@ -460,9 +459,9 @@ def write_file(path: str, content: Optional[str] = None, text: Optional[str] = N
             f"Limit is {MAX_WRITE_BYTES} bytes."
         )
 
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(target_file_path)
     if target.exists() and not overwrite:
-        raise FileExistsError(f"File already exists and overwrite=false: {path}")
+        raise FileExistsError(f"File already exists and overwrite=false: {target_file_path}")
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(target.suffix + ".tmp")
@@ -477,7 +476,7 @@ def write_file(path: str, content: Optional[str] = None, text: Optional[str] = N
 
 
 @mcp.tool
-def append_file(path: str, content: str) -> dict[str, Any]:
+def append_file(target_file_path: str, content: str) -> dict[str, Any]:
     """Append UTF-8 text to an existing or new file."""
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_WRITE_BYTES:
@@ -486,7 +485,7 @@ def append_file(path: str, content: str) -> dict[str, Any]:
             f"Limit is {MAX_WRITE_BYTES} bytes."
         )
 
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(target_file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fp:
         fp.write(content)
@@ -500,34 +499,25 @@ def append_file(path: str, content: str) -> dict[str, Any]:
 
 @mcp.tool
 def edit_file(
-    path: str,
-    old_text: Optional[str] = None,
-    new_text: Optional[str] = None,
-    old_content: Optional[str] = None,
-    new_content: Optional[str] = None,
-    target_content: Optional[str] = None,
-    replacement_content: Optional[str] = None,
+    target_file_path: str,
+    exact_text_to_replace: str,
+    new_text_content: str,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """
     Replace text in a file.
     
-    Arguments:
-        path: Path to the file.
-        old_text / old_content / target_content: The exact text to find and replace.
-        new_text / new_content / replacement_content: The new text to insert.
+    REQUIRED: 'target_file_path' is the path to the file.
+    REQUIRED: 'exact_text_to_replace' is the EXACT block of text to find.
+    REQUIRED: 'new_text_content' is the replacement text.
     """
-    # Resolve aliases
-    actual_old = old_text or old_content or target_content
-    actual_new = new_text or new_content or replacement_content
+    # Map to internal logic
+    path = target_file_path
+    old_text = exact_text_to_replace
+    new_text = new_text_content
 
-    if actual_old is None:
-        raise ValueError("Missing required argument: 'old_text' (or 'old_content'/'target_content')")
-    if actual_new is None:
-        raise ValueError("Missing required argument: 'new_text' (or 'new_content'/'replacement_content')")
-        
-    old_text = actual_old
-    new_text = actual_new
+    if not path:
+        raise ValueError("Missing required argument: 'target_file_path'")
 
     if old_text == "":
         raise ValueError("old_text cannot be empty")
@@ -553,7 +543,7 @@ def edit_file(
             "applied": False,
         }
 
-    write_file(path=path, content=updated, overwrite=True)
+    write_file(target_file_path=path, content=updated, overwrite=True)
     return {
         "ok": True,
         "path": _to_relative_display(target),
@@ -564,15 +554,15 @@ def edit_file(
 
 
 @mcp.tool
-def move_file(source: str, destination: str, overwrite: bool = False) -> dict[str, Any]:
+def move_file(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
     """Move or rename file/directory within allowed directories."""
-    src = _resolve_user_path(source)
-    dst = _resolve_user_path(destination)
+    src = _resolve_user_path(source_path)
+    dst = _resolve_user_path(destination_path)
 
     if not src.exists():
-        raise FileNotFoundError(f"Source not found: {source}")
+        raise FileNotFoundError(f"Source not found: {source_path}")
     if dst.exists() and not overwrite:
-        raise FileExistsError(f"Destination exists and overwrite=false: {destination}")
+        raise FileExistsError(f"Destination exists and overwrite=false: {destination_path}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and overwrite:
@@ -594,16 +584,15 @@ def move_file(source: str, destination: str, overwrite: bool = False) -> dict[st
 
 
 @mcp.tool
-def delete_path(path: str, recursive: bool = False) -> dict[str, Any]:
+def delete_path(target_path: str, recursive: bool = False) -> dict[str, Any]:
     """
     Delete a file or directory.
-
     Safety:
     - directories require recursive=true
     """
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(target_path)
     if not target.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
+        raise FileNotFoundError(f"Path not found: {target_path}")
 
     if target.is_dir():
         if not recursive:
@@ -618,7 +607,7 @@ def delete_path(path: str, recursive: bool = False) -> dict[str, Any]:
 @mcp.tool
 def search_files(
     pattern: str,
-    path: str = ".",
+    target_path: str = ".",
     exclude_patterns: list[str] | None = None,
     max_results: int = MAX_SEARCH_RESULTS,
 ) -> dict[str, Any]:
@@ -633,9 +622,9 @@ def search_files(
         raise ValueError("max_results must be >= 1")
     max_results = min(max_results, MAX_SEARCH_RESULTS)
 
-    root = _resolve_user_path(path)
+    root = _resolve_user_path(target_path)
     if not root.exists() or not root.is_dir():
-        raise NotADirectoryError(f"Not a directory: {path}")
+        raise NotADirectoryError(f"Not a directory: {target_path}")
 
     excludes = exclude_patterns or []
     matches: list[str] = []
@@ -717,7 +706,7 @@ def server_status() -> dict[str, Any]:
 
 
 @mcp.tool
-def read_media_file_base64(path: str) -> dict[str, Any]:
+def read_media_file_base64(target_file_path: str) -> dict[str, Any]:
     """
     Read binary file and return base64-encoded content.
 
@@ -726,9 +715,9 @@ def read_media_file_base64(path: str) -> dict[str, Any]:
     import base64
     import mimetypes
 
-    file_path = _resolve_user_path(path)
+    file_path = _resolve_user_path(target_file_path)
     if not file_path.exists() or not file_path.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(f"File not found: {target_file_path}")
 
     size = file_path.stat().st_size
     if size > MAX_READ_BYTES:
@@ -748,43 +737,54 @@ def read_media_file_base64(path: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def write_json_file(path: str, data: dict[str, Any], indent: int = 2) -> dict[str, Any]:
+def write_json_file(target_file_path: str, data: dict[str, Any], indent: int = 2) -> dict[str, Any]:
     """Write JSON object to a file using safe atomic write."""
     content = json.dumps(data, ensure_ascii=False, indent=indent) + "\n"
-    return write_file(path=path, content=content, overwrite=True)
+    return write_file(target_file_path=target_file_path, content=content, overwrite=True)
 
 
 @mcp.tool
-def edit_diff(path: str, diff: str) -> str:
+def edit_diff(target_file_path: str, diff: str) -> str:
     """
     Apply a unified diff (patch) to a file.
-    This is the preferred method for editing code in v2.
-    The 'diff' parameter must be a valid unified diff string.
+    REQUIRED: 'target_file_path' must be the path to the file you want to edit.
+    REQUIRED: 'diff' must be a valid unified diff string starting with '---' and '+++'.
+    
+    If this fails, the tool will return the current content of the file to help you fix the hunk context.
     """
     try:
-        full_path = _resolve_user_path(path)
+        if not target_file_path:
+            return "Error: Missing required argument 'target_file_path'"
+        
+        full_path = _resolve_user_path(target_file_path)
         if not full_path.exists():
-            return f"Error: File not found: {path}"
+            return f"Error: File not found: {target_file_path}"
 
         success = DiffEngine.apply_diff(str(full_path), diff)
         if success:
-            return f"Successfully applied diff to {path}"
+            return f"Successfully applied diff to {target_file_path}"
         else:
-            return f"Error: Failed to apply diff to {path}. Ensure the hunk headers and context lines match exactly."
+            # Provide the current content to help the agent self-correct
+            content = full_path.read_text(encoding="utf-8")
+            return (
+                f"Error: Failed to apply diff to {target_file_path}. The hunk context lines or line numbers do not match exactly.\n\n"
+                f"CURRENT FILE CONTENT of {target_file_path} (Use this to fix your diff):\n"
+                f"```\n{content}\n```"
+            )
     except Exception as e:
         return f"Error applying diff: {e}"
 
 
 @mcp.tool
-def create_project(path: str, template: str = "python-basic") -> str:
+def create_project(target_project_path: str, template: str = "python-basic") -> str:
     """
     Create a new project structure at the specified path.
     Supported templates: python-basic, node-basic, fastapi-jwt.
     """
     try:
-        full_path = _resolve_user_path(path)
+        full_path = _resolve_user_path(target_project_path)
         if full_path.exists():
-            return f"Error: Path already exists: {path}"
+            return f"Error: Path already exists: {target_project_path}"
         
         os.makedirs(full_path, exist_ok=True)
         

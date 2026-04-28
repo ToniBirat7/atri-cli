@@ -272,12 +272,12 @@ class RichTUI:
             display = display[:497] + "..."
 
         style = "green" if success else "red"
-        icon = "✓" if success else "✗"
+        status_label = "[OK]" if success else "[ERROR]"
 
         if not self._compact_mode:
             panel = Panel(
                 Text(display, style="white"),
-                title=f"{tool_name}",
+                title=f"{status_label} {tool_name}",
                 title_align="left",
                 border_style=style,
                 box=ROUNDED,
@@ -285,7 +285,7 @@ class RichTUI:
             )
             self.console.print(panel)
         else:
-            self.console.print(f"  [bold {style}]{status}[/] {tool_name}", highlight=False)
+            self.console.print(f"  [bold {style}]{status_label}[/] {tool_name}", highlight=False)
 
     # ─── Assistant response ───────────────────────────────────────────────
 
@@ -397,7 +397,7 @@ class RichTUI:
     def render_error(self, message: str) -> None:
         """Render an error message."""
         if not RICH_AVAILABLE:
-            print(f"  ✗ Error: {message}", file=sys.stderr)
+            print(f"  [ERROR] {message}", file=sys.stderr)
             return
 
         panel = Panel(
@@ -452,26 +452,44 @@ class RichTUI:
         
         for i, step in enumerate(steps, 1):
             table.add_row(f"{i}.", step)
-        
+            
         panel = Panel(
             Group(content, table),
-            title="Proposed Execution Plan",
+            title="Proposed Plan",
             title_align="left",
             border_style="bright_cyan",
             box=ROUNDED,
-            padding=(1, 2),
+            padding=(0, 1),
         )
-        
-        self.console.print()
         self.console.print(panel)
-        self.console.print()
-
+        
         try:
-            resp = input("  Approve plan and proceed? (y/n): ").strip().lower()
+            resp = input("\n  Approve this plan? (y/n): ").strip().lower()
             return resp in {"y", "yes"}
         except (EOFError, KeyboardInterrupt):
             return False
 
+    def render_progress(self, current: int, total: int, description: str = "Progress") -> None:
+        """Render a clean ASCII progress bar."""
+        if not RICH_AVAILABLE:
+            pct = int((current / total) * 100)
+            print(f"  [{current}/{total}] {description} ({pct}%)")
+            return
+
+        percentage = current / total
+        bar_width = 30
+        filled_len = int(bar_width * percentage)
+        bar = "━" * filled_len + "─" * (bar_width - filled_len)
+        
+        text = Text()
+        text.append("  ", style="")
+        text.append(f"{current}/{total}", style="bold bright_white")
+        text.append(" [", style="dim")
+        text.append(bar, style="bright_cyan")
+        text.append("] ", style="dim")
+        text.append(description, style="white")
+        
+        self.console.print(text)
     # ─── Review rendering ─────────────────────────────────────────────────
     
     def render_review_header(self, path: str) -> None:
@@ -573,7 +591,7 @@ class RichTUI:
         """Render doctor diagnostics results."""
         if not RICH_AVAILABLE:
             for c in checks:
-                status = "✓" if c["ok"] else "✗"
+                status = "[OK]" if c["ok"] else "[ERROR]"
                 print(f"  {status} {c['name']} → {c.get('path', '')}")
             return
 
@@ -583,9 +601,9 @@ class RichTUI:
 
         for item in checks:
             if item["ok"]:
-                self.console.print(f"  [bold green]ok[/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold green][OK][/] {item['name']} [dim]{item.get('path', '')}[/]")
             else:
-                self.console.print(f"  [bold red]error[/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold red][ERROR][/] {item['name']} [dim]{item.get('path', '')}[/]")
                 if item.get("error"):
                     self.console.print(f"    [dim red]{item['error']}[/]")
 

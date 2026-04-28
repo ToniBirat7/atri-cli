@@ -176,18 +176,24 @@ class AgentLoop:
             return tool_input
 
         schema = tool.input_schema or {}
+        properties = schema.get("properties", {})
         required = schema.get("required", [])
+        
+        # Strict validation: No unknown fields allowed
+        additional_props = schema.get("additionalProperties", False)
+        if not additional_props:
+            unknown = [key for key in tool_input.keys() if key not in properties]
+            if unknown:
+                valid_keys = ", ".join(properties.keys())
+                raise ValueError(
+                    f"Unexpected fields for tool '{tool_name}': {', '.join(unknown)}. "
+                    f"Valid fields are: {valid_keys}"
+                )
+
         if isinstance(required, list):
             missing = [key for key in required if key not in tool_input]
             if missing:
-                raise ValueError(f"Missing required fields for {tool_name}: {', '.join(missing)}")
-
-        properties = schema.get("properties", {})
-        additional_props = schema.get("additionalProperties", True)
-        if additional_props is False and isinstance(properties, dict):
-            unknown = [key for key in tool_input.keys() if key not in properties]
-            if unknown:
-                raise ValueError(f"Unexpected fields for {tool_name}: {', '.join(unknown)}")
+                raise ValueError(f"Missing required fields for tool '{tool_name}': {', '.join(missing)}")
 
         return tool_input
 
@@ -247,6 +253,20 @@ class AgentLoop:
                 )
 
                 try:
+                    # Context Trimming: Prevent context saturation for smaller models while preserving mission-critical history.
+                    # We keep the system prompt [0], the original user prompt [1], and the last 40 messages.
+                    if len(self.state.messages) > 50:
+                        system_msg = self.state.messages[0]
+                        user_prompt = self.state.messages[1] if len(self.state.messages) > 1 else None
+                        
+                        trimmed = self.state.messages[-40:]
+                        new_messages = [system_msg]
+                        if user_prompt and user_prompt["role"] == "user":
+                             new_messages.append(user_prompt)
+                        
+                        self.state.messages = new_messages + trimmed
+                        logger.info(f"Turn {self.state.turn}: Trimmed context history (History length: {len(self.state.messages)})")
+
                     available_tools = tool_registry.to_openai_format() if self.enable_tool_use else None
 
                     try:
@@ -399,6 +419,15 @@ class AgentLoop:
                     )
 
                     for tool_call in tool_calls:
+                        await self._emit_event(
+                            event_callback,
+                            {
+                                "type": "tool_call_start",
+                                "turn": self.state.turn,
+                                "tool_name": tool_call.tool_name,
+                                "tool_input": tool_call.tool_input,
+                            },
+                        )
                         routed_server = "local-mcp"
                         routed_tool_name = tool_call.tool_name
                         validated_input = tool_call.tool_input
@@ -414,21 +443,11 @@ class AgentLoop:
                                 if isinstance(resolved, (tuple, list)) and len(resolved) >= 2:
                                     routed_server, routed_tool_name = resolved[0], resolved[1]
 
-                            await self._emit_event(
-                                event_callback,
-                                {
-                                    "type": "tool_call_start",
-                                    "turn": self.state.turn,
-                                    "tool_name": tool_call.tool_name,
-                                    "routed_server": routed_server,
-                                    "routed_tool_name": routed_tool_name,
-                                    "tool_input": validated_input,
-                                },
-                            )
+
 
                             # Intercept edit tools for review mode
                             if self.permission_mode == "review" and routed_tool_name in ["edit_diff", "edit_file"]:
-                                file_path = validated_input.get("path")
+                                file_path = validated_input.get("target_file_path")
                                 if file_path and os.path.exists(file_path):
                                     with open(file_path, "r", encoding="utf-8") as f:
                                         before_content = f.read()
@@ -438,8 +457,8 @@ class AgentLoop:
                                         after_content = DiffEngine.get_preview(file_path, validated_input.get("diff", ""))
                                     elif routed_tool_name == "edit_file":
                                         # Simple text replacement for preview
-                                        old_text = validated_input.get("old_text")
-                                        new_text = validated_input.get("new_text")
+                                        old_text = validated_input.get("exact_text_to_replace")
+                                        new_text = validated_input.get("new_text_content")
                                         if old_text and new_text:
                                             after_content = before_content.replace(old_text, new_text)
 
@@ -577,6 +596,17 @@ class AgentLoop:
                                     "error_type": type(e).__name__,
                                 },
                             )
+
+                    # Post-tool execution check for errors to nudge the model
+                    has_tool_errors = any("Error:" in str(msg.get("content", "")) for msg in self.state.messages[-len(tool_calls):])
+                    if has_tool_errors:
+                        error_nudge = (
+                            "One or more of your tool calls returned an 'Error:'. "
+                            "You MUST NOT conclude the task until these errors are fixed. "
+                            "Examine the error messages, check the file content if necessary, and retry with corrected parameters."
+                        )
+                        self.state.messages.append({"role": "user", "content": error_nudge})
+                        logger.info(f"Turn {self.state.turn}: Injected error correction nudge due to tool failure.")
 
                     turn.outcome = TurnOutcome.TOOL_CALLS
                     self.state.turns_history.append(turn)
@@ -733,7 +763,7 @@ class AgentLoop:
             result = await mcp_orchestrator.execute_tool(
                 server_name=routed_server,
                 tool_name=routed_tool_name,
-                tool_input={"path": target_path},
+                tool_input={"target_path": target_path},
                 timeout_seconds=self.tool_timeout_seconds,
                 max_retries=self.max_tool_call_retries,
             )
@@ -937,7 +967,8 @@ class AgentLoop:
             "- Never reveal hidden reasoning, chain-of-thought, or internal scratch work.\n"
             "- If a request is ambiguous, ask one focused clarifying question before acting.\n"
             "- For file edits, destructive actions, or state-changing operations, be careful and prefer reversible steps.\n"
-            "- If a tool fails, report the failure plainly and continue only if another safe path is available.\n"
+            "- If a tool call fails with an 'Error:', you MUST NOT say you are finished. You must attempt to fix the error or explain it clearly.\n"
+            "- IMPORTANT: When using file-editing tools (edit_diff, edit_file), the 'path' parameter is REQUIRED. You must always specify which file you are changing.\n"
             "- Format responses cleanly in Markdown when it improves readability, but avoid unnecessary verbosity."
         )
 

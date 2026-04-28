@@ -27,15 +27,15 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-info()    { echo -e "${CYAN}  ℹ${RESET} $*"; }
-success() { echo -e "${GREEN}  ✓${RESET} $*"; }
-warn()    { echo -e "${RED}  ✗${RESET} $*"; }
-header()  { echo -e "\n${BOLD}${CYAN}  ✦ $*${RESET}\n"; }
+info()    { echo -e "${CYAN}  [INFO]${RESET} $*"; }
+success() { echo -e "${GREEN}  [OK]${RESET} $*"; }
+warn()    { echo -e "${RED}  [ERROR]${RESET} $*"; }
+header()  { echo -e "\n${BOLD}${CYAN}  --- $* ---${RESET}\n"; }
 
 # ─── Banner ────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${CYAN}  ╭──────────────────────────────────────╮${RESET}"
-echo -e "${BOLD}${CYAN}  │  ✦ Atri Code Installer               │${RESET}"
+echo -e "${BOLD}${CYAN}  │  Atri Code Installer                 │${RESET}"
 echo -e "${BOLD}${CYAN}  │  Local AI coding agent                │${RESET}"
 echo -e "${BOLD}${CYAN}  ╰──────────────────────────────────────╯${RESET}"
 echo ""
@@ -202,7 +202,7 @@ atri-cli doctor 2>/dev/null && success "All systems operational" || warn "Some c
 # ─── Summary ───────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${CYAN}  ╭──────────────────────────────────────╮${RESET}"
-echo -e "${BOLD}${CYAN}  │  ✦ Installation Complete!             │${RESET}"
+echo -e "${BOLD}${CYAN}  │  - Installation Complete!             │${RESET}"
 echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
 echo -e "${BOLD}${CYAN}  │  Start Atri Code:                     │${RESET}"
 echo -e "${BOLD}${CYAN}  │    $ atri-cli                         │${RESET}"

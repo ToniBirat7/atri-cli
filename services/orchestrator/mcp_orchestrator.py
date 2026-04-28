@@ -93,6 +93,7 @@ class MCPOrchestrator:
         self._deferred_discovery: Dict[str, bool] = {}  # server_name -> deferred flag
         self._deferred_tools_cache: Dict[str, List[Dict[str, Any]]] = {}  # server_name -> tools
         self._tool_discovery_cache: Dict[str, Dict[str, Any]] = {}  # server_name -> {tools, cached_at}
+        self._tool_schemas: Dict[str, Dict[str, Any]] = {}  # (server_name, tool_name) -> schema
         self._last_discovery_source: Dict[str, str] = {}  # server_name -> cache|fresh
         self._last_refresh_metadata: Dict[str, Dict[str, Any]] = {}  # server_name -> metadata
         self._startup_trace: Dict[str, Any] = {
@@ -385,25 +386,110 @@ class MCPOrchestrator:
                 age_seconds = now - float(cache_entry.get("cached_at", 0.0))
                 if age_seconds <= self.DISCOVERY_CACHE_TTL_SECONDS:
                     self._last_discovery_source[server_name] = "cache"
-                    return list(cache_entry.get("tools", []))
+                    tools = list(cache_entry.get("tools", []))
+                    # Ensure schema lookup is populated even on cache hits
+                    for t in tools:
+                        self._tool_schemas[(server_name, t["name"])] = t["inputSchema"]
+                    return tools
 
         server = self._servers[server_name]
         if server.get("mode") == "inprocess-module":
             module = server["module"]
             tools: list[dict[str, Any]] = []
+            
+            # 1. Try to use native FastMCP/MCP object if available
+            mcp_obj = getattr(module, "mcp", None)
+            if mcp_obj and hasattr(mcp_obj, "list_tools"):
+                try:
+                    # Handle both sync and async list_tools
+                    mcp_tools = mcp_obj.list_tools()
+                    if inspect.isawaitable(mcp_tools):
+                        mcp_tools = await mcp_tools
+                    
+                    for t in mcp_tools:
+                        # Convert to dict if it's a model
+                        t_dict = t.model_dump() if hasattr(t, "model_dump") else (t if isinstance(t, dict) else vars(t))
+                        tools.append({
+                            "name": t_dict.get("name"),
+                            "description": t_dict.get("description", ""),
+                            "inputSchema": t_dict.get("inputSchema", t_dict.get("input_schema", {"type": "object", "properties": {}}))
+                        })
+                    if tools:
+                        # Update schema lookup for coercion
+                        for t in tools:
+                             self._tool_schemas[(server_name, t["name"])] = t["inputSchema"]
+                        
+                        self._tool_discovery_cache[server_name] = {"tools": tools, "cached_at": now}
+                        return tools
+                except Exception as exc:
+                    logger.warning(f"Failed to use native MCP discovery: {exc}")
+
+            # 2. Fallback to manual introspection
             for name, obj in inspect.getmembers(module, inspect.isfunction):
                 if name.startswith("_"):
                     continue
+                
+                # Filter for tools: check for common MCP tool markers or specific required names
+                is_tool = (
+                    getattr(obj, "is_mcp_tool", False) or 
+                    hasattr(obj, "_mcp_tool") or
+                    name in [
+                        "set_allowed_directory", "list_directory", "read_file", "write_file", 
+                        "edit_file", "move_file", "create_directory", "delete_file", 
+                        "search_files", "grep_search", "get_repo_map", "propose_plan",
+                        "list_allowed_directories", "read_media_file_base64", "get_environment_info",
+                        "fetch_url", "search_web", "execute_command"
+                    ]
+                )
+                if not is_tool:
+                    continue
+                
+                # Introspect signature
+                sig = inspect.signature(obj)
+                properties = {}
+                required = []
+                
+                type_map = {
+                    str: "string",
+                    int: "integer",
+                    float: "number",
+                    bool: "boolean",
+                    list: "array",
+                    dict: "object",
+                }
+
+                for param_name, param in sig.parameters.items():
+                    if param_name == "self":
+                        continue
+                    
+                    param_type = "string" # Default
+                    if param.annotation in type_map:
+                        param_type = type_map[param.annotation]
+                    
+                    properties[param_name] = {
+                        "type": param_type,
+                        "description": f"Parameter: {param_name}"
+                    }
+                    
+                    if param.default is inspect.Parameter.empty:
+                        required.append(param_name)
+
                 tools.append(
                     {
                         "name": name,
                         "description": (obj.__doc__ or "").strip(),
                         "inputSchema": {
                             "type": "object",
-                            "properties": {},
+                            "properties": properties,
+                            "required": required,
                         },
                     }
                 )
+            
+            # Update schema lookup for coercion
+            for t in tools:
+                 self._tool_schemas[(server_name, t["name"])] = t["inputSchema"]
+
             self._tool_discovery_cache[server_name] = {
                 "tools": tools,
                 "cached_at": now,
@@ -450,6 +536,23 @@ class MCPOrchestrator:
             raise MCPServerNotInitializedError(f"Server {server_name} not initialized")
 
         logger.info(f"Executing {server_name}.{tool_name}({tool_input})")
+
+        # Coerce types based on schema
+        schema = self._tool_schemas.get((server_name, tool_name))
+        if schema and schema.get("type") == "object":
+            props = schema.get("properties", {})
+            for key, val in list(tool_input.items()):
+                if key in props:
+                    prop_type = props[key].get("type")
+                    if prop_type == "integer" and isinstance(val, str):
+                        try: tool_input[key] = int(val)
+                        except: pass
+                    elif prop_type == "number" and isinstance(val, str):
+                        try: tool_input[key] = float(val)
+                        except: pass
+                    elif prop_type == "boolean" and isinstance(val, str):
+                        if val.lower() in ("true", "yes", "1"): tool_input[key] = True
+                        elif val.lower() in ("false", "no", "0"): tool_input[key] = False
 
         server = self._servers[server_name]
         if server.get("mode") == "inprocess-module":

@@ -77,7 +77,7 @@ dev-up: env ## Start all services (llama + orchestrator + frontend)
 	@echo "$(BLUE)3. Starting frontend on port $(FRONTEND_PORT)$(NC)"
 	@(cd apps/frontend && npm run dev > ../../frontend.log 2>&1 &)
 	@sleep 3
-	@echo "$(GREEN)✓ All services started!$(NC)"
+	@echo "$(GREEN)[OK] All services started!$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Service URLs:$(NC)"
 	@echo "  llama.cpp:      http://127.0.0.1:$(LLAMA_PORT)"
@@ -95,7 +95,7 @@ dev-down: ## Stop all services
 	@lsof -ti tcp:$(ORCHESTRATOR_PORT) | xargs -r kill || true
 	@lsof -ti tcp:$(FRONTEND_PORT) | xargs -r kill || true
 	@sleep 1
-	@echo "$(GREEN)✓ Services stopped$(NC)"
+	@echo "$(GREEN)[OK] Services stopped$(NC)"
 
 logs: ## Tail logs from all services
 	@echo "$(BLUE)Tailing service logs (Ctrl+C to exit)...$(NC)"
@@ -140,13 +140,13 @@ install: ## Install all dependencies
 	@cd apps/frontend && npm install
 	@echo "$(YELLOW)2. Installing orchestrator dependencies...$(NC)"
 	@cd services/orchestrator && \
-		python -m venv .venv && \
+		/usr/bin/python3 -m venv .venv && \
 		. .venv/bin/activate && \
 		python -m pip install --upgrade pip && \
 		python -m pip install -r requirements.txt
 	@echo "$(YELLOW)3. Installing MCP service dependencies...$(NC)"
 	@cd services/mcp && pip install -r requirements.txt 2>/dev/null || echo "$(YELLOW)   (No requirements.txt, FastMCP assumed installed)$(NC)"
-	@echo "$(GREEN)✓ Dependencies installed$(NC)"
+	@echo "$(GREEN)[OK] Dependencies installed$(NC)"
 
 env: ## Create .env files with defaults
 	@if [ ! -f "services/orchestrator/.env" ]; then \
@@ -179,7 +179,7 @@ env: ## Create .env files with defaults
 			"LOG_LEVEL=INFO" \
 			"ENABLE_OBSERVABILITY=true" > services/orchestrator/.env; \
 	fi
-	@echo "$(GREEN)✓ .env files ready$(NC)"
+	@echo "$(GREEN)[OK] .env files ready$(NC)"
 
 # ===== Testing & Health Checks =====
 
@@ -187,13 +187,13 @@ health: ## Check service health
 	@echo "$(BLUE)Checking service health...$(NC)"
 	@echo ""
 	@echo "$(YELLOW)LLM (llama.cpp)$(NC)"
-	@curl -s http://127.0.0.1:$(LLAMA_PORT)/v1/models -H "Authorization: Bearer secret" | jq '.data[0].id // "No models"' || echo "  $(RED)✗ Not running$(NC)"
+	@curl -s http://127.0.0.1:$(LLAMA_PORT)/v1/models -H "Authorization: Bearer secret" | jq '.data[0].id // "No models"' || echo "  $(RED)[ERROR] Not running$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Orchestrator$(NC)"
-	@curl -s http://127.0.0.1:$(ORCHESTRATOR_PORT)/health | jq '.status' || echo "  $(RED)✗ Not running$(NC)"
+	@curl -s http://127.0.0.1:$(ORCHESTRATOR_PORT)/health | jq '.status' || echo "  $(RED)[ERROR] Not running$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Frontend$(NC)"
-	@curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$(FRONTEND_PORT) && echo "  $(GREEN)✓ Running$(NC)" || echo "  $(RED)✗ Not running$(NC)"
+	@curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$(FRONTEND_PORT) && echo "  $(GREEN)[OK] Running$(NC)" || echo "  $(RED)[ERROR] Not running$(NC)"
 
 test: ## Run test suite (Phase 3+)
 	@echo "$(BLUE)Running tests...$(NC)"
@@ -218,7 +218,7 @@ build: ## Build for production (Phase 9+)
 			exit 1; \
 		fi && \
 		.venv/bin/python -m pip install -r requirements.txt --upgrade
-	@echo "$(GREEN)✓ Build complete$(NC)"
+	@echo "$(GREEN)[OK] Build complete$(NC)"
 
 # ===== Cleanup =====
 
@@ -229,12 +229,12 @@ clean: dev-down ## Clean build artifacts and temporary files
 	@rm -rf apps/frontend/.next
 	@rm -rf apps/frontend/node_modules
 	@rm -rf services/orchestrator/__pycache__ services/orchestrator/.pytest_cache
-	@echo "$(GREEN)✓ Cleanup complete$(NC)"
+	@echo "$(GREEN)[OK] Cleanup complete$(NC)"
 
 llama-build-gpu: ## Rebuild llama.cpp with CUDA support for NVIDIA GPUs
 	@echo "$(BLUE)Configuring llama.cpp with CUDA backend...$(NC)"
 	@cd runtime/llm/llama.cpp && \
-		cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$(LLAMA_CUDA_ARCH) && \
+		cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$(LLAMA_CUDA_ARCH) -DLLAMA_BUILD_TESTS=OFF && \
 		cmake --build build --config Release -j $$(nproc) --target llama-server llama-cli
 
 # ===== Internal Targets =====
