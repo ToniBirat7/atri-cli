@@ -159,9 +159,7 @@ install: ## Install all dependencies
 	@echo "$(YELLOW)4. Installing CLI package...$(NC)"
 	@services/orchestrator/.venv/bin/python -m pip install -e apps/cli
 	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri" "$$HOME/.local/bin/atri"
-	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri-cli" "$$HOME/.local/bin/atri-cli"
 	@echo "$(GREEN)[OK] Dependencies installed and 'atri' command symlinked$(NC)"
-
 install-cli: ## Install only the atri command globally (into venv)
 	@services/orchestrator/.venv/bin/python -m pip install apps/cli
 	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri" "$$HOME/.local/bin/atri"

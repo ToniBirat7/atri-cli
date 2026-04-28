@@ -126,10 +126,6 @@ def _install_cli_launchers(repo_dir: Path) -> None:
         print(f"[local-up] Warning: pip install failed ({e}), falling back to manual launcher")
         _write_cli_launcher(user_bin / PRIMARY_LAUNCHER, repo_dir)
 
-    # Create compatibility aliases (manual shell scripts for these)
-    _write_compat_launcher(user_bin / COMPAT_LAUNCHER, user_bin / PRIMARY_LAUNCHER)
-    _write_compat_launcher(user_bin / ALIAS_LAUNCHER, user_bin / PRIMARY_LAUNCHER)
-
     path_entries = os.environ.get("PATH", "").split(":")
     if str(user_bin) not in path_entries:
         print("[local-up] Installed launchers to ~/.local/bin, but it is not in PATH.")
