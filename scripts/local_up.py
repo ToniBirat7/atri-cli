@@ -31,8 +31,9 @@ MODEL_DOWNLOAD_URL = (
     "gemma-4-E2B-it-Q4_K_M.gguf?download=true"
 )
 
-PRIMARY_LAUNCHER = "atri-cli"
-COMPAT_LAUNCHER = "tarbar"
+PRIMARY_LAUNCHER = "atri"
+COMPAT_LAUNCHER = "atri-cli"
+ALIAS_LAUNCHER = "tarbar"
 
 
 def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -99,23 +100,43 @@ exec {str(primary_path)!r} "$@"
 
 def _install_cli_launchers(repo_dir: Path) -> None:
     user_bin = Path.home() / ".local/bin"
-    primary_global = user_bin / PRIMARY_LAUNCHER
-    compat_global = user_bin / COMPAT_LAUNCHER
-    primary_repo = repo_dir / PRIMARY_LAUNCHER
-    compat_repo = repo_dir / COMPAT_LAUNCHER
+    user_bin.mkdir(parents=True, exist_ok=True)
+    
+    py = _python_bin(repo_dir)
+    print(f"[local-up] Installing CLI package via pip ({py})...")
+    
+    # Install the CLI package in the venv
+    try:
+        _run([str(py), "-m", "pip", "install", "-e", str(repo_dir / "apps/cli")], cwd=repo_dir)
+        
+        # Symlink the resulting entry point to ~/.local/bin
+        venv_bin = py.parent / PRIMARY_LAUNCHER
+        target_bin = user_bin / PRIMARY_LAUNCHER
+        
+        if venv_bin.exists():
+            if target_bin.exists() or target_bin.is_symlink():
+                target_bin.unlink()
+            target_bin.symlink_to(venv_bin)
+            print(f"[local-up] Symlinked global command: {target_bin} -> {venv_bin}")
+        else:
+            print(f"[local-up] Warning: venv entry point not found at {venv_bin}")
+            _write_cli_launcher(target_bin, repo_dir)
+            
+    except Exception as e:
+        print(f"[local-up] Warning: pip install failed ({e}), falling back to manual launcher")
+        _write_cli_launcher(user_bin / PRIMARY_LAUNCHER, repo_dir)
 
-    _write_cli_launcher(primary_global, repo_dir)
-    _write_compat_launcher(compat_global, primary_global)
-    _write_cli_launcher(primary_repo, repo_dir)
-    _write_compat_launcher(compat_repo, primary_repo)
+    # Create compatibility aliases (manual shell scripts for these)
+    _write_compat_launcher(user_bin / COMPAT_LAUNCHER, user_bin / PRIMARY_LAUNCHER)
+    _write_compat_launcher(user_bin / ALIAS_LAUNCHER, user_bin / PRIMARY_LAUNCHER)
 
     path_entries = os.environ.get("PATH", "").split(":")
     if str(user_bin) not in path_entries:
-        print("[local-up] Added launchers to ~/.local/bin, but it is not in PATH.")
+        print("[local-up] Installed launchers to ~/.local/bin, but it is not in PATH.")
         print("[local-up] Run: export PATH=\"$HOME/.local/bin:$PATH\"")
 
-    print(f"[local-up] CLI launcher ready: {primary_global}")
-    print("[local-up] Start TUI with: atri-cli")
+    print(f"[local-up] CLI launcher ready: {user_bin / PRIMARY_LAUNCHER}")
+    print(f"[local-up] Start TUI with: {PRIMARY_LAUNCHER}")
 
 
 def _llama_server_bin(repo_dir: Path) -> Path:

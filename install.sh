@@ -188,16 +188,16 @@ fi
 # ─── Verification ──────────────────────────────────────────────────────────
 header "Verifying installation"
 
-if command -v atri-cli &>/dev/null; then
-    success "atri-cli is available at $(command -v atri-cli)"
+if command -v atri &>/dev/null; then
+    success "atri is available at $(command -v atri)"
 else
-    warn "atri-cli not found in PATH"
+    warn "atri not found in PATH"
     info "Try: export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
 # Run doctor check
 echo ""
-atri-cli doctor 2>/dev/null && success "All systems operational" || warn "Some checks failed — run 'atri-cli doctor' for details"
+atri doctor 2>/dev/null && success "All systems operational" || warn "Some checks failed — run 'atri doctor' for details"
 
 # ─── Summary ───────────────────────────────────────────────────────────────
 echo ""
@@ -205,12 +205,12 @@ echo -e "${BOLD}${CYAN}  ╭─────────────────�
 echo -e "${BOLD}${CYAN}  │  - Installation Complete!             │${RESET}"
 echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
 echo -e "${BOLD}${CYAN}  │  Start Atri Code:                     │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri-cli                         │${RESET}"
+echo -e "${BOLD}${CYAN}  │    $ atri                             │${RESET}"
 echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
 echo -e "${BOLD}${CYAN}  │  One-shot mode:                       │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri-cli \"your prompt here\"      │${RESET}"
+echo -e "${BOLD}${CYAN}  │    $ atri \"your prompt here\"          │${RESET}"
 echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
 echo -e "${BOLD}${CYAN}  │  Diagnostics:                         │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri-cli doctor                  │${RESET}"
+echo -e "${BOLD}${CYAN}  │    $ atri doctor                      │${RESET}"
 echo -e "${BOLD}${CYAN}  ╰──────────────────────────────────────╯${RESET}"
 echo ""

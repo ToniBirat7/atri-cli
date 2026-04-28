@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atri-code"
+version = "1.0.0"
+description = "Atri Code: Local AI agentic coding infrastructure"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt_toolkit>=3.0.43",
+    "rich>=14.0.0"
+]
+
+[project.scripts]
+atri = "atri_cli.main:main"
+
+[tool.setuptools]
+packages = ["atri_cli"]
+package-dir = {"" = "."}

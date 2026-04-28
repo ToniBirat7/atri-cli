@@ -33,6 +33,10 @@ help: ## Show this help message
 	@echo "  make dev-down            Stop all services"
 	@echo "  make logs                View logs from all services"
 	@echo ""
+	@echo "$(YELLOW)CLI Interface:$(NC)"
+	@echo "  make atri                Open the Atri Code interactive TUI"
+	@echo "  make doctor              Run system diagnostics"
+	@echo ""
 	@echo "$(YELLOW)Individual Services:$(NC)"
 	@echo "  make llama               Start llama.cpp server"
 	@echo "  make llama-build-gpu     Rebuild llama.cpp with CUDA support"
@@ -128,6 +132,12 @@ mcp: ## Start MCP server (STDIO) for testing
 	@echo "$(GREEN)Starting MCP server...$(NC)"
 	@cd services/mcp && fastmcp run main.py:mcp
 
+atri: ## Open the Atri Code interactive TUI
+	@./atri-cli
+
+doctor: ## Run system diagnostics
+	@./atri-cli doctor
+
 frontend: ## Start frontend dev server
 	@echo "$(GREEN)Starting frontend...$(NC)"
 	@cd apps/frontend && npm run dev
@@ -146,7 +156,16 @@ install: ## Install all dependencies
 		python -m pip install -r requirements.txt
 	@echo "$(YELLOW)3. Installing MCP service dependencies...$(NC)"
 	@cd services/mcp && pip install -r requirements.txt 2>/dev/null || echo "$(YELLOW)   (No requirements.txt, FastMCP assumed installed)$(NC)"
-	@echo "$(GREEN)[OK] Dependencies installed$(NC)"
+	@echo "$(YELLOW)4. Installing CLI package...$(NC)"
+	@services/orchestrator/.venv/bin/python -m pip install -e apps/cli
+	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri" "$$HOME/.local/bin/atri"
+	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri-cli" "$$HOME/.local/bin/atri-cli"
+	@echo "$(GREEN)[OK] Dependencies installed and 'atri' command symlinked$(NC)"
+
+install-cli: ## Install only the atri command globally (into venv)
+	@services/orchestrator/.venv/bin/python -m pip install apps/cli
+	@ln -sf "$(CURDIR)/services/orchestrator/.venv/bin/atri" "$$HOME/.local/bin/atri"
+	@echo "$(GREEN)[OK] 'atri' command installed. Try running: atri --help$(NC)"
 
 env: ## Create .env files with defaults
 	@if [ ! -f "services/orchestrator/.env" ]; then \
