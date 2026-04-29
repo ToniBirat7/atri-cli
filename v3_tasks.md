@@ -1,7 +1,7 @@
 # v3 Active Task Tracker
 
 ## 🟢 Phase 1: The "Battle of the Brains" (In Progress)
-- [ ] **Research model templates** for Qwen 2.5, Llama 3.2, and Gemma 4.
+- [x] **Research model templates** for Qwen 2.5, Llama 3.2, and Gemma 4.
 - [ ] **Create benchmark scripts** to test "Search-Replace" block compliance.
 - [ ] **Execute Benchmark 1**: Gemma 4 e2b (Baseline).
 - [ ] **Execute Benchmark 2**: Gemma 4 E4B.
