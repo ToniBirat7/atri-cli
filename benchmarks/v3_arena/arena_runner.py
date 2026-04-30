@@ -125,15 +125,23 @@ def run_task(task: dict) -> dict:
         stdout = result.stdout.strip()
         exit_code = result.returncode
 
-        # Parse JSON telemetry
+        # Parse JSON telemetry — the JSON result is always the last line
         telemetry = {}
         response_text = ""
         try:
-            data = json.loads(stdout)
+            # Try last line first (most reliable)
+            last_line = stdout.split("\n")[-1].strip()
+            data = json.loads(last_line)
             telemetry = data.get("telemetry", {})
             response_text = data.get("response", "")
-        except json.JSONDecodeError:
-            response_text = stdout
+        except (json.JSONDecodeError, IndexError):
+            # Fallback: try the whole output
+            try:
+                data = json.loads(stdout)
+                telemetry = data.get("telemetry", {})
+                response_text = data.get("response", "")
+            except json.JSONDecodeError:
+                response_text = stdout
 
     except subprocess.TimeoutExpired:
         return {
