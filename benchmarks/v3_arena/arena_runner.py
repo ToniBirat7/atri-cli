@@ -29,7 +29,7 @@ TASK_FILE       = PROJECT_ROOT / "benchmarks/v3_arena/tasks/tasks.json"
 ATRI_BIN        = "/home/tonibirat/.local/bin/atri"
 CANONICAL_MODEL = "gemma-4-e2b-it-Q4_K_M.gguf"
 MODELS_DIR      = PROJECT_ROOT / "models"
-TASK_TIMEOUT    = 120  # 2 minutes per task
+TASK_TIMEOUT    = 300  # 5 minutes per task (handles VRAM offloading delays)
 
 
 def stop_services():
@@ -267,8 +267,24 @@ def run_benchmark():
             continue
 
         # 3. Run each task
+        completed_task_ids = set()
         passed = 0
+        if rfile.exists():
+            with open(rfile, "r") as rf:
+                for line in rf:
+                    try:
+                        data = json.loads(line)
+                        completed_task_ids.add(data["task_id"])
+                        if data.get("success"):
+                            passed += 1
+                    except Exception:
+                        pass
+
         for i, task in enumerate(tasks, 1):
+            if task["id"] in completed_task_ids:
+                print(f"  [{i}/{total}] {task['id']:12s} {task['category']:12s} (Skipped)")
+                continue
+
             # Reset project state
             reset_nebula()
 
