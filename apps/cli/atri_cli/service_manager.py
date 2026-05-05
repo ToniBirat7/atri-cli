@@ -150,10 +150,10 @@ class ServiceManager:
         return None
 
     def _find_model(self) -> Optional[Path]:
-        """Find the GGUF model file."""
+        """Find the canonical GGUF model file."""
         candidates = [
             self.repo_root / "models/gemma-4-e2b-it-Q4_K_M.gguf",
-            self.repo_root / "models/gemma-4-E2B-it-Q4_K_M.gguf",
+            self.repo_root / "models/gemma-4-E4B-it-Q4_K_M.gguf",
         ]
         for c in candidates:
             if c.exists():

@@ -481,12 +481,22 @@ def _build_payload(
     message: str,
     conversation_id: Optional[str],
     allowed_directory: Optional[str],
+    *,
+    max_turns: Optional[int] = None,
+    permission_mode: Optional[str] = None,
+    prompt_profile: Optional[str] = None,
 ) -> dict:
     payload = {"message": message}
     if conversation_id:
         payload["conversation_id"] = conversation_id
     if allowed_directory:
         payload["allowed_directory"] = allowed_directory
+    if max_turns is not None:
+        payload["max_turns"] = max_turns
+    if permission_mode and permission_mode != "default":
+        payload["permission_mode"] = permission_mode
+    if prompt_profile:
+        payload["prompt_profile"] = prompt_profile
     return payload
 
 
@@ -882,8 +892,16 @@ def _run_print_mode(
     telemetry: Optional[SessionTelemetry] = None,
     output_format: str = "text",
     stream_json: bool = False,
+    max_turns: Optional[int] = None,
+    permission_mode: Optional[str] = None,
+    prompt_profile: Optional[str] = None,
 ) -> None:
-    payload = _build_payload(prompt, conversation_id, allowed_directory)
+    payload = _build_payload(
+        prompt, conversation_id, allowed_directory,
+        max_turns=max_turns,
+        permission_mode=permission_mode,
+        prompt_profile=prompt_profile,
+    )
     _print_stream_response(
         client,
         payload,
@@ -1724,6 +1742,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum number of turns allowed in this session",
     )
     parser.add_argument(
+        "--prompt-profile",
+        default=None,
+        help="Prompt profile to use (e.g., gemma-agent-v3, qwen-agent-v3, llama-agent-v3)",
+    )
+    parser.add_argument(
         "--max-budget-usd",
         type=float,
         default=None,
@@ -1968,6 +1991,9 @@ def main() -> None:
                 telemetry=telemetry,
                 output_format=output_format,
                 stream_json=args.stream_json,
+                max_turns=args.max_turns,
+                permission_mode=args.permission_mode,
+                prompt_profile=getattr(args, 'prompt_profile', None),
             )
             if args.telemetry:
                 if output_format != "json":
@@ -1984,6 +2010,9 @@ def main() -> None:
                 telemetry=telemetry,
                 output_format=output_format,
                 stream_json=args.stream_json,
+                max_turns=args.max_turns,
+                permission_mode=args.permission_mode,
+                prompt_profile=getattr(args, 'prompt_profile', None),
             )
             if args.telemetry:
                 if output_format != "json":

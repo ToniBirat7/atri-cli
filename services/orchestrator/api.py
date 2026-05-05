@@ -411,7 +411,9 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
 
     selected_profile = config.prompt_policy.default_profile
     if request.prompt_profile:
-        if not is_admin:
+        # Allow profile override when no admin key is configured (local/benchmark mode)
+        admin_key_configured = bool(getattr(config.security, "admin_api_key", None))
+        if not is_admin and admin_key_configured:
             raise HTTPException(status_code=403, detail="Prompt profile override requires admin authentication")
         selected_profile = request.prompt_profile
 

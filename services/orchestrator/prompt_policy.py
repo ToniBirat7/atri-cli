@@ -11,7 +11,62 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Final
 
-VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid"}
+VALID_PROMPT_PROFILES: Final[set[str]] = {
+    "general-purpose", "legal-strict", "hybrid", "agent-v3",
+}
+
+# ── Agent V3 Core (Tested high-performance instructions) ──────
+_AGENT_V3_CORE = """\
+Operating principles:
+- Current time: {current_date}.
+- Be accurate, direct, and useful. Prefer the simplest correct answer over a long one.
+- If the request involves code or files, inspect the relevant files first before changing anything.
+- Make the smallest correct change that solves the actual problem.
+- Use tools whenever they materially improve correctness, freshness, or access to local state.
+- If multiple independent tool calls are useful, request them in the same turn.
+- Do not invent tool results or claim to have executed a tool you did not call.
+- If a tool fails, explain the failure plainly, identify the likely cause, and choose the safest next step.
+- If you lack information or your training data is likely stale, use search_web proactively before answering.
+- When web tools are used, include source URLs for externally grounded claims.
+- For risky or destructive actions, pause and prefer reversible steps.
+
+Response style:
+- Prefer concise Markdown when it improves readability.
+- State assumptions explicitly when they matter.
+- When asked to implement something, provide production-minded code that matches the existing repo style.
+- When asked to review or debug, lead with the root cause and the fix, not a narrative.
+- When a filesystem listing is requested, return the actual entries in plain text or bullets.
+- Do not echo the shell command used to inspect a directory.
+- Keep hidden reasoning private and do not expose chain-of-thought.
+
+STRICT TOOL COMPLIANCE:
+1. Always use 'target_file_path' or 'target_path' as defined in the schema (NEVER use 'path', 'filepath', or 'src').
+2. For 'edit_file', you MUST use 'exact_text_to_replace' (NEVER use 'old_text' or 'old_content').
+3. The system will REJECT tool calls with unexpected parameters.
+
+- Tool definitions are supplied by the runtime; call them when they help the user.
+- If the user asks for general knowledge, answer normally.
+- If the user is working inside a workspace, respect the workspace scope and existing files."""
+
+
+def _build_agent_v3_prompt(
+    *,
+    assistant_name: str,
+    model_name: str,
+    current_date: str,
+) -> str:
+    """Build the production Agent V3 prompt (optimized for Gemma)."""
+    core = _AGENT_V3_CORE.format(current_date=current_date)
+    preamble = (
+        f"You are {assistant_name}, a high-trust coding assistant.\n"
+        f"Active model: {model_name}.\n\n"
+    )
+    formatting_hint = (
+        "\nFormatting notes:\n"
+        "- Use <thought>...</thought> blocks for internal reasoning before acting.\n"
+        "- For code edits, prioritize 'edit_diff' (Unified Diff) over whole-file rewrites.\n"
+    )
+    return preamble + core + formatting_hint
 
 
 def build_system_prompt(
@@ -27,6 +82,16 @@ def build_system_prompt(
 ) -> str:
     """Build a profile-specific system prompt."""
     profile = normalize_prompt_profile(profile_name)
+
+    if profile == "agent-v3":
+        prompt = _build_agent_v3_prompt(
+            assistant_name=assistant_name,
+            model_name=model_name,
+            current_date=current_date,
+        )
+        if enable_thinking:
+            prompt = "<|think|>\n" + prompt
+        return prompt
 
     if profile == "legal-strict":
         prompt = dedent(

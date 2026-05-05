@@ -1,100 +1,64 @@
-# Atri Code
+# 🌌 Project Nebula
 
-Atri Code is a high-performance, local-first agentic coding infrastructure. It combines state-of-the-art LLM inference through `llama.cpp` with a robust Model Context Protocol (MCP) orchestration layer to provide a secure, private, and extremely fast agentic coding experience directly in your terminal.
+**Project Nebula** is a modern, real-time chat application designed for seamless and instantaneous communication. Built as a full-stack solution, it leverages the power of **FastAPI** for a high-performance backend and **React** for an intuitive, responsive frontend.
 
-## Core Architecture
+## ✨ Features
 
-Atri Code is designed as a decoupled, multi-service system to ensure sub-second responsiveness and reliable tool execution.
+*   **Real-time Messaging:** Experience instant message delivery with WebSocket integration.
+*   **Responsive UI:** A clean and modern user interface built with React.
+*   **High Performance:** Powered by FastAPI, ensuring low latency and scalability for high-traffic chat scenarios.
+*   **[Add specific features here, e.g., User Authentication, Group Chats, etc.]**
 
-```mermaid
-graph TD
-    User([User Terminal]) --> CLI[Atri CLI - TUI/Interactive]
-    CLI --> Manager[Service Manager]
-    Manager --> Daemon[Background Orchestrator Daemon]
-    Daemon --> Adapter[LLM Adapter]
-    Adapter --> Llama[llama-server - Inference]
-    Daemon --> MCP[MCP Tool Registry]
-    MCP --> FS[Filesystem Tools]
-    MCP --> Search[Search Adapter - Tavily]
-    MCP --> Shell[Shell/Command Tools]
-    Daemon --> DB[(Internal Session DB)]
-```
+## 🛠️ Tech Stack
 
-### 1. Orchestration Layer (The Brain)
-The core reasoning engine implements an advanced **multi-turn ReAct loop**. It manages conversation state, persists session history in a hardened SQLite database, and handles the "Chain of Thought" required to solve complex coding tasks. 
-- **Deterministic Fallbacks**: Integrated heuristics to handle ambiguous LLM outputs.
-- **State Persistence**: Conversations are stored in `runtime/state/.internal.db` with strict `0700` permissions.
+*   **Backend:** FastAPI (Python)
+*   **Frontend:** React (JavaScript/TypeScript)
+*   **Real-time Communication:** WebSockets (e.g., FastAPI WebSockets)
+*   **Database:** [Specify your database here, e.g., PostgreSQL, MongoDB]
 
-### 2. Inference Engine (The Muscle)
-Powered by a customized build of `llama.cpp`, Atri Code leverages your local hardware (NVIDIA GPUs, Apple Silicon, or high-core CPUs) to run quantized GGUF models. 
-- **Default Model**: Gemma 4 (Q4_K_M) - Optimized for coding and reasoning.
-- **Context Management**: 16K context window with proactive snippet truncation to maintain high throughput.
+## 🚀 Getting Started
 
-### 3. Model Context Protocol - MCP (The Senses)
-Atri Code follows the Model Context Protocol to interface with your local environment. This abstraction layer ensures that the agent can interact with your filesystem and the web through a unified, secure interface.
-- **Proactive Web Search**: Grounding agent knowledge with real-time data via Tavily integration.
-- **Atomic File Operations**: Safe, verified file writes and edits to prevent workspace corruption.
+### Prerequisites
 
----
+*   Python 3.8+
+*   Node.js and npm/yarn
 
-## Installation
+### Installation
 
-Install Atri Code and all its optimized dependencies with a single command:
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd project-nebula
+    ```
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
-```
+2.  **Backend Setup (FastAPI):**
+    ```bash
+    # Navigate to the backend directory (if applicable)
+    # pip install -r requirements.txt
+    # uvicorn main:app --reload
+    ```
 
-## System Requirements
+3.  **Frontend Setup (React):**
+    ```bash
+    # Navigate to the frontend directory (if applicable)
+    # npm install
+    # npm start
+    ```
 
-| Component | Minimum | Recommended |
-| :--- | :--- | :--- |
-| **GPU** | 4GB VRAM (CUDA/Metal) | 8GB+ VRAM |
-| **RAM** | 8GB | 16GB+ |
-| **Storage** | 10GB (SSD) | 20GB+ (NVMe) |
-| **OS** | Linux (Ubuntu/Arch) / macOS | Linux with NVIDIA GPU |
+### Running the Application
 
----
+To run the full application, you typically need to run both the backend and the frontend concurrently.
 
-## Technical Features
+1.  **Start the Backend Server:**
+    *(Instructions specific to your FastAPI setup)*
 
-### Service Persistence
-Unlike standard CLI tools, Atri Code utilizes a **detached daemon architecture**. Background services (`llama-server` and the orchestrator) remain active after the CLI process terminates. This eliminates model loading latency for subsequent commands, enabling sub-second response times.
+2.  **Start the Frontend Client:**
+    *(Instructions specific to your React setup)*
 
-### Security and Hardening
-- **Bytecode Abstraction**: All Python source code is compiled to `.pyc` during installation to prevent tampering and protect intellectual property.
-- **Data Isolation**: Runtime state, session databases, and logs are kept in a restricted `runtime/` directory inaccessible to other users on the system.
+## 🤝 Contributing
 
-### Advanced Tooling
-- **Search Adapter**: Implements keyword-based re-ranking and snippet optimization to provide the LLM with the most relevant grounding data.
-- **Atomic Edits**: High-fidelity file refactoring using exact-match replacement patterns to ensure code integrity.
+Contributions are what make the Project Nebula community such a great place to learn, collaborate, and innovate. Feel free to fork the repo and submit a pull request!
 
----
+## 📄 License
 
-## Usage
-
-Start an interactive session:
-```bash
-atri-cli
-```
-
-Run a single-shot command:
-```bash
-atri-cli "Refactor the authentication logic in services/orchestrator/auth.py"
-```
-
-Verify system health and background daemons:
-```bash
-atri-cli doctor
-```
-
-Stop background services:
-```bash
-atri-cli stop
-```
-
----
-
-## License
-
-Atri Code is released under the MIT License. See `LICENSE` for details.
+This project is licensed under the [Your License Here] - see the LICENSE file for details.
