@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(make test)",
+      "Bash(make health)",
+      "Bash(make logs)",
+      "Bash(make dev-down)",
+      "Bash(make cli-up)",
+      "Bash(make install)",
+      "Bash(cd services/orchestrator && .venv/bin/python -m pytest*)",
+      "Bash(cd apps/frontend && npm run build*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git status)",
+      "Bash(git branch*)",
+      "Bash(curl -s http://127.0.0.1:8001/health*)",
+      "Bash(curl -s http://127.0.0.1:8000/health*)",
+      "Bash(grep -rn*)",
+      "Bash(find . -name*)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(rm -f models/*.gguf)",
+      "Bash(git push*)",
+      "Bash(make clean)",
+      "Bash(*SECRET*)",
+      "Bash(*PASSWORD*)",
+      "Bash(*API_KEY*)",
+      "Bash(pkill*)",
+      "Bash(kill -9*)"
+    ]
+  }
+}
