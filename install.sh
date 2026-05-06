@@ -1,216 +1,320 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Atri Code — One-command installer
+# Atri Code — Smart one-command installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 #
-# This script:
-#   1. Checks/installs prerequisites (python3, git, cmake)
-#   2. Clones or updates the Atri Code repository
-#   3. Runs the full bootstrap (deps, model download, llama.cpp build, services)
-#   4. Installs the `atri-cli` launcher into ~/.local/bin
-#   5. Verifies everything works with `atri-cli doctor`
+# What it does:
+#   1. Detects OS / architecture / GPU accelerator (CUDA / ROCm / Metal / CPU)
+#   2. Downloads the matching llama-server prebuilt binary (NVIDIA/macOS/CPU)
+#      or falls back to building from source for exotic targets
+#   3. Installs the orchestrator + CLI Python packages into a venv
+#   4. Lazy-fetches the Gemma 4 E2B Q4_K_M model on first run
+#   5. Writes ~/.local/share/atri/ with a clean, minimal footprint
+#   6. Symlinks `atri` into ~/.local/bin/
+#   7. Generates an uninstall script
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ─── Tunables ────────────────────────────────────────────────────────────────
+ATRI_VERSION="${ATRI_VERSION:-latest}"
+ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
+ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
+ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-e2b-it-Q4_K_M.gguf}"
+LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
-INSTALL_DIR="${ATRI_INSTALL_DIR:-$HOME/.local/share/atri-code}"
 BRANCH="${ATRI_BRANCH:-master}"
-BIN_DIR="$HOME/.local/bin"
+
+# Directories inside ATRI_INSTALL_ROOT
+LLAMA_DIR="$ATRI_INSTALL_ROOT/runtime/llama"
+TEMPLATE_DIR="$ATRI_INSTALL_ROOT/runtime/templates"
+MODEL_DIR="$ATRI_INSTALL_ROOT/models"
+VENV_DIR="$ATRI_INSTALL_ROOT/venv"
+SRC_DIR="$ATRI_INSTALL_ROOT/src"
 
 # ─── Colors ────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
+YELLOW='\033[0;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
-info()    { echo -e "${CYAN}  [INFO]${RESET} $*"; }
-success() { echo -e "${GREEN}  [OK]${RESET} $*"; }
-warn()    { echo -e "${RED}  [ERROR]${RESET} $*"; }
-header()  { echo -e "\n${BOLD}${CYAN}  --- $* ---${RESET}\n"; }
+info()    { echo -e "${CYAN}  ▸${RESET} $*"; }
+ok()      { echo -e "${GREEN}  ✓${RESET} $*"; }
+warn()    { echo -e "${YELLOW}  ⚠${RESET} $*"; }
+die()     { echo -e "${RED}  ✗ ERROR:${RESET} $*" >&2; exit 1; }
+header()  { echo -e "\n${BOLD}${CYAN}── $* ──${RESET}"; }
 
 # ─── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}${CYAN}  ╭──────────────────────────────────────╮${RESET}"
-echo -e "${BOLD}${CYAN}  │  Atri Code Installer                 │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Local AI coding agent                │${RESET}"
-echo -e "${BOLD}${CYAN}  ╰──────────────────────────────────────╯${RESET}"
+echo -e "${BOLD}${CYAN}  ╭────────────────────────────────────────╮${RESET}"
+echo -e "${BOLD}${CYAN}  │  Atri Code — Local AI Coding Agent     │${RESET}"
+echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 E2B + llama.cpp    │${RESET}"
+echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 
-# ─── OS Detection ─────────────────────────────────────────────────────────
-detect_os() {
-    case "$(uname -s)" in
-        Linux*)   echo "linux" ;;
-        Darwin*)  echo "macos" ;;
-        MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
-        *)        echo "unknown" ;;
-    esac
+# ─── Cleanup trap (only fires on error) ────────────────────────────────────
+STAGING_DIR=""
+_cleanup() {
+    if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
+        rm -rf "$STAGING_DIR"
+    fi
 }
+trap '_cleanup' ERR EXIT
 
-OS=$(detect_os)
-info "Detected OS: $OS"
+# ─── Helper: require a command ────────────────────────────────────────────
+need() { command -v "$1" &>/dev/null || die "'$1' is required but not found. Install it and retry."; }
 
-# ─── Prerequisite checks ──────────────────────────────────────────────────
-check_command() {
-    if command -v "$1" &>/dev/null; then
-        success "$1 found: $(command -v "$1")"
-        return 0
+# ─── OS / Arch Detection ──────────────────────────────────────────────────
+header "Detecting system"
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)  ARCH_NORM="x64" ;;
+    aarch64|arm64) ARCH_NORM="arm64" ;;
+    *)  ARCH_NORM="$ARCH" ;;
+esac
+
+info "OS: $OS  Arch: $ARCH ($ARCH_NORM)"
+
+# ─── GPU / Accelerator Detection ─────────────────────────────────────────
+ACCEL="cpu"
+COMPUTE_CAP=""
+
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+    ACCEL="metal"
+    ok "Apple Silicon → Metal"
+elif command -v nvidia-smi &>/dev/null; then
+    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.' || true)
+    if [ -n "$CC" ]; then
+        ACCEL="cuda"
+        COMPUTE_CAP="$CC"
+        ok "NVIDIA GPU detected (compute cap $CC) → CUDA"
+    fi
+fi
+
+if [ "$ACCEL" = "cpu" ]; then
+    if lspci 2>/dev/null | grep -qi 'AMD/ATI\|Radeon'; then
+        ACCEL="rocm"
+        ok "AMD GPU detected → ROCm"
+    fi
+fi
+
+[ "$ACCEL" = "cpu" ] && info "No GPU detected → CPU-only mode"
+
+# ─── Pick llama-server prebuilt asset ────────────────────────────────────
+header "Selecting llama-server binary"
+
+LLAMA_ASSET=""
+LLAMA_NEEDS_COMPILE=false
+
+case "$OS-$ARCH_NORM-$ACCEL" in
+    linux-x64-cuda)
+        # CUDA 12 build (covers most modern NVIDIA GPUs)
+        LLAMA_ASSET="llama-*-bin-ubuntu-x64-cuda-12.zip"
+        ;;
+    linux-x64-rocm)
+        # ROCm Ubuntu build
+        LLAMA_ASSET="llama-*-bin-ubuntu-x64-rocm.zip"
+        ;;
+    linux-x64-cpu)
+        LLAMA_ASSET="llama-*-bin-ubuntu-x64.zip"
+        ;;
+    linux-arm64-cpu|linux-arm64-*)
+        LLAMA_NEEDS_COMPILE=true
+        ;;
+    darwin-arm64-metal)
+        LLAMA_ASSET="llama-*-bin-macos-arm64.zip"
+        ;;
+    darwin-x64-*)
+        LLAMA_ASSET="llama-*-bin-macos-x64.zip"
+        ;;
+    *)
+        LLAMA_NEEDS_COMPILE=true
+        ;;
+esac
+
+# ─── Download + extract llama-server ─────────────────────────────────────
+STAGING_DIR=$(mktemp -d)
+mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR" "$MODEL_DIR"
+
+if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET" ]; then
+    info "Downloading llama-server prebuilt ($ACCEL)..."
+    # Use GitHub API to resolve the latest matching asset URL
+    ASSET_URL=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" \
+        | grep "browser_download_url" \
+        | grep -oE 'https://[^"]+' \
+        | grep -E "$(echo "$LLAMA_ASSET" | sed 's/\*/[^/]*/g')" \
+        | head -1 || true)
+
+    if [ -z "$ASSET_URL" ]; then
+        warn "Could not find prebuilt asset matching '$LLAMA_ASSET' — falling back to compile"
+        LLAMA_NEEDS_COMPILE=true
     else
-        warn "$1 not found"
-        return 1
+        info "Downloading: $ASSET_URL"
+        curl -fsSL --progress-bar -o "$STAGING_DIR/llama.zip" "$ASSET_URL"
+        unzip -q "$STAGING_DIR/llama.zip" -d "$STAGING_DIR/llama_extracted"
+        # Copy only what we need: llama-server + shared libs
+        find "$STAGING_DIR/llama_extracted" -name "llama-server" -o -name "llama-server.exe" \
+            | head -1 | xargs -I{} cp {} "$LLAMA_DIR/"
+        find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
+            -o -name "*.dylib" -o -name "ggml*.dll" \) \
+            -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+        rm -rf "$STAGING_DIR/llama.zip" "$STAGING_DIR/llama_extracted"
+        chmod +x "$LLAMA_DIR/llama-server" 2>/dev/null || true
+        ok "llama-server installed from prebuilt"
     fi
-}
-
-install_missing_deps() {
-    local missing=()
-    
-    command -v python3 &>/dev/null || missing+=("python3")
-    command -v git     &>/dev/null || missing+=("git")
-    command -v cmake   &>/dev/null || missing+=("cmake")
-    command -v make    &>/dev/null || missing+=("make")
-    
-    if [ ${#missing[@]} -eq 0 ]; then
-        return 0
-    fi
-    
-    info "Missing: ${missing[*]}"
-    echo ""
-    
-    if [ "$OS" = "linux" ]; then
-        if command -v pacman &>/dev/null; then
-            info "Installing via pacman..."
-            sudo pacman -S --needed --noconfirm "${missing[@]}" 2>/dev/null || true
-        elif command -v apt-get &>/dev/null; then
-            info "Installing via apt..."
-            # Map python3 to python3 + python3-venv
-            local apt_pkgs=()
-            for pkg in "${missing[@]}"; do
-                apt_pkgs+=("$pkg")
-                if [ "$pkg" = "python3" ]; then
-                    apt_pkgs+=("python3-venv" "python3-pip")
-                fi
-            done
-            sudo apt-get update -qq && sudo apt-get install -y -qq "${apt_pkgs[@]}" 2>/dev/null || true
-        elif command -v dnf &>/dev/null; then
-            info "Installing via dnf..."
-            sudo dnf install -y "${missing[@]}" 2>/dev/null || true
-        fi
-    elif [ "$OS" = "macos" ]; then
-        if command -v brew &>/dev/null; then
-            info "Installing via Homebrew..."
-            brew install "${missing[@]}" 2>/dev/null || true
-        else
-            warn "Homebrew not found. Install missing tools manually: ${missing[*]}"
-            exit 1
-        fi
-    fi
-}
-
-header "Checking prerequisites"
-
-check_command python3 || true
-check_command git     || true
-check_command cmake   || true
-
-# Try to install missing deps
-install_missing_deps
-
-# Final verification
-for cmd in python3 git cmake; do
-    if ! command -v "$cmd" &>/dev/null; then
-        warn "Required command '$cmd' is still missing. Please install it manually."
-        exit 1
-    fi
-done
-
-# Check Python version (need >= 3.10)
-PY_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
-    warn "Python 3.10+ required, found $PY_VERSION"
-    exit 1
 fi
-success "Python $PY_VERSION"
 
-# ─── Clone / Update Repository ────────────────────────────────────────────
-header "Setting up Atri Code"
+if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
+    header "Building llama.cpp from source"
+    warn "No prebuilt binary for $OS/$ARCH/$ACCEL — building from source (this takes 5-15 min)"
+    need cmake
+    need make
 
-if [ -d "$INSTALL_DIR/.git" ]; then
-    info "Updating existing installation at $INSTALL_DIR"
-    cd "$INSTALL_DIR"
-    git fetch origin
-    git checkout "$BRANCH"
-    git pull --ff-only origin "$BRANCH" 2>/dev/null || true
-    git submodule update --init --recursive
+    LLAMA_SRC="$STAGING_DIR/llama_src"
+    git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
+    cmake_flags="-DLLAMA_NATIVE=ON"
+    if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
+        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+    elif [ "$ACCEL" = "rocm" ]; then
+        cmake_flags="$cmake_flags -DGGML_HIP=ON"
+    fi
+    cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" $cmake_flags -DLLAMA_BUILD_SERVER=ON \
+        -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
+    cmake --build "$LLAMA_SRC/build" --target llama-server -j"$(nproc)"
+    find "$LLAMA_SRC/build" -name "llama-server" | head -1 | xargs -I{} cp {} "$LLAMA_DIR/"
+    find "$LLAMA_SRC/build" \( -name "libggml*.so*" -o -name "libllama*.so*" \) \
+        -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+    chmod +x "$LLAMA_DIR/llama-server"
+    ok "llama-server built from source"
+fi
+
+# Verify llama-server exists
+[ -f "$LLAMA_DIR/llama-server" ] || die "llama-server binary not found after install"
+
+# ─── Install chat template ─────────────────────────────────────────────────
+header "Installing Gemma 4 chat template"
+
+# The template ships in the source repo; we clone a shallow copy to get it
+if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ]; then
+    ATRI_TEMPLATE_SRC="$STAGING_DIR/atri_src"
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$ATRI_TEMPLATE_SRC" 2>/dev/null || true
+    if [ -f "$ATRI_TEMPLATE_SRC/runtime/templates/gemma4-tooluse.jinja" ]; then
+        cp "$ATRI_TEMPLATE_SRC/runtime/templates/gemma4-tooluse.jinja" "$TEMPLATE_DIR/"
+        ok "Gemma 4 Jinja template installed"
+    fi
+fi
+
+# ─── Install orchestrator + CLI ────────────────────────────────────────────
+header "Installing Atri Code (orchestrator + CLI)"
+
+# Clone/update source
+if [ -d "$SRC_DIR/.git" ]; then
+    info "Updating existing source..."
+    git -C "$SRC_DIR" fetch origin
+    git -C "$SRC_DIR" checkout "$BRANCH"
+    git -C "$SRC_DIR" pull --ff-only origin "$BRANCH" 2>/dev/null || true
 else
-    info "Cloning Atri Code to $INSTALL_DIR"
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --recurse-submodules --single-branch --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    info "Cloning Atri Code source..."
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$SRC_DIR"
 fi
 
-cd "$INSTALL_DIR"
-success "Repository ready at $INSTALL_DIR"
+# Create venv + install packages
+need python3
+python3 -m venv "$VENV_DIR"
+"$VENV_DIR/bin/pip" install -q --upgrade pip
+"$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/services/orchestrator/requirements.txt"
+"$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/apps/cli/requirements.txt" 2>/dev/null || true
 
-# ─── Run Bootstrap ─────────────────────────────────────────────────────────
-header "Running bootstrap (this may take a few minutes)"
-info "Building llama.cpp, downloading model, installing dependencies..."
-echo ""
+# Set up .env if missing
+if [ ! -f "$SRC_DIR/services/orchestrator/.env" ]; then
+    cp "$SRC_DIR/services/orchestrator/.env.example" "$SRC_DIR/services/orchestrator/.env"
+    ok ".env created from template"
+fi
 
-python3 scripts/local_up.py \
-    --repo-dir "$INSTALL_DIR" \
-    --branch "$BRANCH" \
-    --skip-clone \
-    --mode cli
+# Write hardware config
+python3 "$SRC_DIR/scripts/detect_hardware.py" --save \
+    --install-root "$ATRI_INSTALL_ROOT" 2>/dev/null || true
 
-# ─── Ensure PATH ───────────────────────────────────────────────────────────
-header "Finalizing installation"
+ok "Orchestrator + CLI installed"
 
-mkdir -p "$BIN_DIR"
-if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    # Add to shell rc
-    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [ -f "$rc" ]; then
-            if ! grep -q 'atri-code' "$rc" 2>/dev/null; then
-                echo '' >> "$rc"
-                echo '# Atri Code' >> "$rc"
-                echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$rc"
-                info "Added ~/.local/bin to PATH in $(basename "$rc")"
-            fi
+# ─── Create `atri` launcher ────────────────────────────────────────────────
+header "Creating launcher"
+
+mkdir -p "$ATRI_BIN_DIR"
+cat > "$ATRI_BIN_DIR/atri" <<LAUNCHER
+#!/usr/bin/env bash
+# Atri Code launcher — generated by install.sh
+export ATRI_INSTALL_ROOT="$ATRI_INSTALL_ROOT"
+export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
+export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
+export ATRI_MODEL_DIR="$MODEL_DIR"
+export ATRI_SRC_DIR="$SRC_DIR"
+exec "$VENV_DIR/bin/python" "$SRC_DIR/apps/cli/atri_cli/main.py" "\$@"
+LAUNCHER
+chmod +x "$ATRI_BIN_DIR/atri"
+ok "atri launcher → $ATRI_BIN_DIR/atri"
+
+# ─── PATH check ────────────────────────────────────────────────────────────
+SENTINEL="# >>> atri-code installer added >>>"
+if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
+    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [ -f "$RC" ] && ! grep -qF "$SENTINEL" "$RC" 2>/dev/null; then
+            {
+                echo ""
+                echo "$SENTINEL"
+                echo "export PATH=\"$ATRI_BIN_DIR:\$PATH\""
+                echo "# <<< atri-code installer added <<<"
+            } >> "$RC"
+            info "Added $ATRI_BIN_DIR to PATH in $(basename "$RC")"
         fi
     done
-    export PATH="$BIN_DIR:$PATH"
+    export PATH="$ATRI_BIN_DIR:$PATH"
 fi
 
-# ─── Verification ──────────────────────────────────────────────────────────
-header "Verifying installation"
-
-if command -v atri &>/dev/null; then
-    success "atri is available at $(command -v atri)"
-else
-    warn "atri not found in PATH"
-    info "Try: export PATH=\"\$HOME/.local/bin:\$PATH\""
+# ─── Lazy model fetch on first run ────────────────────────────────────────
+# Model is NOT downloaded here to keep installer fast.
+# atri service_manager downloads it on first `atri` invocation.
+FIRST_RUN_MARKER="$MODEL_DIR/.fetch_on_first_run"
+if [ ! -f "$MODEL_DIR/gemma-4-e2b-it-Q4_K_M.gguf" ]; then
+    echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
+    info "Model will be downloaded (~3.1 GB) on first 'atri' run"
 fi
 
-# Run doctor check
-echo ""
-atri doctor 2>/dev/null && success "All systems operational" || warn "Some checks failed — run 'atri doctor' for details"
+# ─── Uninstall script ──────────────────────────────────────────────────────
+cat > "$ATRI_INSTALL_ROOT/uninstall.sh" <<UNINSTALL
+#!/usr/bin/env bash
+# Atri Code uninstaller — removes everything under $ATRI_INSTALL_ROOT
+set -e
+echo "Removing Atri Code..."
+rm -rf "$ATRI_INSTALL_ROOT"
+rm -f  "$ATRI_BIN_DIR/atri"
+# Remove PATH block from shell rc files
+for RC in "\$HOME/.bashrc" "\$HOME/.zshrc" "\$HOME/.profile"; do
+    if [ -f "\$RC" ]; then
+        sed -i '/# >>> atri-code installer added >>>/,/# <<< atri-code installer added <<</d' "\$RC" 2>/dev/null || true
+    fi
+done
+echo "Atri Code removed. Restart your shell to apply PATH changes."
+UNINSTALL
+chmod +x "$ATRI_INSTALL_ROOT/uninstall.sh"
+ok "Uninstall script → $ATRI_INSTALL_ROOT/uninstall.sh"
+
+# ─── Clean up staging ──────────────────────────────────────────────────────
+rm -rf "$STAGING_DIR"
+STAGING_DIR=""  # prevent trap from double-cleaning
 
 # ─── Summary ───────────────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}${CYAN}  ╭──────────────────────────────────────╮${RESET}"
-echo -e "${BOLD}${CYAN}  │  - Installation Complete!             │${RESET}"
-echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Start Atri Code:                     │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri                             │${RESET}"
-echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
-echo -e "${BOLD}${CYAN}  │  One-shot mode:                       │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri \"your prompt here\"          │${RESET}"
-echo -e "${BOLD}${CYAN}  │                                       │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Diagnostics:                         │${RESET}"
-echo -e "${BOLD}${CYAN}  │    $ atri doctor                      │${RESET}"
-echo -e "${BOLD}${CYAN}  ╰──────────────────────────────────────╯${RESET}"
+echo -e "${BOLD}${GREEN}  ╭────────────────────────────────────────╮${RESET}"
+echo -e "${BOLD}${GREEN}  │  Installation Complete!                 │${RESET}"
+echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Accelerator: ${ACCEL}$(printf '%*s' $((23 - ${#ACCEL})) '')│${RESET}"
+echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Start:    atri                         │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Diagnose: atri doctor                  │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Remove:   $ATRI_INSTALL_ROOT/uninstall.sh${RESET}"
+echo -e "${BOLD}${GREEN}  ╰────────────────────────────────────────╯${RESET}"
+echo ""
+echo -e "${DIM}  Restart your shell or run: export PATH=\"$ATRI_BIN_DIR:\$PATH\"${RESET}"
 echo ""
