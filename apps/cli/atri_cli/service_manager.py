@@ -140,8 +140,23 @@ class ServiceManager:
         }
 
     def _find_llama_binary(self) -> Optional[Path]:
-        """Find the llama-server binary."""
+        """Find the llama-server binary.
+
+        Search order:
+        1. $LLAMA_SERVER_BIN env (set by the smart installer launcher script)
+        2. New install layout: ~/.local/share/atri/runtime/llama/llama-server
+        3. Legacy dev layout: runtime/llm/llama.cpp/build/bin/llama-server
+        """
+        from_env = os.environ.get("LLAMA_SERVER_BIN")
+        if from_env:
+            p = Path(from_env)
+            if p.exists():
+                return p
+
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
         candidates = [
+            install_root / "runtime/llama/llama-server",
+            install_root / "runtime/llama/llama-server.exe",
             self.repo_root / "runtime/llm/llama.cpp/build/bin/llama-server",
             self.repo_root / "runtime/llm/llama.cpp/build/bin/Release/llama-server.exe",
         ]
@@ -151,18 +166,66 @@ class ServiceManager:
         return None
 
     def _find_model(self) -> Optional[Path]:
-        """Find the GGUF model file."""
-        candidates = [
-            self.repo_root / "models/gemma-4-e2b-it-Q4_K_M.gguf",
-            self.repo_root / "models/gemma-4-E2B-it-Q4_K_M.gguf",
+        """Find the GGUF model file.
+
+        Also handles lazy first-run download when .fetch_on_first_run marker exists.
+        """
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+        model_dirs = [
+            Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
+            self.repo_root / "models",
         ]
-        for c in candidates:
-            if c.exists():
-                return c
-        # Glob for any gguf
-        for gguf in (self.repo_root / "models").glob("*.gguf"):
-            return gguf
+
+        for mdir in model_dirs:
+            for name in ["gemma-4-e2b-it-Q4_K_M.gguf", "gemma-4-E2B-it-Q4_K_M.gguf"]:
+                p = mdir / name
+                if p.exists():
+                    return p
+            for gguf in mdir.glob("*.gguf"):
+                return gguf
+
+        # Check for lazy-fetch marker written by installer
+        for mdir in model_dirs:
+            marker = mdir / ".fetch_on_first_run"
+            if marker.exists():
+                self._fetch_model_lazy(mdir, marker)
+                for gguf in mdir.glob("*.gguf"):
+                    return gguf
+
         return None
+
+    def _fetch_model_lazy(self, model_dir: Path, marker: Path) -> None:
+        """Download the model on first run using the URL stored in the marker file."""
+        import urllib.request
+
+        try:
+            lines = marker.read_text().strip().splitlines()
+            url = next((l.split("=", 1)[1] for l in lines if l.startswith("MODEL_URL=")), None)
+        except Exception:
+            url = None
+
+        if not url:
+            return
+
+        dest = model_dir / "gemma-4-e2b-it-Q4_K_M.gguf"
+        print(f"\n  Downloading Gemma 4 E2B model (~3.1 GB) on first run…")
+        print(f"  This happens once. Subsequent starts will be instant.\n")
+
+        def _progress(block_count, block_size, total_size):
+            done = block_count * block_size
+            pct = min(100, int(done * 100 / total_size)) if total_size > 0 else 0
+            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+            print(f"\r  [{bar}] {pct}%  {done // 1_000_000} MB / {total_size // 1_000_000} MB", end="", flush=True)
+
+        try:
+            urllib.request.urlretrieve(url, dest, reporthook=_progress)
+            print()
+            marker.unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"\n  Model download failed: {exc}")
+            if dest.exists():
+                dest.unlink()
+            raise
 
     def _find_python(self) -> str:
         """Find the orchestrator venv python."""
@@ -232,8 +295,11 @@ class ServiceManager:
         kv_k = config.get("kv_cache_type_k", "q8_0")
         kv_v = config.get("kv_cache_type_v", "q8_0")
 
-        # Gemma 4 chat template — vendored under runtime/templates/
-        template_file = self.repo_root / "runtime" / "templates" / "gemma4-tooluse.jinja"
+        # Gemma 4 chat template — try install-root first, then repo fallback
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+        template_file = Path(os.environ.get("ATRI_TEMPLATE_DIR", str(install_root / "runtime/templates"))) / "gemma4-tooluse.jinja"
+        if not template_file.exists():
+            template_file = self.repo_root / "runtime" / "templates" / "gemma4-tooluse.jinja"
 
         cmd = [
             str(llama_bin),
@@ -263,7 +329,7 @@ class ServiceManager:
 
         subprocess.Popen(
             cmd,
-            cwd=str(self.repo_root / "runtime/llm/llama.cpp"),
+            cwd=str(llama_bin.parent),
             stdout=log_fp,
             stderr=log_fp,
             start_new_session=True,
