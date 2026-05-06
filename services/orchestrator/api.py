@@ -1403,35 +1403,10 @@ async def fork_conversation(
 
 @app.get("/worktrees", response_model=WorktreesListResponse)
 async def list_worktrees(http_request: Request) -> WorktreesListResponse:
-    """List all active git worktrees for isolated conversation contexts."""
+    """List all active git worktrees — not yet implemented."""
     await _enforce_rate_limit(http_request)
     _authenticate_request(http_request)
-    
-    try:
-        from .worktree_manager import WorktreeManager
-        manager = WorktreeManager()
-        worktrees = manager.list_worktrees()
-        
-        worktree_responses = [
-            WorktreeInfoResponse(
-                path=str(wt.path),
-                conversation_id=wt.conversation_id,
-                branch=wt.branch,
-                is_dirty=wt.is_dirty,
-            )
-            for wt in worktrees
-        ]
-        
-        _log_event("worktree.list", count=len(worktree_responses))
-        
-        return WorktreesListResponse(
-            status="success",
-            worktrees=worktree_responses,
-            count=len(worktree_responses),
-        )
-    except Exception as e:
-        logger.error(f"Error listing worktrees: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=501, detail="Worktree support not yet implemented")
 
 
 @app.post("/conversations/{conversation_id}/fork-to-worktree", response_model=WorktreeForkResponse)
@@ -1440,57 +1415,10 @@ async def fork_to_worktree(
     request: WorktreeForkRequest,
     http_request: Request,
 ) -> WorktreeForkResponse:
-    """Fork a conversation to a new git worktree for isolated parallel work."""
-    if conversation_store is None:
-        raise HTTPException(status_code=500, detail="Conversation store not initialized")
-
+    """Fork a conversation to a git worktree — not yet implemented."""
     await _enforce_rate_limit(http_request)
-    auth_context = _authenticate_request(http_request)
-    if config is not None and (config.security.api_key or config.security.admin_api_key or config.auth.jwt_secret):
-        if not auth_context.is_admin:
-            raise HTTPException(status_code=403, detail="Admin privileges required")
-
-    # First fork the conversation in the database
-    new_conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
-    created = await conversation_store.fork_conversation(
-        source_conversation_id=conversation_id,
-        target_conversation_id=new_conversation_id,
-    )
-    if not created:
-        raise HTTPException(status_code=404, detail="Source conversation not found")
-
-    try:
-        from .worktree_manager import WorktreeManager
-        manager = WorktreeManager()
-        
-        # Create the worktree
-        worktree_info = manager.create_worktree(
-            conversation_id=new_conversation_id,
-            worktree_name=request.worktree_name,
-            base_branch="main",
-        )
-        
-        _log_event(
-            "worktree.fork_created",
-            source_id=conversation_id,
-            new_id=new_conversation_id,
-            worktree_name=request.worktree_name,
-        )
-        
-        return WorktreeForkResponse(
-            status="success",
-            success=True,
-            new_conversation_id=new_conversation_id,
-            worktree_path=str(worktree_info.path),
-        )
-    except Exception as e:
-        # Try to clean up the forked conversation if worktree creation fails
-        try:
-            await conversation_store.delete_conversation(new_conversation_id)
-        except Exception:
-            pass
-        logger.error(f"Error creating worktree for fork: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    _authenticate_request(http_request)
+    raise HTTPException(status_code=501, detail="Worktree support not yet implemented")
 
 
 @app.get("/metrics", response_model=MetricsResponse)
