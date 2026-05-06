@@ -125,16 +125,17 @@ class ServiceManager:
             except Exception:
                 pass
 
-        # Defaults
+        # Defaults — optimised for RTX 3060 6 GB; detect_hardware.py overrides these
         return {
-            "recommended_n_gpu_layers": 999,
-            "recommended_ctx_size": 8192,
+            "recommended_n_gpu_layers": 99,
+            "recommended_ctx_size": 32768,
             "recommended_batch_size": 2048,
+            "recommended_ubatch_size": 512,
             "recommended_threads": max(2, (os.cpu_count() or 4) - 2),
-            "flash_attn": False,
-            "kv_cache_type_k": "f16",
-            "kv_cache_type_v": "f16",
-            "enable_thinking": True,
+            "flash_attn": True,
+            "kv_cache_type_k": "q8_0",
+            "kv_cache_type_v": "q8_0",
+            "mlock": True,
             "gpu_detected": False,
         }
 
@@ -222,31 +223,40 @@ class ServiceManager:
 
         config = self._get_launch_config()
 
-        n_gpu = str(config.get("recommended_n_gpu_layers", 999))
-        ctx = str(config.get("recommended_ctx_size", 8192))
-        threads = str(config.get("recommended_threads", 10))
+        n_gpu = str(config.get("recommended_n_gpu_layers", 99))
+        ctx = str(config.get("recommended_ctx_size", 32768))
+        threads = str(config.get("recommended_threads", max(2, (os.cpu_count() or 4) - 2)))
         batch = str(config.get("recommended_batch_size", 2048))
-        flash = config.get("flash_attn", False)
+        ubatch = str(config.get("recommended_ubatch_size", 512))
+        flash = config.get("flash_attn", True)
         kv_k = config.get("kv_cache_type_k", "q8_0")
         kv_v = config.get("kv_cache_type_v", "q8_0")
+
+        # Gemma 4 chat template — vendored under runtime/templates/
+        template_file = self.repo_root / "runtime" / "templates" / "gemma4-tooluse.jinja"
 
         cmd = [
             str(llama_bin),
             "-m", str(model),
             "--jinja",
-            "--reasoning", "on",
             "--host", "127.0.0.1",
             "--port", str(self.llama_port),
             "--threads", threads,
             "--n-gpu-layers", n_gpu,
             "--ctx-size", ctx,
             "--batch-size", batch,
+            "--ubatch-size", ubatch,
             "--cache-type-k", kv_k,
             "--cache-type-v", kv_v,
+            "--parallel", "2",
             "--api-key", "secret",
         ]
+        if template_file.exists():
+            cmd.extend(["--chat-template-file", str(template_file)])
         if flash:
             cmd.extend(["--flash-attn", "on"])
+        if config.get("mlock", True):
+            cmd.append("--mlock")
 
         log_path = self.repo_root / "llama.log"
         log_fp = open(log_path, "ab")

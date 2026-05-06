@@ -46,9 +46,10 @@ class ToolUse:
 # Alias for backward compatibility
 ToolCall = ToolUse
 
-# Regex to match <think>...</think> blocks (Gemma 4 reasoning output)
+# Gemma 4 emits reasoning inside <|channel>thought...<channel|> blocks.
+# Some builds also emit <think>...</think>. Strip both from user-facing output.
 _THINKING_BLOCK_RE = re.compile(
-    r"<think>.*?</think>\s*",
+    r"<\|channel>thought.*?<channel\|>\s*|<think>.*?</think>\s*",
     re.DOTALL,
 )
 
@@ -91,6 +92,7 @@ class LLMAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         parallel_tool_calls: Optional[bool] = None,
+        enable_thinking: bool = False,
     ) -> Dict[str, Any]:
         """
         Make a chat completion request to llama.cpp.
@@ -123,6 +125,10 @@ class LLMAdapter:
             request_body["parallel_tool_calls"] = (
                 self.config.parallel_tool_calls if parallel_tool_calls is None else parallel_tool_calls
             )
+
+        # Pass enable_thinking to llama.cpp via extra_body so the Gemma 4
+        # Jinja template can inject <|think|> / suppress <|channel>thought blocks.
+        request_body["extra_body"] = {"enable_thinking": enable_thinking}
 
         has_tool_result_context = any(message.get("role") == "tool" for message in messages)
         max_attempts = self._max_retry_attempts
@@ -273,13 +279,13 @@ class LLMAdapter:
 
     @staticmethod
     def strip_thinking_blocks(text: str) -> str:
-        """Remove <think>...</think> reasoning blocks from LLM output.
+        """Remove Gemma 4 reasoning blocks from LLM output before showing to user.
 
-        When reasoning mode is enabled, Gemma 4 wraps its internal chain-of-thought
-        in <think>...</think> tags. We strip these from user-facing output but
-        log them at DEBUG level for diagnostics.
+        Gemma 4 wraps internal reasoning in <|channel>thought...<channel|>.
+        Some builds additionally emit <think>...</think>. Both are stripped and
+        logged at DEBUG level for diagnostics.
         """
-        if "<think>" not in text:
+        if "<|channel>" not in text and "<think>" not in text:
             return text
         thinking_matches = _THINKING_BLOCK_RE.findall(text)
         for block in thinking_matches:
