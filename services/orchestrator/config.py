@@ -311,7 +311,7 @@ class OrchestratorConfig(BaseModel):
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
                 api_key=os.getenv("LLM_API_KEY"),
                 model=os.getenv("LLM_MODEL", "local-model"),
-                temperature=float(os.getenv("LLM_TEMPERATURE", "1.0")),
+                temperature=float(os.getenv("LLM_TEMPERATURE", "0.6")),
                 top_p=float(os.getenv("LLM_TOP_P", "0.95")),
                 top_k=int(os.getenv("LLM_TOP_K", "64")),
                 max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
@@ -332,7 +332,7 @@ class OrchestratorConfig(BaseModel):
                 max_turns=int(os.getenv("AGENT_MAX_TURNS", "10")),
                 max_tool_calls_per_turn=int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "3")),
                 enable_tool_use=os.getenv("AGENT_ENABLE_TOOL_USE", "true").lower() == "true",
-                enable_thinking=os.getenv("AGENT_ENABLE_THINKING", "false").lower() == "true",
+                thinking_mode=os.getenv("AGENT_THINKING_MODE", "tool_calls_off"),
                 stream_responses=os.getenv("AGENT_STREAM_RESPONSES", "false").lower() == "true",
             ),
             prompt_policy=PromptPolicyConfig(
