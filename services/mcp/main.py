@@ -517,7 +517,10 @@ def edit_file(
     new_text = new_text_content
 
     if not path:
-        raise ValueError("Missing required argument: 'target_file_path'")
+        raise ValueError(
+            "Missing required argument: 'target_file_path'. "
+            "Also check: use 'exact_text_to_replace', not 'old_text' or 'old_content'."
+        )
 
     if old_text == "":
         raise ValueError("old_text cannot be empty")
@@ -800,6 +803,207 @@ def create_project(target_project_path: str, template: str = "python-basic") -> 
         return f"Successfully created {template} project at {path}"
     except Exception as e:
         return f"Error creating project: {e}"
+
+# ─── In-memory todo list ──────────────────────────────────────────────────────
+# Shared state for the lifetime of the MCP server process.
+_TODO_LOCK = threading.Lock()
+_TODOS: list[dict[str, Any]] = []
+
+
+@mcp.tool
+def todo_write(todos: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Replace the current todo list with a new set of tasks.
+
+    Each task dict must have at minimum a 'content' key (str).
+    Optional keys: 'status' ('pending'|'in_progress'|'completed'), 'priority' ('high'|'medium'|'low').
+
+    Use this to track multi-step work plans so the user can see progress.
+    """
+    validated: list[dict[str, Any]] = []
+    for item in todos:
+        if "content" not in item or not str(item["content"]).strip():
+            raise ValueError("Each todo item must have a non-empty 'content' key")
+        validated.append({
+            "id": len(validated) + 1,
+            "content": str(item["content"]).strip(),
+            "status": item.get("status", "pending"),
+            "priority": item.get("priority", "medium"),
+        })
+    with _TODO_LOCK:
+        _TODOS.clear()
+        _TODOS.extend(validated)
+    return {"ok": True, "count": len(validated), "todos": list(_TODOS)}
+
+
+@mcp.tool
+def todo_read() -> dict[str, Any]:
+    """Return the current todo list."""
+    with _TODO_LOCK:
+        return {"todos": list(_TODOS), "count": len(_TODOS)}
+
+
+# ─── Bash execution ───────────────────────────────────────────────────────────
+
+# Commands that are unconditionally blocked regardless of permission_mode.
+_BLOCKED_COMMAND_PATTERNS = [
+    "rm -rf /",
+    "rm -rf ~",
+    "> /dev/sda",
+    "dd if=",
+    "mkfs",
+    ":(){ :|:& };:",  # fork bomb
+]
+
+_MAX_OUTPUT_CHARS = 50_000
+
+
+@mcp.tool
+def bash_exec(
+    command: str,
+    cwd: str | None = None,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    """
+    Execute a shell command and return its output.
+
+    - Output is capped at 50 000 characters (stdout + stderr combined).
+    - Timeout default is 30 s; max is 120 s.
+    - A small set of obviously destructive commands is unconditionally blocked.
+    - The working directory defaults to the first allowed directory (or repo root).
+
+    Use for: running tests, git commands, build scripts, inspecting processes.
+    Do NOT use for: interactive programs, long-running daemons (use & to background).
+    """
+    import subprocess
+
+    # Safety: block obviously destructive patterns
+    for pattern in _BLOCKED_COMMAND_PATTERNS:
+        if pattern in command:
+            return {"ok": False, "error": f"Blocked: command matches disallowed pattern '{pattern}'"}
+
+    # Resolve working directory
+    work_dir: Path
+    if cwd:
+        work_dir = _resolve_user_path(cwd)
+    else:
+        allowed = _load_allowed_dirs()
+        work_dir = allowed[0] if allowed else Path.cwd()
+
+    timeout = min(int(timeout_seconds), 120)
+
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(work_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ},
+        )
+        combined = result.stdout + result.stderr
+        truncated = len(combined) > _MAX_OUTPUT_CHARS
+        if truncated:
+            combined = combined[:_MAX_OUTPUT_CHARS] + "\n[...output truncated...]"
+        return {
+            "ok": result.returncode == 0,
+            "exit_code": result.returncode,
+            "output": combined,
+            "truncated": truncated,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"Command timed out after {timeout}s"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ─── Grep / codebase search ───────────────────────────────────────────────────
+
+@mcp.tool
+def grep_codebase(
+    pattern: str,
+    path: str = ".",
+    file_glob: str = "*",
+    case_sensitive: bool = True,
+    max_results: int = 200,
+) -> dict[str, Any]:
+    """
+    Search for a regex pattern across files in the codebase.
+
+    Uses ripgrep (rg) when available, falls back to Python's re module.
+
+    Args:
+        pattern: Regular expression to search for.
+        path: Directory or file to search in (defaults to allowed root).
+        file_glob: Glob pattern to filter files, e.g. '*.py', '*.ts'.
+        case_sensitive: Whether the search is case-sensitive.
+        max_results: Maximum number of matches to return (cap 500).
+
+    Returns a list of matches with file path, line number, and line content.
+    """
+    import re
+    import subprocess
+
+    search_root = _resolve_user_path(path)
+    max_results = min(int(max_results), 500)
+
+    # Try ripgrep first
+    rg = shutil.which("rg")
+    if rg:
+        flags = [] if case_sensitive else ["-i"]
+        cmd = [rg, "--json", "-m", str(max_results), "--glob", file_glob] + flags + [pattern, str(search_root)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            matches: list[dict[str, Any]] = []
+            for line in proc.stdout.splitlines():
+                try:
+                    obj = json.loads(line)
+                    if obj.get("type") == "match":
+                        data = obj["data"]
+                        matches.append({
+                            "file": _to_relative_display(Path(data["path"]["text"])),
+                            "line": data["line_number"],
+                            "content": data["lines"]["text"].rstrip("\n"),
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    continue
+            return {"ok": True, "matches": matches, "count": len(matches), "engine": "ripgrep"}
+        except Exception:
+            pass  # Fall through to Python fallback
+
+    # Python fallback
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as exc:
+        return {"ok": False, "error": f"Invalid regex: {exc}"}
+
+    matches = []
+    root = search_root if search_root.is_dir() else search_root.parent
+    glob_files = list(root.rglob(file_glob)) if search_root.is_dir() else [search_root]
+
+    for filepath in glob_files:
+        if not filepath.is_file():
+            continue
+        if _has_hidden_component(filepath):
+            continue
+        try:
+            text = _read_text(filepath)
+        except Exception:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if regex.search(line):
+                matches.append({
+                    "file": _to_relative_display(filepath),
+                    "line": lineno,
+                    "content": line.rstrip(),
+                })
+                if len(matches) >= max_results:
+                    return {"ok": True, "matches": matches, "count": len(matches), "truncated": True, "engine": "python"}
+
+    return {"ok": True, "matches": matches, "count": len(matches), "engine": "python"}
+
 
 if __name__ == "__main__":
     mcp.run()
