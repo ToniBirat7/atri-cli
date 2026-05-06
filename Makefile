@@ -212,15 +212,14 @@ health: ## Check service health
 	@echo "$(YELLOW)Frontend$(NC)"
 	@curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$(FRONTEND_PORT) && echo "  $(GREEN)[OK] Running$(NC)" || echo "  $(RED)[ERROR] Not running$(NC)"
 
-test: ## Run test suite (Phase 3+)
+test: ## Run test suite
 	@echo "$(BLUE)Running tests...$(NC)"
-	@echo "$(YELLOW)Unit tests for orchestrator$(NC)"
 	@cd services/orchestrator && \
 		if [ ! -x .venv/bin/python ]; then \
 			echo "$(RED)Missing services/orchestrator/.venv. Run 'make install' first.$(NC)"; \
 			exit 1; \
 		fi && \
-		.venv/bin/python -m pytest tests/ -v || echo "$(YELLOW)No tests found yet (Phase 3+)$(NC)"
+		.venv/bin/python -m pytest tests/ -v
 
 # ===== Build & Deploy =====
 
