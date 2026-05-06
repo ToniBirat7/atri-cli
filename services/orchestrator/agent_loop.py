@@ -145,10 +145,28 @@ class AgentLoop:
         if enable_thinking and thinking_mode == "tool_calls_off":
             thinking_mode = "always"
         self.thinking_mode = thinking_mode
+        self.stream_responses = False  # toggled by config/caller
         self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_call_retries = max_tool_call_retries
         self.permission_mode = permission_mode
         self.state = AgentState()
+
+    async def _stream_final_answer(
+        self,
+        llm_adapter,
+        messages,
+        event_callback,
+        enable_thinking: bool = False,
+    ) -> str:
+        """Stream the final answer turn token-by-token, emitting text_delta events."""
+        chunks: list[str] = []
+        async for delta in llm_adapter.stream_chat_completion(
+            messages=messages,
+            enable_thinking=enable_thinking,
+        ):
+            chunks.append(delta)
+            await self._emit_event(event_callback, {"type": "text_delta", "content": delta})
+        return "".join(chunks)
 
     def _thinking_for_turn(self, has_tools: bool) -> bool:
         """Return whether thinking should be enabled for this LLM call."""
@@ -282,12 +300,39 @@ class AgentLoop:
 
                     available_tools = tool_registry.to_openai_format() if self.enable_tool_use else None
 
+                    # Use streaming for tool-free turns when enabled (final answer quality)
+                    use_streaming = (
+                        self.stream_responses
+                        and not available_tools
+                        and event_callback is not None
+                    )
+
                     try:
-                        completion = await llm_adapter.chat_completion(
-                            messages=self.state.messages,
-                            tools=available_tools,
-                            enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
-                        )
+                        if use_streaming:
+                            streamed_text = await self._stream_final_answer(
+                                llm_adapter=llm_adapter,
+                                messages=self.state.messages,
+                                event_callback=event_callback,
+                                enable_thinking=self._thinking_for_turn(has_tools=False),
+                            )
+                            # Build a fake completion dict so the rest of the loop is unchanged
+                            completion = {
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": streamed_text,
+                                        "tool_calls": None,
+                                    },
+                                    "finish_reason": "stop",
+                                }],
+                                "usage": {},
+                            }
+                        else:
+                            completion = await llm_adapter.chat_completion(
+                                messages=self.state.messages,
+                                tools=available_tools,
+                                enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
+                            )
                     except Exception as e:
                         # Gemma/llama.cpp can occasionally fail on the follow-up turn after a tool result.
                         # If we already executed at least one tool, return a deterministic fallback.

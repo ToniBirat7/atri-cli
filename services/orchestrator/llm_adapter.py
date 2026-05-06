@@ -244,6 +244,64 @@ class LLMAdapter:
             }, ensure_ascii=True))
             raise
 
+    async def stream_chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        enable_thinking: bool = False,
+    ):
+        """
+        Stream a non-tool-call completion from llama-server token by token.
+
+        Yields string deltas as they arrive. Use only for final answer turns
+        where tool calls are not expected — tool parsing requires the full response.
+        """
+        temp = temperature if temperature is not None else self.config.temperature
+        tokens = max_tokens if max_tokens is not None else self.config.max_tokens
+
+        request_body = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": temp,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
+            "max_tokens": tokens,
+            "stream": True,
+            "extra_body": {"enable_thinking": enable_thinking},
+        }
+
+        _log_event("llm.stream.start", message_count=len(messages))
+        buffer = ""
+        try:
+            async with self.client.stream("POST", "/chat/completions", json=request_body) as resp:
+                resp.raise_for_status()
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line.startswith("data:"):
+                        continue
+                    payload = raw_line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                        delta = chunk["choices"][0].get("delta", {}).get("content") or ""
+                        if delta:
+                            buffer += delta
+                            # Strip thinking blocks on the fly when they close
+                            if "<channel|>" in buffer:
+                                buffer = self.strip_thinking_blocks(buffer)
+                            # Yield only when we have content outside thinking blocks
+                            if "<|channel>" not in buffer:
+                                yield buffer
+                                buffer = ""
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+            if buffer:
+                yield self.strip_thinking_blocks(buffer)
+        except Exception as exc:
+            _log_event("llm.stream.error", error=str(exc))
+            raise
+
     async def extract_tool_calls(self, completion: Dict[str, Any]) -> List[ToolUse]:
         """
         Extract tool calls from completion response.

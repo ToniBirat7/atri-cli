@@ -760,6 +760,7 @@ async def startup():
         tool_timeout_seconds=config.mcp.tool_timeout_seconds,
         max_tool_call_retries=config.mcp.max_tool_call_retries,
     )
+    agent_loop.stream_responses = config.agent_loop.stream_responses
     
     # Initialize MCP servers (single default or configured multi-server set).
     mcp_init_errors: List[Dict[str, str]] = []

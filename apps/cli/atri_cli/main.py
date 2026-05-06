@@ -701,8 +701,23 @@ def _print_stream_response(
         if event.get("done"):
             break
         if "event" in event and isinstance(event["event"], dict):
-            _render_timeline_event(event["event"], effective_output_format)
             event_type = str(event["event"].get("type") or "")
+            # Handle live token streaming from agent loop (stream_responses=True path)
+            if event_type == "text_delta":
+                delta = str(event["event"].get("content") or "")
+                if delta:
+                    output_chars += len(delta)
+                    chunks.append(delta)
+                    if effective_output_format == "stream-json":
+                        print(json.dumps({"type": "content", "text": delta}))
+                    elif effective_output_format == "text":
+                        _RICH.print_streaming_token(delta, is_first=first_content_chunk)
+                        if first_content_chunk:
+                            _status_clear()
+                            content_started = True
+                            first_content_chunk = False
+                continue
+            _render_timeline_event(event["event"], effective_output_format)
             if event_type == "usage":
                 exact_input_tokens += int(event["event"].get("prompt_tokens") or 0)
                 exact_output_tokens += int(event["event"].get("completion_tokens") or 0)
