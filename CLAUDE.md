@@ -1,13 +1,47 @@
-# Atri Code
+# Atri Code: Project Context & Objectives
 
-Local-first agentic coding infrastructure: llama.cpp inference + FastAPI orchestrator + MCP tool protocol, delivered via TUI CLI and a Next.js web UI.
+**Goal:** Build a production-grade, local-first agentic coding CLI (`atri-cli`) mirroring Claude Code's capabilities and UX, powered locally via `llama.cpp`.
 
 ## Tech Stack
+
+- **Inference:** `llama.cpp` (Full GPU offloading)
+- **Backend/Orchestration:** FastAPI
+- **Tooling/Protocols:** Model Context Protocol (MCP), Web Search (Tavily)
+- **Interfaces:** TUI CLI (`atri-cli`) + Next.js Web UI
+
+## Target Model
+
+- **File:** `gemma-4-E2B-it-Q4_K_M.gguf` (Text Decoder only).
+- **Implementation Rules:** Strict adherence to Gemma 4 E2B prompt formatting, system prompts, and tool-calling best practices. All agentic features must be tailored to this specific model's capabilities.
+
+## Core Features & Deliverables
+
+1. **Agentic Capabilities:**
+   - Full Claude Code parity (code diffing, file editing, MCP tool execution, Tavily web search).
+2. **Premium TUI (`atri-cli`):**
+   - High-quality, aesthetic Terminal UI with best-in-class UX.
+3. **Smart Installation System:**
+   - Single-command cross-platform installer (e.g., `curl -fsSL https://.../install.sh | bash`).
+   - **Hardware Auto-Detection:** Dynamically analyzes OS/Device specs to apply optimal `llama.cpp` settings (maximizing GPU utilization for every device).
+   - **Self-Cleaning Footprint:** Deletes all build/temporary files post-installation. Only the exact binaries/files needed to run the CLI end-to-end remain on the user's system.
+
+## Baseline Development Hardware
+
+Ensure optimal, 100% GPU-accelerated performance on this baseline, designed to scale dynamically to user devices:
+
+- **OS:** Linux (Omarchy 3.7.1 / Arch-based, Kernel 7.0.3, Wayland/Hyprland)
+- **CPU:** AMD Ryzen 5 6600H
+- **GPU:** NVIDIA RTX 3060 Mobile (Discrete) + AMD Radeon 660M (Integrated)
+- **RAM:** 32GB
+
+## Tech Stack
+
 Python 3.10+ · FastAPI 0.104 · llama.cpp (custom build) · Next.js 15 · React 19 · SQLite (local) / PostgreSQL (Docker) · TailwindCSS 4 · TypeScript 5
 Package managers: `pip` (orchestrator venv at `services/orchestrator/.venv`) · `npm` (frontend)
 Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev` (frontend)
 
 ## Commands
+
 - `atri`: Launch interactive TUI (requires services running)
 - `atri --prompt "..."  --print`: Single-shot mode, returns JSON
 - `atri doctor`: System health check + auto-start services
@@ -24,6 +58,7 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `docker compose up`: Full production stack with Postgres, Redis, Tempo
 
 ## Architecture
+
 - `/apps/cli/atri_cli/` — TUI + service manager; `main.py` is the CLI entry point
 - `/services/orchestrator/` — FastAPI brain; agent loop, LLM adapter, prompt policy, auth
 - `/services/mcp/` — FastMCP tool server (filesystem, web search, diff engine)
@@ -34,9 +69,11 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `/scripts/` — `local_up.py` (GPU autodetect bootstrap), `doctor.py`, `detect_hardware.py`
 
 ## Data Flow
+
 `User` → `CLI/Frontend` → `POST /chat/stream` → `AgentLoop.run()` → `LLMAdapter` → `llama-server:8000` → tool_calls → `MCPOrchestrator.execute_tool()` → `FastMCP (local-mcp)` → filesystem/web → result → LLM → final response → SSE stream back to client
 
 ## Key Files
+
 - `services/orchestrator/api.py`: FastAPI app, all routes, startup lifecycle, SSE streaming
 - `services/orchestrator/agent_loop.py`: Multi-turn ReAct loop, tool budget controls
 - `services/orchestrator/config.py`: All env vars via `OrchestratorConfig.from_env()`
@@ -50,6 +87,7 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `Makefile`: Canonical dev commands — source of truth for all ports and flags
 
 ## Environment
+
 - Copy `services/orchestrator/.env.example` → `services/orchestrator/.env`
 - `LLM_BASE_URL`: llama-server endpoint (default: `http://127.0.0.1:8000/v1`)
 - `LLM_API_KEY`: Must match llama-server `--api-key` flag (default in Makefile: `secret`)
@@ -59,6 +97,7 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `NEXT_PUBLIC_API_URL` / `ORCHESTRATOR_URL`: Frontend → orchestrator URL
 
 ## Gotchas
+
 - `prompt_profile` override requires `is_admin=True` — only works with `ORCHESTRATOR_ADMIN_API_KEY` or the `--permission-mode bypassPermissions` CLI flag
 - llama-server MUST be started with `--jinja` flag for Gemma 4 tool-calling to work
 - The `active_model.gguf` symlink pattern was used in benchmark branches — on master, service_manager discovers models directly by filename
@@ -68,15 +107,18 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `AGENT_MAX_TURNS` default is 10 in `from_env()`, not 15 as shown in the Pydantic field default
 
 ## Branches
+
 - `master`: Production CLI + web UI; stable, fully deployable
 - `web`: Web-first variant of master; documents web UI startup defaults
 - `atri-cli-v3`: V3 feature development (multi-model arena, prompt profile hardening); active work
 - `v2-development`: Archived V2 work (diff engine, context amnesia fixes); merged to master
 
 ## Current Status
+
 **Completed:** CLI TUI (interactive + print mode), orchestrator API with SSE, MCP filesystem/search/diff tools, JWT + API key auth, SQLite persistence, Docker Compose full stack, frontend Next.js chat UI, `agent-v3` prompt profile (Gemma-optimized)
 **In Progress:** V3 multi-model support (atri-cli-v3 branch), Tree-sitter code intelligence
 **Not Started:** PostgreSQL migration tooling, test suite (`services/orchestrator/tests/` empty), Redis rate limiting integration, i18n
 
 ## Compaction Rules
+
 Always preserve: modified file list, failing test output, current task objective, all commands from the Commands section above.
