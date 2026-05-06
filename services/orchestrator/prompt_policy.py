@@ -88,6 +88,16 @@ def build_system_prompt(
             Tool compliance:
             - edit_file requires 'exact_text_to_replace' — never use 'old_text' or 'old_content'.
             - Use the parameter names defined in each tool's schema exactly.
+            - exact_text_to_replace: <|"|>content<|"|>
+
+            Tool call format — output EXACTLY this syntax, nothing else in that turn:
+            <|tool_call>call:tool_name{{param:<|"|>value<|"|>}}<tool_call|>
+
+            Example — list current directory:
+            <|tool_call>call:list_directory{{target_path:<|"|>.<|"|>}}<tool_call|>
+
+            Example — read a file:
+            <|tool_call>call:read_text_file{{target_file_path:<|"|>src/main.py<|"|>}}<tool_call|>
 
             Response style:
             - Be concise. Lead with the answer or action, not a preamble.
@@ -114,6 +124,15 @@ def build_system_prompt(
             - If you lack information or your training data is likely stale, use search_web proactively before answering.
             - When web tools are used, include source URLs for externally grounded claims.
             - For risky or destructive actions, pause and prefer reversible steps.
+
+            Tool call format — output EXACTLY this syntax, nothing else in that turn:
+            <|tool_call>call:tool_name{{param:<|"|>value<|"|>}}<tool_call|>
+
+            Example — list current directory:
+            <|tool_call>call:list_directory{{target_path:<|"|>.<|"|>}}<tool_call|>
+
+            Example — read a file:
+            <|tool_call>call:read_text_file{{target_file_path:<|"|>src/main.py<|"|>}}<tool_call|>
 
             Response style:
             - Prefer concise Markdown when it improves readability.
