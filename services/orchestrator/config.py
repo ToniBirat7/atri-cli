@@ -30,10 +30,10 @@ class LLMConfig(BaseModel):
         description="Model identifier"
     )
     temperature: float = Field(
-        default=0.7,
+        default=0.6,
         ge=0.0,
         le=2.0,
-        description="Sampling temperature"
+        description="Sampling temperature (0.6 for agent tool-call turns; use 1.0 for creative/chat)"
     )
     top_p: float = Field(
         default=0.95,
@@ -115,12 +115,12 @@ class AgentLoopConfig(BaseModel):
     """Agent loop and tool-calling budget configuration."""
 
     max_turns: int = Field(
-        default=15,
+        default=10,
         ge=1,
         description="Maximum agent loop turns"
     )
     max_tool_calls_per_turn: int = Field(
-        default=5,
+        default=3,
         ge=1,
         description="Max tool calls per agent turn"
     )
@@ -128,9 +128,14 @@ class AgentLoopConfig(BaseModel):
         default=True,
         description="Enable tool-calling mode"
     )
-    enable_thinking: bool = Field(
-        default=True,
-        description="Enable Gemma 4 reasoning mode"
+    thinking_mode: str = Field(
+        default="tool_calls_off",
+        description=(
+            "Gemma 4 reasoning mode. "
+            "'off' = never think; "
+            "'tool_calls_off' = think only on final user-facing turns; "
+            "'always' = think on every turn."
+        )
     )
     stream_responses: bool = Field(
         default=False,

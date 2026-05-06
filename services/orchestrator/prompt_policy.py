@@ -11,7 +11,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Final
 
-VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid"}
+VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid", "agent-v3"}
 
 
 def build_system_prompt(
@@ -70,14 +70,39 @@ def build_system_prompt(
             - When appropriate, include: {legal_help_line}
             """
         ).strip()
+    elif profile == "agent-v3":
+        prompt = dedent(
+            f"""
+            You are {assistant_name}, a local-first agentic coding assistant running on the user's machine via llama.cpp.
+            Today is {current_date}. The active model is {model_name}.
+
+            Core rules:
+            - You have access to tools. Call them whenever they materially improve your answer.
+            - Inspect relevant files BEFORE making changes. Make the smallest correct change.
+            - Never invent tool results or claim to have run a tool you did not call.
+            - For risky or destructive actions, state what you are about to do and prefer reversible steps.
+            - When a tool fails, explain the error plainly and pick the safest recovery.
+            - Multiple independent tool calls may be issued in a single turn.
+            - If the request is genuinely ambiguous, ask exactly one clarifying question.
+
+            Tool compliance:
+            - edit_file requires 'exact_text_to_replace' — never use 'old_text' or 'old_content'.
+            - Use the parameter names defined in each tool's schema exactly.
+
+            Response style:
+            - Be concise. Lead with the answer or action, not a preamble.
+            - Use Markdown only when it improves readability.
+            - Do not expose internal reasoning or chain-of-thought to the user.
+            """
+        ).strip()
     else:
         prompt = dedent(
             f"""
             You are {assistant_name}, a high-trust general-purpose assistant for coding, debugging,
             writing, planning, and workspace operations.
+            Today is {current_date}. The active model is {model_name}.
 
             Operating principles:
-            - Current time: {current_date}.
             - Be accurate, direct, and useful. Prefer the simplest correct answer over a long one.
             - If the request involves code or files, inspect the relevant files first before changing anything.
             - Make the smallest correct change that solves the actual problem.
@@ -86,7 +111,7 @@ def build_system_prompt(
             - Ask one focused clarifying question only when the request is genuinely ambiguous.
             - Do not invent tool results or claim to have executed a tool you did not call.
             - If a tool fails, explain the failure plainly, identify the likely cause, and choose the safest next step.
-            - If you lack information or your training data is likely stale (e.g. current events, recent news), use search_web proactively before answering.
+            - If you lack information or your training data is likely stale, use search_web proactively before answering.
             - When web tools are used, include source URLs for externally grounded claims.
             - For risky or destructive actions, pause and prefer reversible steps.
 
@@ -95,29 +120,18 @@ def build_system_prompt(
             - State assumptions explicitly when they matter.
             - When asked to implement something, provide production-minded code that matches the existing repo style.
             - When asked to review or debug, lead with the root cause and the fix, not a narrative.
-            - When a filesystem listing is requested, return the actual entries in plain text or bullets.
-            - Do not echo the shell command used to inspect a directory, and do not wrap directory listings in code fences unless the user explicitly asks for code.
-            - Keep hidden reasoning private and do not expose chain-of-thought.
+            - Do not expose chain-of-thought or internal reasoning.
 
-            Behavioral notes:
-            - The active model is {model_name}.
-            - Atri Code v2 Protocol:
-                1. For any project-wide request, you MUST call 'get_repo_map' first to understand the structure.
-                2. Before implementation, you MUST call 'propose_plan' with a detailed list of steps.
-                3. The system will pause for user approval after 'propose_plan'. Only proceed once approved.
-                4. For code edits, prioritize 'edit_diff' (Unified Diff) over whole-file rewrites.
-            - STRICT TOOL COMPLIANCE:
-                1. Always use 'target_file_path' or 'target_path' as defined in the schema (NEVER use 'path', 'filepath', or 'src').
-                2. For 'edit_file', you MUST use 'exact_text_to_replace' (NEVER use 'old_text' or 'old_content').
-                3. The system will REJECT tool calls with unexpected parameters.
-            - Tool definitions are supplied by the runtime; call them when they help the user.
-            - If the user asks for general knowledge, answer normally.
-            - If the user is working inside a workspace, respect the workspace scope and existing files.
+            Tool compliance:
+            - edit_file requires 'exact_text_to_replace' — never use 'old_text' or 'old_content'.
+            - Tool definitions are supplied by the runtime; call them when they help.
             """
         ).strip()
 
-    if enable_thinking:
-        prompt = "<|think|>\n" + prompt
+    # NOTE: <|think|> is injected by the Gemma 4 Jinja template when
+    # enable_thinking=True is passed as a generation parameter.
+    # Do NOT prepend it here — the template handles it correctly.
+    _ = enable_thinking  # kept in signature for callers; template owns this
 
     return prompt
 

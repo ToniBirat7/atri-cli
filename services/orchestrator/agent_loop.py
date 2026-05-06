@@ -131,19 +131,32 @@ class AgentLoop:
         max_turns: int = 10,
         max_tool_calls_per_turn: int = 3,
         enable_tool_use: bool = True,
-        enable_thinking: bool = False,
+        thinking_mode: str = "tool_calls_off",
         tool_timeout_seconds: int = 10,
         max_tool_call_retries: int = 2,
         permission_mode: str = "default",
+        # Legacy alias kept so existing callers don't break during the transition
+        enable_thinking: bool = False,
     ):
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.enable_tool_use = enable_tool_use
-        self.enable_thinking = enable_thinking
+        # Resolve legacy enable_thinking into thinking_mode
+        if enable_thinking and thinking_mode == "tool_calls_off":
+            thinking_mode = "always"
+        self.thinking_mode = thinking_mode
         self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_call_retries = max_tool_call_retries
         self.permission_mode = permission_mode
         self.state = AgentState()
+
+    def _thinking_for_turn(self, has_tools: bool) -> bool:
+        """Return whether thinking should be enabled for this LLM call."""
+        if self.thinking_mode == "always":
+            return True
+        if self.thinking_mode == "tool_calls_off":
+            return not has_tools  # think on final answer, not during tool loop
+        return False  # "off"
 
     async def _emit_event(
         self,
@@ -273,6 +286,7 @@ class AgentLoop:
                         completion = await llm_adapter.chat_completion(
                             messages=self.state.messages,
                             tools=available_tools,
+                            enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
                         )
                     except Exception as e:
                         # Gemma/llama.cpp can occasionally fail on the follow-up turn after a tool result.
@@ -971,9 +985,6 @@ class AgentLoop:
             "- IMPORTANT: When using file-editing tools (edit_diff, edit_file), the 'path' parameter is REQUIRED. You must always specify which file you are changing.\n"
             "- Format responses cleanly in Markdown when it improves readability, but avoid unnecessary verbosity."
         )
-
-        if self.enable_thinking:
-            return "<|think|>\n" + prompt
 
         return prompt
 

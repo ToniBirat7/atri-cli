@@ -424,7 +424,7 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
             assistant_name="Atri Code",
             model_name=config.llm.model,
             current_date=current_date,
-            enable_thinking=config.agent_loop.enable_thinking,
+            enable_thinking=(config.agent_loop.thinking_mode == "always"),
             fallback_text=config.prompt_policy.fallback_text,
             disclaimer_text=config.prompt_policy.disclaimer_text,
             legal_help_line=config.prompt_policy.legal_help_line,
@@ -756,7 +756,7 @@ async def startup():
         max_turns=config.agent_loop.max_turns,
         max_tool_calls_per_turn=config.agent_loop.max_tool_calls_per_turn,
         enable_tool_use=config.agent_loop.enable_tool_use,
-        enable_thinking=config.agent_loop.enable_thinking,
+        thinking_mode=config.agent_loop.thinking_mode,
         tool_timeout_seconds=config.mcp.tool_timeout_seconds,
         max_tool_call_retries=config.mcp.max_tool_call_retries,
     )
