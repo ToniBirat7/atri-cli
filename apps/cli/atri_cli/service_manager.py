@@ -227,6 +227,43 @@ class ServiceManager:
                 dest.unlink()
             raise
 
+    # ── PID file helpers ─────────────────────────────────────────────────────
+
+    def _pid_file(self, service: str) -> Path:
+        state = self.repo_root / "runtime" / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        return state / f"{service}.pid"
+
+    def _write_pid(self, service: str, pid: int) -> None:
+        self._pid_file(service).write_text(str(pid), encoding="utf-8")
+
+    def _kill_service(self, service: str) -> bool:
+        """Kill a service by reading its PID file. Returns True if killed."""
+        pid_file = self._pid_file(service)
+        if not pid_file.exists():
+            return False
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            # Wait up to 5s for the process to exit
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)  # check if still alive
+                    time.sleep(0.2)
+                except ProcessLookupError:
+                    break
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            pid_file.unlink(missing_ok=True)
+            return True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pid_file.unlink(missing_ok=True)
+            return False
+
     def _find_python(self) -> str:
         """Find the orchestrator venv python."""
         venv_py = self.repo_root / "services/orchestrator/.venv/bin/python"
@@ -327,7 +364,7 @@ class ServiceManager:
         log_path = self.repo_root / "llama.log"
         log_fp = open(log_path, "ab")
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(llama_bin.parent),
             stdout=log_fp,
@@ -335,7 +372,7 @@ class ServiceManager:
             start_new_session=True,
             close_fds=True,
         )
-        # We don't store the proc handle to avoid any exit-time cleanup logic
+        self._write_pid("llama-server", proc.pid)
         self._owns_llama = True
         return True
 
@@ -358,7 +395,7 @@ class ServiceManager:
         log_path = self.repo_root / "orchestrator.log"
         log_fp = open(log_path, "ab")
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [py, "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", str(self.orch_port)],
             cwd=str(orch_dir),
             stdout=log_fp,
@@ -366,7 +403,7 @@ class ServiceManager:
             start_new_session=True,
             close_fds=True,
         )
-        # We don't store the proc handle to avoid any exit-time cleanup logic
+        self._write_pid("orchestrator", proc.pid)
         self._owns_orch = True
         return True
 
@@ -448,21 +485,11 @@ class ServiceManager:
         return True
 
     def shutdown(self) -> None:
-        """Gracefully stop services we started."""
-        for label, proc, owns in [
-            ("orchestrator", self._orch_proc, self._owns_orch),
-            ("llama-server", self._llama_proc, self._owns_llama),
-        ]:
-            if not owns or proc is None:
-                continue
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
-            except Exception:
-                pass
+        """Gracefully stop services by PID file. Works even after CLI restart."""
+        for service in ("orchestrator", "llama-server"):
+            killed = self._kill_service(service)
+            if killed:
+                print(f"  Stopped {service}")
 
     def status(self) -> dict:
         """Return status of all services."""

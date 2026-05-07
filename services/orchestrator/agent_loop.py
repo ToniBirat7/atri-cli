@@ -883,12 +883,62 @@ class AgentLoop:
                 return None
 
         msg = user_message.strip().lower()
+        orig = user_message.strip()  # preserve original case for pattern extraction
         import uuid
 
         def _make(tool: str, args: dict) -> "_ToolUse":
             return _ToolUse(tool_name=tool, tool_input=args, id=f"forced_{uuid.uuid4().hex[:8]}")
 
-        # read_text_file intent
+        # ── bash_exec: check FIRST — backtick commands take priority over file/dir heuristics ──
+        # "run `cmd`" or "execute `cmd`" — use original message to preserve cmd case
+        bash_cmd_match = re.search(r"`([^`]+)`", orig)
+        if bash_cmd_match and re.search(r"(?:run|execute)\s+`", msg):
+            cmd = bash_cmd_match.group(1)
+            if self._resolve_tool_route("bash_exec", tool_registry):
+                _log_event("agent_loop.synthetic_tool_call.bash_exec", cmd=cmd)
+                return _make("bash_exec", {"command": cmd})
+
+        # ── list_directory: "find files named", "how many files", "list/show files" ──
+        # Checked before read_text_file so "find files named X in dir/ then read Y" hits list first.
+        is_find_files = re.search(r"\bfind\b.*\bfiles?\s+named\b", msg)
+        is_count_files = re.search(r"\bhow many\s+(?:python\s+|\.py\s+)?files?\b", msg)
+        # Suppress "list the files" when it's a secondary clause after a search/grep intent
+        _is_grep_primary = re.search(
+            r"\b(search|grep)\b.+\b(codebase|import|uses?|across|through)\b", msg
+        )
+        is_list_files = (
+            not _is_grep_primary
+            and re.search(r"\b(list|show|display)\b", msg)
+            and re.search(r"\bfiles?\b", msg)
+        )
+
+        dir_path = None
+        if is_find_files or is_count_files or is_list_files:
+            if re.search(r"\bcurrent\s+(?:working\s+)?directory\b", msg):
+                dir_path = "."
+            else:
+                dir_match = re.search(
+                    r"(?:in|inside|under|at|of)\s+(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
+                    msg,
+                ) or re.search(
+                    r"(?:list|show|display|find)\s+(?:the\s+)?(?:files?\s+(?:in|inside|under|at)\s+)?"
+                    r"(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
+                    msg,
+                )
+                if dir_match:
+                    # Strip trailing slashes and dots (e.g. "services/orchestrator/.")
+                    raw = dir_match.group(1).strip().rstrip("/.")
+                    last = raw.split("/")[-1] if "/" in raw else raw
+                    if last and "." not in last:  # it's a directory, not a file
+                        dir_path = raw
+                if dir_path is None and is_count_files:
+                    dir_path = "."
+
+        if dir_path is not None and self._resolve_tool_route("list_directory", tool_registry):
+            _log_event("agent_loop.synthetic_tool_call.list_directory", path=dir_path)
+            return _make("list_directory", {"target_path": dir_path})
+
+        # ── read_text_file: after bash and list so "run `cmd`" / "list files then read X" works ──
         path_match = re.search(
             r"(?:read|open|show|cat|view|inspect|check|look at|summari[sz]e)\s+"
             r"(?:the\s+)?(?:file\s+|contents?\s+of\s+)?([a-zA-Z][\w./\-]+\.[a-zA-Z]{1,5})",
@@ -900,59 +950,37 @@ class AgentLoop:
                 _log_event("agent_loop.synthetic_tool_call.read_text_file", path=fpath)
                 return _make("read_text_file", {"target_file_path": fpath})
 
-        # list_directory intent — multiple phrasings:
-        #   "list files in X", "show files in X", "how many files/python files are in X",
-        #   "find all files named '*.py' in X/" (glob pattern = file listing, not code search)
-        dir_path = None
-        is_find_files = re.search(r"\bfind\b.*\bfiles?\s+named\b", msg)  # "find files named '*.py'"
-        is_count_files = re.search(r"\bhow many\s+(?:python\s+|\.py\s+)?files?\b", msg)
-        is_list_files = re.search(r"\b(list|show|display)\b", msg) and re.search(r"\bfiles?\b", msg)
-
-        if is_find_files or is_count_files or is_list_files:
-            if re.search(r"\bcurrent\s+(?:working\s+)?directory\b", msg):
-                dir_path = "."
-            else:
-                # Try to extract a directory path from the message
-                dir_match = re.search(
-                    r"(?:in|inside|under|at|of)\s+(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
-                    msg,
-                ) or re.search(
-                    r"(?:list|show|display|find)\s+(?:the\s+)?(?:files?\s+(?:in|inside|under|at)\s+)?"
-                    r"(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
+        # ── grep_codebase: search/find uses/imports — NOT "find files named" ──
+        grep_pattern = None
+        if not is_find_files:
+            # Extract quoted pattern first (most reliable), then keyword-skipping regex
+            quoted = re.search(r"['\"]([^'\"]{2,})['\"]", orig)
+            if quoted and re.search(r"\b(codebase|import|uses?|across|through|appear|times?|all uses?)\b", msg):
+                grep_pattern = quoted.group(1)
+            elif re.search(r"\b(search|grep|find all|find every|look for)\b", msg) and \
+                    re.search(r"\b(codebase|import|uses?|across|through|appear|times?)\b", msg):
+                # Skip stopwords and extract the meaningful keyword
+                _STOP = {"the", "a", "an", "for", "of", "all", "every", "in", "on", "at", "to",
+                         "codebase", "code", "base", "files", "file", "and", "or", "that"}
+                gm = re.search(
+                    r"(?:search|grep|find all|find every|look for)\s+((?:\w+\s+)*\w+)",
                     msg,
                 )
-                if dir_match:
-                    raw = dir_match.group(1).strip().rstrip("/")
-                    if "." not in raw.split("/")[-1]:  # it's a dir not a file
-                        dir_path = raw
-                if dir_path is None and is_count_files:
-                    dir_path = "."  # fallback for "how many files" with no path
-
-        if dir_path is not None and self._resolve_tool_route("list_directory", tool_registry):
-            _log_event("agent_loop.synthetic_tool_call.list_directory", path=dir_path)
-            return _make("list_directory", {"target_path": dir_path})
-
-        # bash_exec intent (backtick command) — "run `cmd`" or "execute `cmd`"
-        bash_cmd_match = re.search(r"`([^`]+)`", msg)
-        if bash_cmd_match and re.search(r"(?:run|execute)\s+`", msg):
-            cmd = bash_cmd_match.group(1)
-            if self._resolve_tool_route("bash_exec", tool_registry):
-                _log_event("agent_loop.synthetic_tool_call.bash_exec", cmd=cmd)
-                return _make("bash_exec", {"command": cmd})
-
-        # grep_codebase intent — "search codebase for X", "how many times does string 'X' appear",
-        # "find every file that imports 'X'" — but NOT "find files named X" (that's list_directory above)
-        grep_pattern = None
-        if not is_find_files:  # don't confuse "find files named" with grep
-            gm = re.search(r"(?:search|grep|find all|find every|look for)\s+['\"]?([a-zA-Z_][\w.']+)['\"]?", msg)
-            if gm and re.search(r"\b(codebase|import|uses?|across|through|appear|times?)\b", msg):
-                grep_pattern = gm.group(1).strip("'\"")
+                if gm:
+                    words = [w for w in gm.group(1).split() if w not in _STOP]
+                    if words:
+                        # Find original-case version of this word in orig
+                        kw = words[0]
+                        oc = re.search(re.escape(kw), orig, re.IGNORECASE)
+                        grep_pattern = oc.group(0) if oc else kw
         if not grep_pattern:
-            hm = re.search(r"string\s+['\"]([^'\"]+)['\"]", msg)
+            # "how many times does the string 'X' appear"
+            hm = re.search(r"string\s+['\"]([^'\"]+)['\"]", orig)
             if hm and re.search(r"\b(appear|occur|times?|count|how many)\b", msg):
                 grep_pattern = hm.group(1)
         if not grep_pattern:
-            fm = re.search(r"imports?\s+['\"]([^'\"]+)['\"]", msg)
+            # "imports 'X'" — preserve original case
+            fm = re.search(r"imports?\s+['\"]([^'\"]+)['\"]", orig)
             if fm:
                 grep_pattern = fm.group(1)
 

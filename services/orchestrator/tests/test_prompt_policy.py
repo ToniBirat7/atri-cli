@@ -35,7 +35,11 @@ def test_general_purpose_contains_key_directives():
 
 def test_agent_v3_mentions_tool_compliance():
     prompt = build_system_prompt("agent-v3", enable_thinking=False, **COMMON_KWARGS)
-    assert "exact_text_to_replace" in prompt
+    # agent-v3 uses numbered rules; verify the core tool rules are present
+    assert "read_text_file" in prompt
+    assert "list_directory" in prompt
+    assert "bash_exec" in prompt
+    assert "grep_codebase" in prompt
 
 
 def test_thinking_prefix_NOT_injected_manually():
