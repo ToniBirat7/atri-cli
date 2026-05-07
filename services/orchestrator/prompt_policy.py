@@ -1,9 +1,10 @@
 """Prompt policy profiles for the orchestrator.
 
-Gemma and llama.cpp accept the system prompt through the normal system message
-path when the active chat template supports it. The Gemma 4 Jinja template in
-llama.cpp also injects tool declarations in the first system turn, so prompt
-policy should stay plain text and let the runtime handle tool formatting.
+The model served via llama.cpp uses ChatML / peg-native format (verified via
+llama.log: 'Chat format: peg-native'). Tools are sent via the OpenAI API
+`tools` parameter as JSON schemas. Do NOT inject native Gemma 4 <|tool_call>
+format examples — they confuse a ChatML-trained model into simulating tool
+output instead of actually calling tools.
 """
 
 from __future__ import annotations
@@ -12,6 +13,20 @@ from textwrap import dedent
 from typing import Final
 
 VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid", "agent-v3"}
+
+_TOOL_RULES = """
+Tool-calling rules (CRITICAL):
+- You have tools available as function calls. When a task requires real data \
+(files, directories, shell output), you MUST call the appropriate tool.
+- NEVER simulate, fabricate, or describe tool output in text. \
+If you do not call a tool, do not pretend you did.
+- NEVER output fake file lists, fake shell output, or fake file contents. \
+If you have not called a tool, you do not know the answer.
+- All file paths must be RELATIVE to the project root (e.g. services/orchestrator/config.py). \
+NEVER use absolute paths starting with /.
+- edit_file requires the parameter 'exact_text_to_replace' — never 'old_text' or 'old_content'.
+- If a tool call fails, report the error honestly. Do not retry with invented output.
+""".strip()
 
 
 def build_system_prompt(
@@ -71,38 +86,19 @@ def build_system_prompt(
             """
         ).strip()
     elif profile == "agent-v3":
+        # Short but explicit — E2B (2.5B) needs simple, direct rules.
+        # Tool schema injection appends examples + available tool names after this.
         prompt = dedent(
             f"""
-            You are {assistant_name}, a local-first agentic coding assistant running on the user's machine via llama.cpp.
-            Today is {current_date}. The active model is {model_name}.
+            You are {assistant_name}, a local coding assistant. Today is {current_date}.
 
-            Core rules:
-            - You have access to tools. Call them whenever they materially improve your answer.
-            - Inspect relevant files BEFORE making changes. Make the smallest correct change.
-            - Never invent tool results or claim to have run a tool you did not call.
-            - For risky or destructive actions, state what you are about to do and prefer reversible steps.
-            - When a tool fails, explain the error plainly and pick the safest recovery.
-            - Multiple independent tool calls may be issued in a single turn.
-            - If the request is genuinely ambiguous, ask exactly one clarifying question.
-
-            Tool compliance:
-            - edit_file requires 'exact_text_to_replace' — never use 'old_text' or 'old_content'.
-            - Use the parameter names defined in each tool's schema exactly.
-            - exact_text_to_replace: <|"|>content<|"|>
-
-            Tool call format — output EXACTLY this syntax, nothing else in that turn:
-            <|tool_call>call:tool_name{{param:<|"|>value<|"|>}}<tool_call|>
-
-            Example — list current directory:
-            <|tool_call>call:list_directory{{target_path:<|"|>.<|"|>}}<tool_call|>
-
-            Example — read a file:
-            <|tool_call>call:read_text_file{{target_file_path:<|"|>src/main.py<|"|>}}<tool_call|>
-
-            Response style:
-            - Be concise. Lead with the answer or action, not a preamble.
-            - Use Markdown only when it improves readability.
-            - Do not expose internal reasoning or chain-of-thought to the user.
+            STRICT RULES — follow these exactly:
+            1. To read a file → call read_text_file. NEVER write the file contents from memory.
+            2. To list files → call list_directory. NEVER list files from memory.
+            3. To run a shell command → call bash_exec. NEVER show fake terminal output.
+            4. To search code → call grep_codebase. NEVER guess which files contain something.
+            5. For math, explanations, or questions with no file/shell requirement → answer directly.
+            6. If you are unsure which tool to use, call list_directory first.
             """
         ).strip()
     else:
@@ -119,20 +115,12 @@ def build_system_prompt(
             - Use tools whenever they materially improve correctness, freshness, or access to local state.
             - If multiple independent tool calls are useful, request them in the same turn.
             - Ask one focused clarifying question only when the request is genuinely ambiguous.
-            - Do not invent tool results or claim to have executed a tool you did not call.
             - If a tool fails, explain the failure plainly, identify the likely cause, and choose the safest next step.
             - If you lack information or your training data is likely stale, use search_web proactively before answering.
             - When web tools are used, include source URLs for externally grounded claims.
             - For risky or destructive actions, pause and prefer reversible steps.
 
-            Tool call format — output EXACTLY this syntax, nothing else in that turn:
-            <|tool_call>call:tool_name{{param:<|"|>value<|"|>}}<tool_call|>
-
-            Example — list current directory:
-            <|tool_call>call:list_directory{{target_path:<|"|>.<|"|>}}<tool_call|>
-
-            Example — read a file:
-            <|tool_call>call:read_text_file{{target_file_path:<|"|>src/main.py<|"|>}}<tool_call|>
+            {_TOOL_RULES}
 
             Response style:
             - Prefer concise Markdown when it improves readability.
@@ -140,18 +128,10 @@ def build_system_prompt(
             - When asked to implement something, provide production-minded code that matches the existing repo style.
             - When asked to review or debug, lead with the root cause and the fix, not a narrative.
             - Do not expose chain-of-thought or internal reasoning.
-
-            Tool compliance:
-            - edit_file requires 'exact_text_to_replace' — never use 'old_text' or 'old_content'.
-            - Tool definitions are supplied by the runtime; call them when they help.
             """
         ).strip()
 
-    # NOTE: <|think|> is injected by the Gemma 4 Jinja template when
-    # enable_thinking=True is passed as a generation parameter.
-    # Do NOT prepend it here — the template handles it correctly.
-    _ = enable_thinking  # kept in signature for callers; template owns this
-
+    _ = enable_thinking  # template owns this; do not inject <|think|> here
     return prompt
 
 

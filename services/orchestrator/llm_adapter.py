@@ -4,8 +4,16 @@ LLM Adapter for llama.cpp OpenAI-compatible API.
 Abstracts away llama.cpp-specific details. Implements:
 - Tool-calling with non-streamed responses for reliability
 - OpenAI-compatible and native Gemma 4 tool-call parsing
+- Text-based JSON tool-call parsing (fallback for peg-native models that
+  ignore the OpenAI `tools` array — verified via token count parity test)
 - Response parsing for tool calls
 - Error handling and retries (Phase 5)
+
+peg-native format note:
+  The served model uses 'peg-native' chat format (llama.cpp b97-ea60547).
+  In this format the OpenAI `tools` parameter is silently dropped — prompt_tokens
+  are identical whether tools are sent or not. Tool schemas must be injected into
+  the system message as plain text, and tool calls parsed from the model's output.
 """
 
 from typing import Optional, List, Dict, Any
@@ -93,6 +101,7 @@ class LLMAdapter:
         max_tokens: Optional[int] = None,
         parallel_tool_calls: Optional[bool] = None,
         enable_thinking: bool = False,
+        assistant_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Make a chat completion request to llama.cpp.
@@ -109,6 +118,18 @@ class LLMAdapter:
         temp = temperature if temperature is not None else self.config.temperature
         tokens = max_tokens if max_tokens is not None else self.config.max_tokens
 
+        # Inject tool schemas into the system message (peg-native workaround).
+        # The OpenAI `tools` array is silently dropped by peg-native — inject as text instead.
+        # Must happen BEFORE building request_body so injected messages are sent to LLM.
+        if tools:
+            messages = self._inject_tools_into_system_message(messages, tools)
+
+        # Prefix injection: force the model to complete a partial assistant turn.
+        # This is the most reliable technique for E2B (2.5B) — start the JSON
+        # and let the model complete it rather than hoping it picks the right tool.
+        if assistant_prefix:
+            messages = list(messages) + [{"role": "assistant", "content": assistant_prefix}]
+
         request_body = {
             "model": self.config.model,
             "messages": messages,
@@ -116,15 +137,9 @@ class LLMAdapter:
             "top_p": self.config.top_p,
             "top_k": self.config.top_k,
             "max_tokens": tokens,
+            "repeat_penalty": 1.1,
+            "frequency_penalty": 0.05,
         }
-
-        # Add tools if provided (Phase 1: non-streamed tool calling)
-        if tools:
-            request_body["tools"] = tools
-            request_body["tool_choice"] = "auto"
-            request_body["parallel_tool_calls"] = (
-                self.config.parallel_tool_calls if parallel_tool_calls is None else parallel_tool_calls
-            )
 
         # Pass enable_thinking to llama.cpp via extra_body so the Gemma 4
         # Jinja template can inject <|think|> / suppress <|channel>thought blocks.
@@ -191,6 +206,13 @@ class LLMAdapter:
                     attempt=attempt,
                     finish_reason=result.get("choices", [{}])[0].get("finish_reason"),
                 )
+                # Prepend prefix to model output so downstream parsers see the full JSON.
+                # Always prepend — model may output empty string (EOS only) meaning the
+                # prefix IS the complete tool call and we must not lose it.
+                if assistant_prefix and result.get("choices"):
+                    msg = result["choices"][0].get("message", {})
+                    existing_content = msg.get("content") or ""
+                    result["choices"][0]["message"]["content"] = assistant_prefix + existing_content
                 return result
         except httpx.HTTPStatusError as e:
             response_text = ""
@@ -355,22 +377,41 @@ class LLMAdapter:
         return cleaned
 
     def extract_response_text(self, completion: dict) -> str:
-        """Extract the assistant's text response, stripping thinking blocks."""
+        """Extract the assistant's text response, stripping thinking blocks and tool call JSON."""
         choice = completion.get("choices", [{}])[0]
         message = choice.get("message", {}) or {}
         content = message.get("content") or ""
-        return self.strip_thinking_blocks(content)
+        content = self.strip_thinking_blocks(content)
+        # Strip JSON code blocks that were emitted as tool calls (peg-native mode)
+        content = re.sub(r"```(?:json)?\s*\n?\{.*?\}\s*\n?```", "", content, flags=re.DOTALL).strip()
+        # Strip stray ChatML control tokens the model leaks into output
+        content = re.sub(r"<\|im_(start|end)\|>", "", content).strip()
+        return content
 
     def _extract_native_tool_calls(self, text: str) -> List[ToolUse]:
-        """Fallback parser for Gemma 4 native tool-call tokens in assistant text."""
+        """Fallback parser — tries JSON code-block format first, then Gemma4 native tokens.
+
+        JSON code-block format (used when peg-native drops the OpenAI tools array):
+            ```json
+            {"name": "tool_name", "arguments": {"param": "value"}}
+            ```
+
+        Gemma 4 native token format (used when peg-gemma4 grammar is active):
+            <|tool_call>call:tool_name{param:<|"|>value<|"|>}<tool_call|>
+        """
         if not text:
             return []
 
+        # ── JSON code-block parser (peg-native fallback) ──────────────────────
+        json_block_calls = self._extract_json_block_tool_calls(text)
+        if json_block_calls:
+            return json_block_calls
+
+        # ── Gemma 4 native token parser ────────────────────────────────────────
         tool_call_pattern = re.compile(
             r"<\|tool_call\>call:(?P<name>[A-Za-z_][\w\-]*)\{(?P<args>.*?)\}<tool_call\|>",
             re.DOTALL,
         )
-
         parsed_calls: List[ToolUse] = []
         for match in tool_call_pattern.finditer(text):
             parsed_calls.append(
@@ -379,8 +420,135 @@ class LLMAdapter:
                     tool_input=self._parse_native_arguments(match.group("args")),
                 )
             )
-
         return parsed_calls
+
+    def _extract_json_block_tool_calls(self, text: str) -> List[ToolUse]:
+        """Extract tool calls from JSON code blocks in model text output.
+
+        Looks for:  ```json\\n{"name": "...", "arguments": {...}}\\n```
+        Also tries: bare JSON objects on their own line with "name"+"arguments".
+        """
+        calls: List[ToolUse] = []
+
+        # Match ```json ... ``` blocks (with or without "json" tag)
+        block_re = re.compile(r"```(?:json)?\s*\n?(\{.*?\})\s*\n?```", re.DOTALL)
+        for m in block_re.finditer(text):
+            raw = self._strip_chatml_tokens(m.group(1).strip())
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            call = self._try_parse_tool_call_object(obj)
+            if call:
+                calls.append(call)
+
+        if calls:
+            return calls
+
+        # Bare JSON fallback — look for {"name": "...", "arguments": {...}} anywhere
+        bare_re = re.compile(r'\{"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}\s*\}')
+        for m in bare_re.finditer(text):
+            raw = self._strip_chatml_tokens(m.group(0))
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            call = self._try_parse_tool_call_object(obj)
+            if call:
+                calls.append(call)
+
+        return calls
+
+    @staticmethod
+    def _strip_chatml_tokens(text: str) -> str:
+        """Remove ChatML control tokens that the model leaks into structured output."""
+        return re.sub(r"<\|im_(start|end)\|?>", "", text)
+
+    @staticmethod
+    def _try_parse_tool_call_object(obj: Any) -> Optional["ToolUse"]:
+        """Return a ToolUse if obj looks like a tool call, else None."""
+        if not isinstance(obj, dict):
+            return None
+        name = obj.get("name") or obj.get("tool") or obj.get("function")
+        args = obj.get("arguments") or obj.get("args") or obj.get("parameters") or {}
+        if isinstance(name, str) and name and isinstance(args, dict):
+            return ToolUse(tool_name=name, tool_input=args)
+        return None
+
+    # Compact key-param hints so the model uses correct argument names
+    _TOOL_PARAM_HINTS: Dict[str, str] = {
+        "list_directory": "target_path",
+        "read_text_file": "target_file_path",
+        "write_file": "target_file_path, file_text",
+        "edit_file": "target_file_path, exact_text_to_replace, new_text_content",
+        "bash_exec": "command",
+        "grep_codebase": "pattern",
+        "todo_write": "todos",
+        "todo_read": "",
+        "search_web": "query",
+        "set_allowed_directory": "target_directory_path",
+        "create_directory": "directory_path",
+        "delete_file": "target_file_path",
+    }
+
+    # Tools that confuse E2B (2.5B) due to strong training priors — excluded from schema injection.
+    # create_directory: model calls it for ANY path mention; set_allowed_directory: internal only.
+    _SCHEMA_INJECTION_EXCLUDE: frozenset = frozenset({
+        "create_directory", "set_allowed_directory", "delete_file",
+        "write_file", "edit_file", "search_web", "fetch_url",
+        "read_media_file_base64", "list_allowed_directories",
+    })
+
+    # Priority order for choosing the example tool (most recognizable first)
+    _SCHEMA_EXAMPLE_PRIORITY: tuple = (
+        "list_directory", "read_text_file", "bash_exec",
+        "grep_codebase", "todo_write", "todo_read",
+    )
+
+    @classmethod
+    def build_tool_schema_injection(cls, tools: List[Dict[str, Any]]) -> str:
+        """Build a minimal tool hint block to inject into the system message.
+
+        Filtered to a core set (exclude tools with strong wrong-tool priors in E2B).
+        Shows 3 concrete examples — one per major tool category — for better disambiguation.
+        """
+        if not tools:
+            return ""
+
+        all_names = [t.get("function", t).get("name", "") for t in tools]
+
+        # Filter to core working tools only
+        names = [n for n in all_names if n not in cls._SCHEMA_INJECTION_EXCLUDE and n]
+        if not names:
+            names = all_names  # fallback if all excluded
+
+        # Build 3 diverse examples to reduce ambiguity
+        examples_shown = []
+        for priority_name in cls._SCHEMA_EXAMPLE_PRIORITY:
+            if priority_name in names and len(examples_shown) < 3:
+                params = cls._TOOL_PARAM_HINTS.get(priority_name, "")
+                first_param = params.split(",")[0].strip() if params else "value"
+                example_args = {first_param: "..."} if first_param and first_param != "" else {}
+                examples_shown.append(
+                    json.dumps({"name": priority_name, "arguments": example_args})
+                )
+
+        if not examples_shown:
+            # Fallback: use the first available tool
+            n = names[0]
+            params = cls._TOOL_PARAM_HINTS.get(n, "")
+            first_param = params.split(",")[0].strip() if params else "value"
+            examples_shown = [json.dumps({"name": n, "arguments": {first_param: "..."}})]
+
+        examples_block = "\n".join(f"```json\n{ex}\n```" for ex in examples_shown)
+        names_str = ", ".join(names)
+
+        return (
+            f"\n\nTo call a tool, emit ONLY a JSON block:\n"
+            f"{examples_block}\n"
+            f"Available tools: {names_str}\n"
+            f"NEVER invent tool names. NEVER answer from memory when a tool can fetch the real data."
+        )
 
     def _parse_native_arguments(self, argument_block: str) -> Dict[str, Any]:
         """Parse Gemma 4 native key/value arguments into Python types."""
@@ -416,15 +584,32 @@ class LLMAdapter:
         result: str,
         tool_call_id: Optional[str] = None
     ) -> Dict[str, str]:
-        """
-        Format tool result for inclusion in chat messages.
+        """Format tool result for inclusion in chat messages.
 
-        Returns:
-            Message object to append to conversation history.
+        peg-native models don't understand the 'tool' role — inject as a 'user'
+        message with an Observation: prefix so the model sees the result in context.
         """
         return {
-            "role": "tool",
-            "content": result,
-            "tool_call_id": tool_call_id or f"call_{tool_name}",
-            "name": tool_name,
+            "role": "user",
+            "content": f"Observation from {tool_name}:\n{result}",
         }
+
+    @staticmethod
+    def _inject_tools_into_system_message(
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Append tool schema text to the system message (peg-native workaround)."""
+        schema_text = LLMAdapter.build_tool_schema_injection(tools)
+        if not schema_text:
+            return messages
+
+        messages = list(messages)  # shallow copy — don't mutate caller's list
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                messages[i] = {**msg, "content": msg["content"] + schema_text}
+                return messages
+
+        # No system message found — prepend one
+        messages.insert(0, {"role": "system", "content": schema_text.lstrip()})
+        return messages
