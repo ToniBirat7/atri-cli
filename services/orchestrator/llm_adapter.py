@@ -209,10 +209,14 @@ class LLMAdapter:
                 # Prepend prefix to model output so downstream parsers see the full JSON.
                 # Always prepend — model may output empty string (EOS only) meaning the
                 # prefix IS the complete tool call and we must not lose it.
-                if assistant_prefix and result.get("choices"):
+                if result.get("choices"):
                     msg = result["choices"][0].get("message", {})
-                    existing_content = msg.get("content") or ""
-                    result["choices"][0]["message"]["content"] = assistant_prefix + existing_content
+                    raw = msg.get("content") or ""
+                    if assistant_prefix:
+                        raw = assistant_prefix + raw
+                    # Strip ChatML control tokens that leak into model output (e.g. <|im_end|>).
+                    raw = re.sub(r"<\|im_(start|end)\|?>", "", raw)
+                    result["choices"][0]["message"]["content"] = raw
                 return result
         except httpx.HTTPStatusError as e:
             response_text = ""
