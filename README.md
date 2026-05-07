@@ -1,100 +1,151 @@
 # Atri Code
 
-Atri Code is a high-performance, local-first agentic coding infrastructure. It combines state-of-the-art LLM inference through `llama.cpp` with a robust Model Context Protocol (MCP) orchestration layer to provide a secure, private, and extremely fast agentic coding experience directly in your terminal.
-
-## Core Architecture
-
-Atri Code is designed as a decoupled, multi-service system to ensure sub-second responsiveness and reliable tool execution.
-
-```mermaid
-graph TD
-    User([User Terminal]) --> CLI[Atri CLI - TUI/Interactive]
-    CLI --> Manager[Service Manager]
-    Manager --> Daemon[Background Orchestrator Daemon]
-    Daemon --> Adapter[LLM Adapter]
-    Adapter --> Llama[llama-server - Inference]
-    Daemon --> MCP[MCP Tool Registry]
-    MCP --> FS[Filesystem Tools]
-    MCP --> Search[Search Adapter - Tavily]
-    MCP --> Shell[Shell/Command Tools]
-    Daemon --> DB[(Internal Session DB)]
-```
-
-### 1. Orchestration Layer (The Brain)
-The core reasoning engine implements an advanced **multi-turn ReAct loop**. It manages conversation state, persists session history in a hardened SQLite database, and handles the "Chain of Thought" required to solve complex coding tasks. 
-- **Deterministic Fallbacks**: Integrated heuristics to handle ambiguous LLM outputs.
-- **State Persistence**: Conversations are stored in `runtime/state/.internal.db` with strict `0700` permissions.
-
-### 2. Inference Engine (The Muscle)
-Powered by a customized build of `llama.cpp`, Atri Code leverages your local hardware (NVIDIA GPUs, Apple Silicon, or high-core CPUs) to run quantized GGUF models. 
-- **Default Model**: Gemma 4 (Q4_K_M) - Optimized for coding and reasoning.
-- **Context Management**: 16K context window with proactive snippet truncation to maintain high throughput.
-
-### 3. Model Context Protocol - MCP (The Senses)
-Atri Code follows the Model Context Protocol to interface with your local environment. This abstraction layer ensures that the agent can interact with your filesystem and the web through a unified, secure interface.
-- **Proactive Web Search**: Grounding agent knowledge with real-time data via Tavily integration.
-- **Atomic File Operations**: Safe, verified file writes and edits to prevent workspace corruption.
+A local-first agentic coding CLI powered by **Gemma 4 E2B** via llama.cpp — designed to match Claude Code's capabilities without sending your code to the cloud.
 
 ---
 
-## Installation
-
-Install Atri Code and all its optimized dependencies with a single command:
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 ```
 
-## System Requirements
+The installer auto-detects your GPU (NVIDIA CUDA / AMD ROCm / Apple Metal / CPU), downloads the matching prebuilt `llama-server`, installs the orchestrator and CLI into `~/.local/share/atri/`, and symlinks the `atri` command into `~/.local/bin/`. The Gemma 4 model (~3.1 GB) is fetched on first run.
 
-| Component | Minimum | Recommended |
-| :--- | :--- | :--- |
-| **GPU** | 4GB VRAM (CUDA/Metal) | 8GB+ VRAM |
-| **RAM** | 8GB | 16GB+ |
-| **Storage** | 10GB (SSD) | 20GB+ (NVMe) |
-| **OS** | Linux (Ubuntu/Arch) / macOS | Linux with NVIDIA GPU |
-
----
-
-## Technical Features
-
-### Service Persistence
-Unlike standard CLI tools, Atri Code utilizes a **detached daemon architecture**. Background services (`llama-server` and the orchestrator) remain active after the CLI process terminates. This eliminates model loading latency for subsequent commands, enabling sub-second response times.
-
-### Security and Hardening
-- **Bytecode Abstraction**: All Python source code is compiled to `.pyc` during installation to prevent tampering and protect intellectual property.
-- **Data Isolation**: Runtime state, session databases, and logs are kept in a restricted `runtime/` directory inaccessible to other users on the system.
-
-### Advanced Tooling
-- **Search Adapter**: Implements keyword-based re-ranking and snippet optimization to provide the LLM with the most relevant grounding data.
-- **Atomic Edits**: High-fidelity file refactoring using exact-match replacement patterns to ensure code integrity.
+**Requirements:** Python 3.10+, Git, `curl`, `unzip`. NVIDIA GPU (4 GB+ VRAM) recommended.
 
 ---
 
 ## Usage
 
-Start an interactive session:
 ```bash
-atri-cli
+# Interactive session (full TUI)
+atri
+
+# Single-shot prompt — prints JSON response and exits
+atri --prompt "Refactor auth.py to use bcrypt"
+
+# Single-shot with output to stdout only
+atri --prompt "List all TODO comments in src/" --print
+
+# System health check + auto-start services
+atri doctor
+
+# Stop background services (llama-server + orchestrator)
+atri stop
 ```
 
-Run a single-shot command:
-```bash
-atri-cli "Refactor the authentication logic in services/orchestrator/auth.py"
+---
+
+## How It Works
+
+```
+User → atri CLI → FastAPI orchestrator → ReAct agent loop → llama-server (Gemma 4 E2B)
+                                              ↓
+                                   MCP tool server (filesystem, bash, grep, web search)
 ```
 
-Verify system health and background daemons:
+The orchestrator runs a multi-turn ReAct loop: the model decides which tool to call, the MCP server executes it, results go back to the model, repeat until a final answer is ready. All inference runs locally — nothing leaves your machine.
+
+---
+
+## Developer Setup
+
 ```bash
-atri-cli doctor
+# 1. Clone and install dependencies
+git clone https://github.com/ToniBirat7/Agentic_AI.git && cd Agentic_AI
+make install
+
+# 2. Configure environment
+cp services/orchestrator/.env.example services/orchestrator/.env
+# Edit .env: set LLM_API_KEY to match --api-key in the llama-server command
+
+# 3. Start all services (llama + orchestrator + frontend)
+make cli-up        # CLI pipeline only (recommended)
+# or
+make dev-up        # Full stack including Next.js frontend
+
+# 4. Run the CLI
+atri
+
+# 5. Run tests
+make test
 ```
 
-Stop background services:
+### Individual services
+
 ```bash
-atri-cli stop
+make llama         # Start llama-server on :8000 (foreground)
+make orchestrator  # Start FastAPI orchestrator on :8001 (foreground, with --reload)
+make frontend      # Start Next.js frontend on :3000
+
+make logs          # Tail llama.log, orchestrator.log, frontend.log
+make health        # Curl health checks on all three ports
+make dev-down      # Kill all services
+make stop          # Kill llama + orchestrator only
+```
+
+### Rebuild llama.cpp with CUDA
+
+```bash
+make llama-build-gpu    # uses LLAMA_CUDA_ARCH=86 (RTX 30xx); override with:
+LLAMA_CUDA_ARCH=89 make llama-build-gpu   # RTX 40xx
+```
+
+---
+
+## Project Layout
+
+```
+apps/cli/atri_cli/       TUI entry point, service manager, Rich renderer
+services/orchestrator/   FastAPI brain — agent loop, LLM adapter, auth, MCP dispatch
+services/mcp/            FastMCP tool server — filesystem, bash, grep, todo, web search
+runtime/llm/llama.cpp/   llama.cpp build (git submodule)
+runtime/state/           SQLite DB, logs, runtime state
+models/                  GGUF model files
+scripts/                 local_up.py, detect_hardware.py, doctor.py
+```
+
+---
+
+## Available MCP Tools
+
+| Tool | What it does |
+|---|---|
+| `read_text_file` | Read any file within the project root |
+| `write_file` | Write or overwrite a file |
+| `edit_file` | Exact-string replacement edit (use `exact_text_to_replace`) |
+| `list_directory` | List files and dirs at a path |
+| `bash_exec` | Run a shell command (sandboxed, with timeout) |
+| `grep_codebase` | Regex search across the repo (skips node_modules, .venv, models) |
+| `todo_write` / `todo_read` | Persist a task list in `runtime/state/todos.json` |
+| `search_web` | Tavily web search (requires `TAVILY_API_KEY`) |
+
+---
+
+## Configuration
+
+All config lives in `services/orchestrator/.env` (copy from `.env.example`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` | llama-server endpoint |
+| `LLM_API_KEY` | — | Must match `--api-key` flag on llama-server |
+| `AGENT_MAX_TURNS` | `10` | Max ReAct loop iterations per request |
+| `AGENT_ENABLE_THINKING` | `false` | Enable Gemma reasoning tokens |
+| `ORCHESTRATOR_DATABASE_URL` | `sqlite:///runtime/state/orchestrator.db` | Session store |
+| `TAVILY_API_KEY` | — | Required for `search_web` tool |
+
+---
+
+## Uninstall
+
+```bash
+~/.local/share/atri/uninstall.sh
 ```
 
 ---
 
 ## License
 
-Atri Code is released under the MIT License. See `LICENSE` for details.
+MIT — see [LICENSE](LICENSE).
