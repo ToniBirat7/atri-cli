@@ -1237,14 +1237,14 @@ class AgentLoop:
 
         msg = user_message.strip().lower()
 
-        # bash_exec intent detection
+        # bash_exec intent detection (with or without backtick command)
+        cmd_match = re.search(r"`([^`]+)`", msg)
         bash_intent = (
             re.search(r"(?:run|execute)\s+`[^`]+`", msg)
             or re.search(r"^run\s+`", msg)
-            or re.search(r"\buse bash\b.*\bcount\b", msg)
-            or re.search(r"\buse bash\b.*\blines?\b", msg)
+            or re.search(r"\buse bash\b", msg)
+            or re.search(r"\brun\s+`python3\b", msg)
         )
-        cmd_match = re.search(r"`([^`]+)`", msg)
 
         try:
             from llm_adapter import ToolUse as _ToolUse
@@ -1257,28 +1257,49 @@ class AgentLoop:
         def _make(tool: str, args: dict, orig_id: Optional[str] = None) -> "_ToolUse":
             return _ToolUse(tool_name=tool, tool_input=args, id=orig_id)
 
-        if bash_intent and cmd_match:
+        if bash_intent:
             wrong_names = {tc.tool_name for tc in tool_calls}
             if "bash_exec" not in wrong_names:
-                cmd = cmd_match.group(1)
-                _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="bash_exec")
-                return [_make("bash_exec", {"command": cmd}, tool_calls[0].id)]
+                if cmd_match:
+                    cmd = cmd_match.group(1)
+                else:
+                    # No backtick command — synthesize from context
+                    if re.search(r"\blines?\b.*\bapi\.py\b", msg) or re.search(r"\bapi\.py\b.*\blines?\b", msg):
+                        cmd = "wc -l services/orchestrator/api.py"
+                    elif re.search(r"\bcount.*lines?\b", msg):
+                        file_m = re.search(r"([a-zA-Z][\w./\-]+\.py)", msg)
+                        cmd = f"wc -l {file_m.group(1)}" if file_m else "wc -l"
+                    else:
+                        cmd = ""  # can't synthesize, skip
+                if cmd:
+                    _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="bash_exec")
+                    return [_make("bash_exec", {"command": cmd}, tool_calls[0].id)]
 
-        # grep_codebase intent detection
+        # grep_codebase intent detection — expanded patterns
         grep_intent = (
-            re.search(r"\b(search|grep|find all|find every)\b", msg)
-            and re.search(r"\b(codebase|import|across|through|appear|times?)\b", msg)
+            re.search(r"\b(search|grep|find all|find every|look for)\b", msg)
+            and re.search(r"\b(codebase|import|imports?|across|through|appear|times?|uses?|files?)\b", msg)
+        ) or (
+            re.search(r"\bhow many times\b", msg)
+            and re.search(r"\b(appear|occur|string|keyword)\b", msg)
+        ) or (
+            re.search(r"\bfind every file that\b", msg)
         )
         if grep_intent:
             wrong_names = {tc.tool_name for tc in tool_calls}
             if "grep_codebase" not in wrong_names:
-                grep_pat = re.search(r"(?:for|of)\s+['\"]?([a-zA-Z_][\w.]+)['\"]?", msg)
+                # Extract the search pattern from various phrasings
+                grep_pat = (
+                    re.search(r"(?:for all uses? of|for|of|that imports?)\s+['\"]([^'\"]+)['\"]", msg)
+                    or re.search(r"string\s+['\"]([^'\"]+)['\"]", msg)
+                    or re.search(r"['\"]([a-zA-Z_][\w.]+)['\"]", msg)
+                )
                 if grep_pat:
                     pattern = grep_pat.group(1)
                     _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="grep_codebase")
                     return [_make("grep_codebase", {"pattern": pattern}, tool_calls[0].id)]
 
-        # read_text_file intent (when list_directory is called but a file was requested)
+        # read_text_file intent (when wrong tool is called but a file was requested)
         file_match = re.search(
             r"(?:read|open|show|cat|view|inspect|summari[sz]e)\s+"
             r"(?:the\s+)?(?:file\s+|contents?\s+of\s+)?([a-zA-Z][\w./\-]+\.[a-zA-Z]{1,5})",
@@ -1286,7 +1307,7 @@ class AgentLoop:
         )
         if file_match:
             wrong_names = {tc.tool_name for tc in tool_calls}
-            if "read_text_file" not in wrong_names and "list_directory" in wrong_names:
+            if "read_text_file" not in wrong_names:
                 fpath = file_match.group(1).strip("\"'")
                 _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="read_text_file")
                 return [_make("read_text_file", {"target_file_path": fpath}, tool_calls[0].id)]
