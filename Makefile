@@ -66,7 +66,7 @@ web-up: ## Auto-detect GPU/CPU, build, and start Web-focused pipeline
 	@python3 scripts/local_up.py --repo-dir . --skip-clone --mode web
 
 dev-up: env ## Start all services (llama + orchestrator + frontend)
-	@echo "$(GREEN)Starting Tarbar_AI services...$(NC)"
+	@echo "$(GREEN)Starting Atri Code services...$(NC)"
 	@echo "$(BLUE)1. Starting llama.cpp on port $(LLAMA_PORT)$(NC)"
 	@(cd runtime/llm/llama.cpp && ./build/bin/llama-server -m ../../../models/gemma-4-e2b-it-Q4_K_M.gguf --jinja --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --api-key secret > ../../../llama.log 2>&1 &)
 	@sleep 3
