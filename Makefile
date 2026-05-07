@@ -23,7 +23,7 @@ ORCHESTRATOR_PORT := 8001
 FRONTEND_PORT := 3000
 
 help: ## Show this help message
-	@echo "$(BLUE)Tarbar_AI Development Makefile$(NC)"
+	@echo "$(BLUE)Atri Code — Local AI Coding Agent$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Local Development:$(NC)"
 	@echo "  make dev-up              Start all services (llama, orchestrator, frontend)"
@@ -99,6 +99,12 @@ dev-down: ## Stop all services
 	@lsof -ti tcp:$(ORCHESTRATOR_PORT) | xargs -r kill || true
 	@lsof -ti tcp:$(FRONTEND_PORT) | xargs -r kill || true
 	@sleep 1
+	@echo "$(GREEN)[OK] Services stopped$(NC)"
+
+stop: ## Stop all Atri services (llama + orchestrator)
+	@echo "$(YELLOW)Stopping Atri services...$(NC)"
+	@lsof -ti tcp:$(LLAMA_PORT) | xargs -r kill 2>/dev/null || true
+	@lsof -ti tcp:$(ORCHESTRATOR_PORT) | xargs -r kill 2>/dev/null || true
 	@echo "$(GREEN)[OK] Services stopped$(NC)"
 
 logs: ## Tail logs from all services

@@ -97,8 +97,9 @@ def build_system_prompt(
             2. To list files → call list_directory. NEVER list files from memory.
             3. To run a shell command → call bash_exec. NEVER show fake terminal output.
             4. To search code → call grep_codebase. NEVER guess which files contain something.
-            5. For math, explanations, or questions with no file/shell requirement → answer directly.
-            6. If you are unsure which tool to use, call list_directory first.
+            5. To edit a file → call edit_file with exact_text_to_replace. NEVER write fake diffs.
+            6. For math, explanations, or questions with no file/shell requirement → answer directly.
+            7. If you are unsure which tool to use, call list_directory first.
             """
         ).strip()
     else:

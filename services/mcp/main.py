@@ -800,14 +800,31 @@ def create_project(target_project_path: str, template: str = "python-basic") -> 
             # Just create the main file for now
             (full_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
             
-        return f"Successfully created {template} project at {path}"
+        return f"Successfully created {template} project at {target_project_path}"
     except Exception as e:
         return f"Error creating project: {e}"
 
-# ─── In-memory todo list ──────────────────────────────────────────────────────
-# Shared state for the lifetime of the MCP server process.
+# ─── Persistent todo list ─────────────────────────────────────────────────────
+# Stored in a JSON file so todos survive MCP server restarts.
 _TODO_LOCK = threading.Lock()
-_TODOS: list[dict[str, Any]] = []
+
+def _todo_file() -> Path:
+    """Return the path to the persistent todo store."""
+    state_dir = Path(__file__).resolve().parents[2] / "runtime" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / "todos.json"
+
+def _load_todos() -> list[dict]:
+    f = _todo_file()
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+def _save_todos(todos: list[dict]) -> None:
+    _todo_file().write_text(json.dumps(todos, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 @mcp.tool
@@ -831,16 +848,16 @@ def todo_write(todos: list[dict[str, Any]]) -> dict[str, Any]:
             "priority": item.get("priority", "medium"),
         })
     with _TODO_LOCK:
-        _TODOS.clear()
-        _TODOS.extend(validated)
-    return {"ok": True, "count": len(validated), "todos": list(_TODOS)}
+        _save_todos(validated)
+    return {"ok": True, "count": len(validated), "todos": validated}
 
 
 @mcp.tool
 def todo_read() -> dict[str, Any]:
     """Return the current todo list."""
     with _TODO_LOCK:
-        return {"todos": list(_TODOS), "count": len(_TODOS)}
+        todos = _load_todos()
+    return {"todos": todos, "count": len(todos)}
 
 
 # ─── Bash execution ───────────────────────────────────────────────────────────
@@ -954,7 +971,7 @@ def grep_codebase(
         flags = [] if case_sensitive else ["-i"]
         cmd = [rg, "--json", "-m", str(max_results), "--glob", file_glob] + flags + [pattern, str(search_root)]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             matches: list[dict[str, Any]] = []
             for line in proc.stdout.splitlines():
                 try:
@@ -972,35 +989,40 @@ def grep_codebase(
         except Exception:
             pass  # Fall through to Python fallback
 
-    # Python fallback
+    # Python fallback — excluded directories to prevent scanning large non-code dirs
+    _SKIP_DIRS = frozenset({
+        "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+        ".next", "build", "dist", ".pytest_cache", "models", ".mypy_cache",
+    })
     flags = 0 if case_sensitive else re.IGNORECASE
     try:
         regex = re.compile(pattern, flags)
     except re.error as exc:
-        return {"ok": False, "error": f"Invalid regex: {exc}"}
+        return {"ok": False, "error": f"Invalid regex: {exc}", "matches": []}
 
-    matches = []
-    root = search_root if search_root.is_dir() else search_root.parent
-    glob_files = list(root.rglob(file_glob)) if search_root.is_dir() else [search_root]
+    matches: list[dict[str, Any]] = []
+    glob_re = re.compile(fnmatch.translate(file_glob))
 
-    for filepath in glob_files:
-        if not filepath.is_file():
-            continue
-        if _has_hidden_component(filepath):
-            continue
-        try:
-            text = _read_text(filepath)
-        except Exception:
-            continue
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if regex.search(line):
-                matches.append({
-                    "file": _to_relative_display(filepath),
-                    "line": lineno,
-                    "content": line.rstrip(),
-                })
-                if len(matches) >= max_results:
-                    return {"ok": True, "matches": matches, "count": len(matches), "truncated": True, "engine": "python"}
+    for dirpath, dirnames, filenames in os.walk(str(search_root)):
+        # Prune excluded dirs in-place so os.walk doesn't descend into them
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fname in filenames:
+            if not glob_re.match(fname):
+                continue
+            fpath = Path(dirpath) / fname
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if regex.search(line):
+                    matches.append({
+                        "file": _to_relative_display(fpath),
+                        "line": lineno,
+                        "content": line.rstrip("\n"),
+                    })
+                    if len(matches) >= max_results:
+                        return {"ok": True, "matches": matches, "count": len(matches), "engine": "python", "truncated": True}
 
     return {"ok": True, "matches": matches, "count": len(matches), "engine": "python"}
 
