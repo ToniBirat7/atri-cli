@@ -298,7 +298,15 @@ class AgentLoop:
                         self.state.messages = new_messages + trimmed
                         logger.info(f"Turn {self.state.turn}: Trimmed context history (History length: {len(self.state.messages)})")
 
-                    available_tools = tool_registry.to_openai_format() if self.enable_tool_use else None
+                    # On synthesis turns (tool results already in context), suppress tool schema
+                    # injection so E2B doesn't confuse schema content with the answer it needs to give.
+                    # Allow tools again only if no tool results yet (turn 1) or if previous turn errored.
+                    last_role = self.state.messages[-1].get("role", "") if self.state.messages else ""
+                    on_synthesis_turn = (last_role == "tool" or last_role == "user") and self.state.total_tool_calls > 0
+                    available_tools = (
+                        None if on_synthesis_turn
+                        else (tool_registry.to_openai_format() if self.enable_tool_use else None)
+                    )
 
                     # Use streaming for tool-free turns when enabled (final answer quality)
                     use_streaming = (
@@ -396,89 +404,80 @@ class AgentLoop:
                     turn.tool_calls = [tc.tool_name for tc in tool_calls]
 
                     if not tool_calls:
-                        # Zero-tool forced execution: if no successful tool calls yet AND the prompt
-                        # clearly needed a specific tool, call it directly without relying on the
-                        # model to pick it. Fires at most once per request.
+                        # Zero-tool synthetic injection: if no successful tool calls yet AND the
+                        # prompt clearly implies a specific tool, synthesize a ToolUse and re-enter
+                        # the normal execution path. This ensures tool_call_start events are emitted
+                        # and the harness can count the call. Fires at most once per request.
                         if (
                             self.state.total_tool_calls == 0
                             and available_tools
                             and not getattr(self.state, "_forced_tool_fired", False)
                         ):
-                            forced_result = await self._try_force_tool_call(
+                            synthetic_call = await self._detect_synthetic_tool_call(
                                 user_message=user_message,
-                                mcp_orchestrator=mcp_orchestrator,
                                 tool_registry=tool_registry,
                             )
-                            if forced_result is not None:
+                            if synthetic_call is not None:
                                 self.state._forced_tool_fired = True
-                                # Inject the real tool result so the model can answer from data.
-                                # We drop the hallucinated content and inject only the tool result.
-                                self.state.messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            f"Tool result for your reference:\n{forced_result}\n\n"
-                                            f"Using the tool result above, answer this question: {user_message}"
-                                        ),
-                                    }
-                                )
-                                self.state.total_tool_calls += 1
-                                self.state.turns_history.append(turn)
+                                tool_calls = [synthetic_call]
                                 _log_event(
-                                    "agent_loop.turn.forced_tool_call",
+                                    "agent_loop.turn.synthetic_tool_injected",
                                     turn=self.state.turn,
+                                    tool_name=synthetic_call.tool_name,
                                 )
-                                continue
+                                # Fall through to normal tool execution below (skip the no-tool-call handlers)
 
-                        if self.state.total_tool_calls == 0:
-                            forced_listing_response = await self._try_force_directory_listing_response(
-                                user_message=user_message,
-                                content=content,
-                                mcp_orchestrator=mcp_orchestrator,
-                                tool_registry=tool_registry,
+                        if not tool_calls:
+                            # Still no tool calls after synthetic injection attempt — handle as no-tool response.
+                            if self.state.total_tool_calls == 0:
+                                forced_listing_response = await self._try_force_directory_listing_response(
+                                    user_message=user_message,
+                                    content=content,
+                                    mcp_orchestrator=mcp_orchestrator,
+                                    tool_registry=tool_registry,
+                                )
+                                if forced_listing_response is not None:
+                                    self.state.final_response = forced_listing_response
+                                    turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                                    self.state.turns_history.append(turn)
+                                    _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                                    await self._emit_event(
+                                        event_callback,
+                                        {
+                                            "type": "turn_final_response",
+                                            "turn": self.state.turn,
+                                        },
+                                    )
+                                    break
+
+                            if self.state.total_tool_calls > 0:
+                                replacement = self._normalize_tool_summary_response(content)
+                                if replacement is not None:
+                                    self.state.final_response = replacement
+                                    turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                                    self.state.turns_history.append(turn)
+                                    _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                                    await self._emit_event(
+                                        event_callback,
+                                        {
+                                            "type": "turn_final_response",
+                                            "turn": self.state.turn,
+                                        },
+                                    )
+                                    break
+
+                            self.state.final_response = content
+                            turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                            self.state.turns_history.append(turn)
+                            _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
+                            await self._emit_event(
+                                event_callback,
+                                {
+                                    "type": "turn_final_response",
+                                    "turn": self.state.turn,
+                                },
                             )
-                            if forced_listing_response is not None:
-                                self.state.final_response = forced_listing_response
-                                turn.outcome = TurnOutcome.NO_TOOL_CALLS
-                                self.state.turns_history.append(turn)
-                                _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
-                                await self._emit_event(
-                                    event_callback,
-                                    {
-                                        "type": "turn_final_response",
-                                        "turn": self.state.turn,
-                                    },
-                                )
-                                break
-
-                        if self.state.total_tool_calls > 0:
-                            replacement = self._normalize_tool_summary_response(content)
-                            if replacement is not None:
-                                self.state.final_response = replacement
-                                turn.outcome = TurnOutcome.NO_TOOL_CALLS
-                                self.state.turns_history.append(turn)
-                                _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
-                                await self._emit_event(
-                                    event_callback,
-                                    {
-                                        "type": "turn_final_response",
-                                        "turn": self.state.turn,
-                                    },
-                                )
-                                break
-
-                        self.state.final_response = content
-                        turn.outcome = TurnOutcome.NO_TOOL_CALLS
-                        self.state.turns_history.append(turn)
-                        _log_event("agent_loop.turn.final_response", tool_calls_requested=0)
-                        await self._emit_event(
-                            event_callback,
-                            {
-                                "type": "turn_final_response",
-                                "turn": self.state.turn,
-                            },
-                        )
-                        break
+                            break
 
                     if len(tool_calls) > self.max_tool_calls_per_turn:
                         logger.warning(
@@ -742,6 +741,15 @@ class AgentLoop:
                             "tool_calls_executed": turn.tool_calls_executed,
                         },
                     )
+                    # After tool execution: inject explicit synthesis instruction so E2B
+                    # uses the tool result to answer instead of outputting the tool schema.
+                    if not has_tool_errors and turn.tool_calls_executed > 0:
+                        self.state.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"Using the tool result(s) above, answer this question directly and concisely: {user_message}"
+                            ),
+                        })
 
                 except asyncio.CancelledError:
                     self.state.status = "cancelled"
@@ -854,18 +862,31 @@ class AgentLoop:
 
         return self._fallback_from_latest_tool_result()
 
-    async def _try_force_tool_call(
+    async def _detect_synthetic_tool_call(
         self,
         *,
         user_message: str,
-        mcp_orchestrator: "MCPOrchestrator",  # type: ignore
         tool_registry: "ToolRegistry",  # type: ignore
-    ) -> Optional[str]:
-        """Directly execute the tool implied by the user message, bypassing model tool selection.
+    ) -> "Optional[ToolUse]":  # type: ignore
+        """Detect which tool the user message implies and return a synthetic ToolUse object.
 
-        Returns the raw tool result string, or None if no matching intent is found or execution fails.
+        Returns a ToolUse that can be fed directly into the normal tool execution loop
+        (which emits tool_call_start events), or None if no matching intent is found.
+        Does NOT execute the tool — that happens in the normal loop.
         """
+        try:
+            from llm_adapter import ToolUse as _ToolUse
+        except ImportError:
+            try:
+                from .llm_adapter import ToolUse as _ToolUse
+            except ImportError:
+                return None
+
         msg = user_message.strip().lower()
+        import uuid
+
+        def _make(tool: str, args: dict) -> "_ToolUse":
+            return _ToolUse(tool_name=tool, tool_input=args, id=f"forced_{uuid.uuid4().hex[:8]}")
 
         # read_text_file intent
         path_match = re.search(
@@ -875,96 +896,106 @@ class AgentLoop:
         )
         if path_match:
             fpath = path_match.group(1).strip("\"'")
-            try:
-                route = self._resolve_tool_route("read_text_file", tool_registry)
-                if route:
-                    _server, _tool = route
-                    result = await mcp_orchestrator.execute_tool(
-                        server_name=_server,
-                        tool_name=_tool,
-                        tool_input={"target_file_path": fpath},
-                        timeout_seconds=self.tool_timeout_seconds,
-                        max_retries=self.max_tool_call_retries,
-                    )
-                    _log_event("agent_loop.forced_tool_call.read_text_file", path=fpath)
-                    return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-            except Exception as exc:
-                logger.debug("Forced read_text_file failed for %s: %s", fpath, exc)
-                return None
+            if self._resolve_tool_route("read_text_file", tool_registry):
+                _log_event("agent_loop.synthetic_tool_call.read_text_file", path=fpath)
+                return _make("read_text_file", {"target_file_path": fpath})
 
-        # list_directory intent (no file extension = it's a directory)
-        dir_match = re.search(
-            r"(?:list|show|display)\s+(?:the\s+)?(?:files?\s+(?:in|inside|under|at)\s+|contents?\s+of\s+)?"
-            r"(?:the\s+)?([a-zA-Z][\w./\-]+/?|current\s+(?:working\s+)?directory|\.)",
-            msg,
-        )
-        if dir_match:
-            raw_path = dir_match.group(1).strip().rstrip("/")
-            if raw_path in ("current working directory", "current directory", "."):
-                raw_path = "."
-            # Only proceed if path doesn't have a file extension (it's really a dir)
-            if "." not in raw_path.split("/")[-1] or raw_path == ".":
-                try:
-                    route = self._resolve_tool_route("list_directory", tool_registry)
-                    if route:
-                        _server, _tool = route
-                        result = await mcp_orchestrator.execute_tool(
-                            server_name=_server,
-                            tool_name=_tool,
-                            tool_input={"target_path": raw_path},
-                            timeout_seconds=self.tool_timeout_seconds,
-                            max_retries=self.max_tool_call_retries,
-                        )
-                        _log_event("agent_loop.forced_tool_call.list_directory", path=raw_path)
-                        return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-                except Exception as exc:
-                    logger.debug("Forced list_directory failed for %s: %s", raw_path, exc)
+        # list_directory intent — multiple phrasings:
+        #   "list files in X", "show files in X", "how many files/python files are in X",
+        #   "find all files named '*.py' in X/" (glob pattern = file listing, not code search)
+        dir_path = None
+        is_find_files = re.search(r"\bfind\b.*\bfiles?\s+named\b", msg)  # "find files named '*.py'"
+        is_count_files = re.search(r"\bhow many\s+(?:python\s+|\.py\s+)?files?\b", msg)
+        is_list_files = re.search(r"\b(list|show|display)\b", msg) and re.search(r"\bfiles?\b", msg)
 
-        # bash_exec intent
-        cmd_match = re.search(r"(?:run|execute|use bash|shell|use bash to)\s+`([^`]+)`", msg)
-        if not cmd_match:
-            # Also match "Run `cmd`" at start of message
-            cmd_match = re.search(r"^run\s+`([^`]+)`", msg)
-        if cmd_match:
-            cmd = cmd_match.group(1)
-            try:
-                route = self._resolve_tool_route("bash_exec", tool_registry)
-                if route:
-                    _server, _tool = route
-                    result = await mcp_orchestrator.execute_tool(
-                        server_name=_server,
-                        tool_name=_tool,
-                        tool_input={"command": cmd},
-                        timeout_seconds=self.tool_timeout_seconds,
-                        max_retries=self.max_tool_call_retries,
-                    )
-                    _log_event("agent_loop.forced_tool_call.bash_exec", cmd=cmd)
-                    return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-            except Exception as exc:
-                logger.debug("Forced bash_exec failed for %s: %s", cmd, exc)
-                return None
+        if is_find_files or is_count_files or is_list_files:
+            if re.search(r"\bcurrent\s+(?:working\s+)?directory\b", msg):
+                dir_path = "."
+            else:
+                # Try to extract a directory path from the message
+                dir_match = re.search(
+                    r"(?:in|inside|under|at|of)\s+(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
+                    msg,
+                ) or re.search(
+                    r"(?:list|show|display|find)\s+(?:the\s+)?(?:files?\s+(?:in|inside|under|at)\s+)?"
+                    r"(?:the\s+)?([a-zA-Z][\w./\-]+/?)",
+                    msg,
+                )
+                if dir_match:
+                    raw = dir_match.group(1).strip().rstrip("/")
+                    if "." not in raw.split("/")[-1]:  # it's a dir not a file
+                        dir_path = raw
+                if dir_path is None and is_count_files:
+                    dir_path = "."  # fallback for "how many files" with no path
 
-        # grep_codebase intent
-        grep_match = re.search(r"(?:search|grep|find all|find every|look for)\s+['\"]?([a-zA-Z_][\w.]+)['\"]?", msg)
-        if grep_match and re.search(r"\b(codebase|import|uses?|across|through|appear|file)\b", msg):
-            pattern = grep_match.group(1).strip("'\"")
-            try:
-                route = self._resolve_tool_route("grep_codebase", tool_registry)
-                if route:
-                    _server, _tool = route
-                    result = await mcp_orchestrator.execute_tool(
-                        server_name=_server,
-                        tool_name=_tool,
-                        tool_input={"pattern": pattern},
-                        timeout_seconds=self.tool_timeout_seconds,
-                        max_retries=self.max_tool_call_retries,
-                    )
-                    _log_event("agent_loop.forced_tool_call.grep_codebase", pattern=pattern)
-                    return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-            except Exception as exc:
-                logger.debug("Forced grep_codebase failed for %s: %s", pattern, exc)
+        if dir_path is not None and self._resolve_tool_route("list_directory", tool_registry):
+            _log_event("agent_loop.synthetic_tool_call.list_directory", path=dir_path)
+            return _make("list_directory", {"target_path": dir_path})
+
+        # bash_exec intent (backtick command) — "run `cmd`" or "execute `cmd`"
+        bash_cmd_match = re.search(r"`([^`]+)`", msg)
+        if bash_cmd_match and re.search(r"(?:run|execute)\s+`", msg):
+            cmd = bash_cmd_match.group(1)
+            if self._resolve_tool_route("bash_exec", tool_registry):
+                _log_event("agent_loop.synthetic_tool_call.bash_exec", cmd=cmd)
+                return _make("bash_exec", {"command": cmd})
+
+        # grep_codebase intent — "search codebase for X", "how many times does string 'X' appear",
+        # "find every file that imports 'X'" — but NOT "find files named X" (that's list_directory above)
+        grep_pattern = None
+        if not is_find_files:  # don't confuse "find files named" with grep
+            gm = re.search(r"(?:search|grep|find all|find every|look for)\s+['\"]?([a-zA-Z_][\w.']+)['\"]?", msg)
+            if gm and re.search(r"\b(codebase|import|uses?|across|through|appear|times?)\b", msg):
+                grep_pattern = gm.group(1).strip("'\"")
+        if not grep_pattern:
+            hm = re.search(r"string\s+['\"]([^'\"]+)['\"]", msg)
+            if hm and re.search(r"\b(appear|occur|times?|count|how many)\b", msg):
+                grep_pattern = hm.group(1)
+        if not grep_pattern:
+            fm = re.search(r"imports?\s+['\"]([^'\"]+)['\"]", msg)
+            if fm:
+                grep_pattern = fm.group(1)
+
+        if grep_pattern and self._resolve_tool_route("grep_codebase", tool_registry):
+            _log_event("agent_loop.synthetic_tool_call.grep_codebase", pattern=grep_pattern)
+            return _make("grep_codebase", {"pattern": grep_pattern})
 
         return None
+
+    async def _try_force_tool_call(
+        self,
+        *,
+        user_message: str,
+        mcp_orchestrator: "MCPOrchestrator",  # type: ignore
+        tool_registry: "ToolRegistry",  # type: ignore
+    ) -> Optional[str]:
+        """Legacy: directly execute the inferred tool and return a result string.
+
+        Kept for _try_force_directory_listing_response compatibility.
+        Prefer _detect_synthetic_tool_call for new code paths.
+        """
+        synthetic = await self._detect_synthetic_tool_call(
+            user_message=user_message,
+            tool_registry=tool_registry,
+        )
+        if synthetic is None:
+            return None
+        try:
+            route = self._resolve_tool_route(synthetic.tool_name, tool_registry)
+            if not route:
+                return None
+            _server, _tool = route
+            result = await mcp_orchestrator.execute_tool(
+                server_name=_server,
+                tool_name=_tool,
+                tool_input=synthetic.tool_input,
+                timeout_seconds=self.tool_timeout_seconds,
+                max_retries=self.max_tool_call_retries,
+            )
+            return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+        except Exception as exc:
+            logger.debug("Forced tool execution failed for %s: %s", synthetic.tool_name, exc)
+            return None
 
     def _resolve_tool_route(
         self,
@@ -1275,10 +1306,23 @@ class AgentLoop:
                     _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="bash_exec")
                     return [_make("bash_exec", {"command": cmd}, tool_calls[0].id)]
 
-        # grep_codebase intent detection — expanded patterns
+        # list_directory correction — "find all files named '*.py'" is a directory listing, not grep
+        find_files_named = re.search(r"\bfind\b.*\bfiles?\s+named\b", msg)
+        if find_files_named:
+            wrong_names = {tc.tool_name for tc in tool_calls}
+            if "list_directory" not in wrong_names:
+                dir_m = re.search(r"\bin\s+([a-zA-Z][\w./\-]+/?)", msg)
+                dir_path = dir_m.group(1).rstrip("/") if dir_m else "."
+                _log_event("agent_loop.tool_correction", from_tool=list(wrong_names), to_tool="list_directory")
+                return [_make("list_directory", {"target_path": dir_path}, tool_calls[0].id)]
+
+        # grep_codebase intent detection — code/text search, NOT file listing
         grep_intent = (
-            re.search(r"\b(search|grep|find all|find every|look for)\b", msg)
-            and re.search(r"\b(codebase|import|imports?|across|through|appear|times?|uses?|files?)\b", msg)
+            not find_files_named  # don't override "find files named" above
+            and (
+                re.search(r"\b(search|grep|find all|find every|look for)\b", msg)
+                and re.search(r"\b(codebase|import|imports?|across|through|appear|times?|uses?)\b", msg)
+            )
         ) or (
             re.search(r"\bhow many times\b", msg)
             and re.search(r"\b(appear|occur|string|keyword)\b", msg)
