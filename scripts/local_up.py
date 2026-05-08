@@ -58,6 +58,25 @@ def _which_or_fail(name: str) -> None:
         raise RuntimeError(f"Missing required command: {name}")
 
 
+def _find_cuda_compatible_gcc() -> str | None:
+    """Return path to a GCC <=14 for use as CUDA host compiler, or None if system GCC is fine."""
+    import re
+    # Check system GCC version
+    try:
+        out = subprocess.run(["g++", "--version"], capture_output=True, text=True).stdout
+        m = re.search(r"\(GCC\) (\d+)\.", out)
+        if m and int(m.group(1)) <= 14:
+            return None  # system GCC is compatible
+    except Exception:
+        return None
+    # Try versioned GCC binaries from newest-compatible downward
+    for ver in range(14, 9, -1):
+        path = shutil.which(f"g++-{ver}")
+        if path:
+            return path
+    return None
+
+
 def _python_bin(repo_dir: Path) -> Path:
     if os.name == "nt":
         return repo_dir / "services/orchestrator/.venv/Scripts/python.exe"
@@ -324,6 +343,14 @@ def _build_llama(repo_dir: Path, use_gpu: bool, hw_config: dict | None = None) -
         else:
             print("[local-up] No GPU detected; using CPU-optimized build")
             cmake_args.extend(["-DGGML_CUDA=OFF", "-DGGML_OPENMP=ON"])
+
+    # CUDA host compiler compatibility: nvcc has a max supported GCC version.
+    # If system GCC is too new (e.g. GCC 16 with CUDA 13.x), inject an older one.
+    if any("-DGGML_CUDA=ON" in a for a in cmake_args):
+        cuda_host = _find_cuda_compatible_gcc()
+        if cuda_host:
+            cmake_args.append(f"-DCMAKE_CUDA_HOST_COMPILER={cuda_host}")
+            print(f"[local-up] Using CUDA host compiler: {cuda_host}")
 
     cmake_cmd = ["cmake", "-S", ".", "-B", "build"] + cmake_args
     _run(cmake_cmd, cwd=llama_dir)
