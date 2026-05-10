@@ -24,7 +24,7 @@ from pathlib import Path
 DEFAULT_REPO_URL = "https://github.com/ToniBirat7/Agentic_AI.git"
 DEFAULT_REPO_DIR = "Agentic_AI"
 DEFAULT_BRANCH = "master"
-MODEL_REL_PATH = Path("models/gemma-4-e2b-it-Q4_K_M.gguf")
+MODEL_REL_PATH = Path("models/gemma-4-E2B-it-Q4_K_M.gguf")
 MODEL_DOWNLOAD_URL = (
     "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/"
     "gemma-4-E2B-it-Q4_K_M.gguf?download=true"
