@@ -412,7 +412,12 @@ class MCPOrchestrator:
                         tools.append({
                             "name": t_dict.get("name"),
                             "description": t_dict.get("description", ""),
-                            "inputSchema": t_dict.get("inputSchema", t_dict.get("input_schema", {"type": "object", "properties": {}}))
+                            "inputSchema": (
+                            t_dict.get("inputSchema")
+                            or t_dict.get("input_schema")
+                            or t_dict.get("parameters")
+                            or {"type": "object", "properties": {}}
+                        )
                         })
                     if tools:
                         # Update schema lookup for coercion

@@ -66,15 +66,20 @@ class OrchestratorDatabase:
         if database_url == "sqlite:///:memory:":
             return Path(":memory:")
 
-        if database_url.startswith("sqlite:////"):
-            return Path("/" + database_url.removeprefix("sqlite:////"))
-
+        # Strip "sqlite:///" prefix then handle the remaining path.
+        # Convention: sqlite:///relative  → relative path
+        #             sqlite:////abs      → absolute path (4th slash starts /abs)
+        # We also handle accidentally-5-slash URLs from path concatenation bugs.
         if database_url.startswith("sqlite:///"):
-            return Path(database_url.removeprefix("sqlite:///"))
+            rest = database_url[len("sqlite:///"):]
+            if rest.startswith("/"):
+                # Absolute: normalize away any accidental double slashes
+                return Path("/" + rest.lstrip("/"))
+            return Path(rest)  # relative — caller resolves against CWD
 
         raw_path = parsed.path or database_url.removeprefix("sqlite://")
         if raw_path.startswith("/"):
-            return Path(raw_path.lstrip("/"))
+            return Path(raw_path)
         return Path.cwd() / raw_path
 
     @staticmethod

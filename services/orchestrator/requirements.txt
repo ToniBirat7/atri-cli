@@ -1,12 +1,15 @@
 # Orchestrator Service Dependencies
 
 # FastAPI and async server
-fastapi==0.104.1
-starlette==0.27.0
-uvicorn[standard]==0.24.0
+fastapi>=0.115.0
+starlette>=0.40.0
+uvicorn[standard]>=0.24.0
+
+# MCP tools
+fastmcp>=2.0.0
 
 # HTTP client for llama.cpp integration
-httpx==0.25.1
+httpx>=0.25.0
 
 # Data validation
 pydantic>=2.10.0,<3.0.0

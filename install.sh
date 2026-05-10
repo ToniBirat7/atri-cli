@@ -256,6 +256,12 @@ if [ ! -f "$SRC_DIR/services/orchestrator/.env" ]; then
     ok ".env created from template"
 fi
 
+# Patch database URL to absolute path so it works regardless of orchestrator CWD
+DB_STATE_DIR="$SRC_DIR/runtime/state"
+mkdir -p "$DB_STATE_DIR"
+sed -i "s|ORCHESTRATOR_DATABASE_URL=.*|ORCHESTRATOR_DATABASE_URL=sqlite:///${DB_STATE_DIR}/orchestrator.db|" \
+    "$SRC_DIR/services/orchestrator/.env"
+
 # Write hardware config
 python3 "$SRC_DIR/scripts/detect_hardware.py" --save \
     --install-root "$ATRI_INSTALL_ROOT" 2>/dev/null || true
