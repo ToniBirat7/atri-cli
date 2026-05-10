@@ -301,6 +301,7 @@ class ServiceManager:
                 "LLM_TIMEOUT_SECONDS=120",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=15",
+                "MCP_ALLOW_HIDDEN=true",
                 "AGENT_MAX_TURNS=10",
                 "AGENT_MAX_TOOL_CALLS_PER_TURN=3",
                 "AGENT_ENABLE_TOOL_USE=true",

@@ -191,11 +191,21 @@ def _resolve_user_path(user_path: str) -> Path:
             "Path is outside allowed directories."
         )
 
-    if not ALLOW_HIDDEN and _has_hidden_component(resolved):
-        raise PermissionError(
-            f"Access denied for hidden path '{user_path}'. "
-            "Set MCP_ALLOW_HIDDEN=true to allow hidden files/directories."
-        )
+    if not ALLOW_HIDDEN:
+        # Only check for hidden components in the path *relative* to the allowed dir.
+        # The allowed dir itself may live under ~/.local or similar — that's pre-approved
+        # by configuration and should not block access to files within it.
+        for root in POLICY.get_allowed_dirs():
+            try:
+                relative = resolved.relative_to(root)
+                if _has_hidden_component(relative):
+                    raise PermissionError(
+                        f"Access denied for hidden path '{user_path}'. "
+                        "Set MCP_ALLOW_HIDDEN=true to allow hidden files/directories."
+                    )
+                break
+            except ValueError:
+                continue
 
     return resolved
 
