@@ -373,7 +373,7 @@ class ServiceManager:
         if template_file.exists():
             cmd.extend(["--chat-template-file", str(template_file)])
         if flash:
-            cmd.append("--flash-attn")
+            cmd.extend(["--flash-attn", "on"])
         if config.get("mlock", False):
             cmd.append("--mlock")
 
