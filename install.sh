@@ -176,6 +176,23 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
     cmake_flags="-DLLAMA_NATIVE=ON"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
         cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+        # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
+        SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
+        if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
+            CUDA_HOST_CXX=""
+            for _ver in 14 13 12 11 10; do
+                if command -v "g++-$_ver" &>/dev/null; then
+                    CUDA_HOST_CXX=$(command -v "g++-$_ver")
+                    break
+                fi
+            done
+            if [ -n "$CUDA_HOST_CXX" ]; then
+                cmake_flags="$cmake_flags -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_CXX"
+                info "GCC $SYS_GCC_VER too new for CUDA — using host compiler: $CUDA_HOST_CXX"
+            else
+                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 (AUR: yay -S gcc14) then rerun installer."
+            fi
+        fi
     elif [ "$ACCEL" = "rocm" ]; then
         cmake_flags="$cmake_flags -DGGML_HIP=ON"
     fi
