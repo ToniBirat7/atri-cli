@@ -417,19 +417,14 @@ def _remove_path(path: Path) -> bool:
 
 
 def _compile_and_abstract(repo_dir: Path) -> None:
-    """Byte-compile Python files and remove source to abstract the implementation."""
+    """Byte-compile Python files for faster startup."""
     print("[local-up] Abstracting implementation (compiling to bytecode)...")
     import compileall
-    
-    # Compile apps and services
+
     compileall.compile_dir(str(repo_dir / "apps"), force=True, quiet=1)
     compileall.compile_dir(str(repo_dir / "services"), force=True, quiet=1)
-    
-    # Remove .py files in those directories
-    for py_file in list(repo_dir.glob("apps/**/*.py")) + list(repo_dir.glob("services/**/*.py")):
-        if py_file.name != "__init__.py": # Keep __init__.py for package structure
-             py_file.unlink()
-             
+
+    # Source files are intentionally kept — removing them breaks editable pip installs.
     print("[local-up] Implementation abstracted.")
 
 
