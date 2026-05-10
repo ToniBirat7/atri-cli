@@ -168,7 +168,7 @@ if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
         else
             cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
             find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
-                -o -name "*.dylib" \) \
+                -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
                 -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
             chmod +x "$LLAMA_DIR/llama-server"
             ok "llama-server installed from prebuilt"
@@ -212,7 +212,7 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
         -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
     cmake --build "$LLAMA_SRC/build" --target llama-server -j"$(nproc)"
     find "$LLAMA_SRC/build" -name "llama-server" | head -1 | xargs -I{} cp {} "$LLAMA_DIR/"
-    find "$LLAMA_SRC/build" \( -name "libggml*.so*" -o -name "libllama*.so*" \) \
+    find "$LLAMA_SRC/build" \( -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
         -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
     chmod +x "$LLAMA_DIR/llama-server"
     ok "llama-server built from source"
@@ -285,6 +285,7 @@ export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
 export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
 export ATRI_MODEL_DIR="$MODEL_DIR"
 export ATRI_SRC_DIR="$SRC_DIR"
+export LD_LIBRARY_PATH="$LLAMA_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "$VENV_DIR/bin/atri" "\$@"
 LAUNCHER
 chmod +x "$ATRI_BIN_DIR/atri"

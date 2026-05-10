@@ -380,9 +380,16 @@ class ServiceManager:
         log_path = self.repo_root / "llama.log"
         log_fp = open(log_path, "ab")
 
+        # Ensure shared libs co-located with the binary are found (e.g. libmtmd.so.0)
+        lib_dir = str(llama_bin.parent)
+        env = os.environ.copy()
+        existing_ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld}" if existing_ld else lib_dir
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(llama_bin.parent),
+            env=env,
             stdout=log_fp,
             stderr=log_fp,
             start_new_session=True,
