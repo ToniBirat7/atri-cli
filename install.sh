@@ -104,29 +104,27 @@ fi
 # ─── Pick llama-server prebuilt asset ────────────────────────────────────
 header "Selecting llama-server binary"
 
-LLAMA_ASSET=""
+LLAMA_ASSET_GREP=""
 LLAMA_NEEDS_COMPILE=false
 
 case "$OS-$ARCH_NORM-$ACCEL" in
     linux-x64-cuda)
-        # CUDA 12 build (covers most modern NVIDIA GPUs)
-        LLAMA_ASSET="llama-*-bin-ubuntu-x64-cuda-12.zip"
+        LLAMA_ASSET_GREP="ubuntu-x64-cuda-12"
         ;;
     linux-x64-rocm)
-        # ROCm Ubuntu build
-        LLAMA_ASSET="llama-*-bin-ubuntu-x64-rocm.zip"
+        LLAMA_ASSET_GREP="ubuntu-x64-rocm"
         ;;
     linux-x64-cpu)
-        LLAMA_ASSET="llama-*-bin-ubuntu-x64.zip"
+        LLAMA_ASSET_GREP="ubuntu-x64.zip"
         ;;
     linux-arm64-cpu|linux-arm64-*)
         LLAMA_NEEDS_COMPILE=true
         ;;
     darwin-arm64-metal)
-        LLAMA_ASSET="llama-*-bin-macos-arm64.zip"
+        LLAMA_ASSET_GREP="macos-arm64"
         ;;
     darwin-x64-*)
-        LLAMA_ASSET="llama-*-bin-macos-x64.zip"
+        LLAMA_ASSET_GREP="macos-x64"
         ;;
     *)
         LLAMA_NEEDS_COMPILE=true
@@ -137,31 +135,39 @@ esac
 STAGING_DIR=$(mktemp -d)
 mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR" "$MODEL_DIR"
 
-if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET" ]; then
+if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
     info "Downloading llama-server prebuilt ($ACCEL)..."
-    # Use GitHub API to resolve the latest matching asset URL
-    ASSET_URL=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" \
+    # Fetch release manifest and match the asset by fixed keyword strings (no sed wildcards)
+    RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+    ASSET_URL=$(echo "$RELEASE_JSON" \
         | grep "browser_download_url" \
         | grep -oE 'https://[^"]+' \
-        | grep -E "$(echo "$LLAMA_ASSET" | sed 's/\*/[^/]*/g')" \
+        | grep "$LLAMA_ASSET_GREP" \
+        | grep -v "\.exe$" \
+        | grep -v "win-" \
         | head -1 || true)
 
     if [ -z "$ASSET_URL" ]; then
-        warn "Could not find prebuilt asset matching '$LLAMA_ASSET' — falling back to compile"
+        warn "Could not find prebuilt asset for '$ACCEL' — falling back to compile"
         LLAMA_NEEDS_COMPILE=true
     else
         info "Downloading: $ASSET_URL"
         curl -fsSL --progress-bar -o "$STAGING_DIR/llama.zip" "$ASSET_URL"
         unzip -q "$STAGING_DIR/llama.zip" -d "$STAGING_DIR/llama_extracted"
         # Copy only what we need: llama-server + shared libs
-        find "$STAGING_DIR/llama_extracted" -name "llama-server" -o -name "llama-server.exe" \
-            | head -1 | xargs -I{} cp {} "$LLAMA_DIR/"
-        find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
-            -o -name "*.dylib" -o -name "ggml*.dll" \) \
-            -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+        LLAMA_SERVER_BIN=$(find "$STAGING_DIR/llama_extracted" -name "llama-server" ! -name "*.exe" | head -1)
+        if [ -z "$LLAMA_SERVER_BIN" ]; then
+            warn "llama-server not found in prebuilt zip — falling back to compile"
+            LLAMA_NEEDS_COMPILE=true
+        else
+            cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
+            find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
+                -o -name "*.dylib" \) \
+                -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+            chmod +x "$LLAMA_DIR/llama-server"
+            ok "llama-server installed from prebuilt"
+        fi
         rm -rf "$STAGING_DIR/llama.zip" "$STAGING_DIR/llama_extracted"
-        chmod +x "$LLAMA_DIR/llama-server" 2>/dev/null || true
-        ok "llama-server installed from prebuilt"
     fi
 fi
 
