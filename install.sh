@@ -248,6 +248,7 @@ python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install -q --upgrade pip
 "$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/services/orchestrator/requirements.txt"
 "$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/apps/cli/requirements.txt" 2>/dev/null || true
+"$VENV_DIR/bin/pip" install -q -e "$SRC_DIR/apps/cli"
 
 # Set up .env if missing
 if [ ! -f "$SRC_DIR/services/orchestrator/.env" ]; then
@@ -273,7 +274,7 @@ export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
 export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
 export ATRI_MODEL_DIR="$MODEL_DIR"
 export ATRI_SRC_DIR="$SRC_DIR"
-exec "$VENV_DIR/bin/python" "$SRC_DIR/apps/cli/atri_cli/main.py" "\$@"
+exec "$VENV_DIR/bin/atri" "\$@"
 LAUNCHER
 chmod +x "$ATRI_BIN_DIR/atri"
 ok "atri launcher → $ATRI_BIN_DIR/atri"
