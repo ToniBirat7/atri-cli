@@ -299,6 +299,9 @@ def compute_cmake_args(gpu: dict, cpu: dict) -> list[str]:
     args = [
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=OFF",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DLLAMA_BUILD_EXAMPLES=OFF",
+        "-DLLAMA_BUILD_SERVER=ON",
     ]
 
     vendor = gpu.get("vendor", "none")

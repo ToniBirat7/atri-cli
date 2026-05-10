@@ -21,7 +21,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-
 DEFAULT_REPO_URL = "https://github.com/ToniBirat7/Agentic_AI.git"
 DEFAULT_REPO_DIR = "Agentic_AI"
 DEFAULT_BRANCH = "master"
@@ -336,6 +335,9 @@ def _build_llama(repo_dir: Path, use_gpu: bool, hw_config: dict | None = None) -
             "-DCMAKE_BUILD_TYPE=Release",
             "-DBUILD_SHARED_LIBS=OFF",
             "-DGGML_NATIVE=ON",
+            "-DLLAMA_BUILD_TESTS=OFF",
+            "-DLLAMA_BUILD_EXAMPLES=OFF",
+            "-DLLAMA_BUILD_SERVER=ON",
         ]
         if use_gpu:
             print("[local-up] GPU detected; using CUDA build")
