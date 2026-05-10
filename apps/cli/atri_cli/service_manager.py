@@ -214,7 +214,7 @@ class ServiceManager:
         if not url:
             return
 
-        dest = model_dir / "gemma-4-e2b-it-Q4_K_M.gguf"
+        dest = model_dir / "gemma-4-E2B-it-Q4_K_M.gguf"
         print(f"\n  Downloading Gemma 4 E2B model (~3.1 GB) on first run…")
         print(f"  This happens once. Subsequent starts will be instant.\n")
 
@@ -333,7 +333,7 @@ class ServiceManager:
         if not model:
             if tui:
                 tui.render_error(
-                    "No model file found in models/. Expected gemma-4-e2b-it-Q4_K_M.gguf"
+                    "No model file found in models/. Expected gemma-4-E2B-it-Q4_K_M.gguf"
                 )
             return False
 

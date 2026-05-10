@@ -21,7 +21,7 @@ set -euo pipefail
 ATRI_VERSION="${ATRI_VERSION:-latest}"
 ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
 ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
-ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-e2b-it-Q4_K_M.gguf}"
+ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf}"
 LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
 BRANCH="${ATRI_BRANCH:-master}"
@@ -311,7 +311,7 @@ fi
 # Model is NOT downloaded here to keep installer fast.
 # atri service_manager downloads it on first `atri` invocation.
 FIRST_RUN_MARKER="$MODEL_DIR/.fetch_on_first_run"
-if [ ! -f "$MODEL_DIR/gemma-4-e2b-it-Q4_K_M.gguf" ]; then
+if [ ! -f "$MODEL_DIR/gemma-4-E2B-it-Q4_K_M.gguf" ]; then
     echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
     info "Model will be downloaded (~3.1 GB) on first 'atri' run"
 fi
