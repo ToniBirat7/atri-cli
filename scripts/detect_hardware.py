@@ -228,19 +228,23 @@ def compute_launch_config(
     vendor = gpu.get("vendor", "none")
     vram_mb = gpu.get("vram_mb", 0)
 
-    # Context size: budget based on VRAM
-    # Model ~3.1GB + KV cache + overhead
-    # q8_0 KV cache: ~0.5GB per 8K ctx for this model
+    # Context size: scaled to available VRAM.
+    # Gemma 4 E2B Q4_K_M ~3.1 GB; q8_0 KV cache ~0.25 GB per 8K ctx.
+    # Thresholds below leave ~500 MB overhead for activations/buffers.
     if gpu_detected and vram_mb > 0:
-        available_for_ctx = vram_mb - model_size_mb - 500  # 500MB overhead
-        if available_for_ctx >= 2000:
+        available_for_ctx = vram_mb - model_size_mb - 500  # 500 MB overhead
+        if available_for_ctx >= 8000:   # ≥12 GB VRAM → 64K
+            ctx_size = 65536
+        elif available_for_ctx >= 4000:  # ≥8 GB VRAM → 32K
+            ctx_size = 32768
+        elif available_for_ctx >= 1500:  # ≥5 GB VRAM → 16K
             ctx_size = 16384
-        elif available_for_ctx >= 1000:
+        elif available_for_ctx >= 500:   # ≥3 GB VRAM → 8K
             ctx_size = 8192
         else:
             ctx_size = 4096
     else:
-        # CPU-only: use more conservative context
+        # CPU-only: context bounded by RAM
         total_ram = ram.get("total_ram_mb", 8192)
         if total_ram >= 32000:
             ctx_size = 16384
@@ -252,10 +256,11 @@ def compute_launch_config(
     # GPU layers
     n_gpu_layers = 999 if gpu_detected else 0
 
-    # Batch size
+    # Batch / ubatch size
     batch_size = 2048 if gpu_detected else 512
+    ubatch_size = 512
 
-    # Flash attention: available on NVIDIA Ampere+ (SM >= 80)
+    # Flash attention: available on NVIDIA Ampere+ (SM >= 80) and Apple Metal
     flash_attn = False
     if vendor == "nvidia":
         compute_cap = gpu.get("compute_capability", "")
@@ -284,10 +289,12 @@ def compute_launch_config(
         "recommended_n_gpu_layers": n_gpu_layers,
         "recommended_ctx_size": ctx_size,
         "recommended_batch_size": batch_size,
+        "recommended_ubatch_size": ubatch_size,
         "recommended_threads": threads,
         "flash_attn": flash_attn,
         "kv_cache_type_k": kv_cache_type,
         "kv_cache_type_v": kv_cache_type,
+        "mlock": False,  # disabled by default; requires ulimit -l unlimited or root
         "enable_thinking": True,
     }
 
@@ -353,10 +360,19 @@ def main() -> int:
     hw = detect_all()
 
     if "--save" in sys.argv:
-        # Find repo root
-        script_dir = Path(__file__).resolve().parent
-        repo_root = script_dir.parent
-        config_path = repo_root / "runtime" / "llm" / "launch_config.json"
+        # Determine save root: prefer --install-root <path> if provided,
+        # otherwise fall back to the repo root (dev layout).
+        save_root: Path | None = None
+        if "--install-root" in sys.argv:
+            idx = sys.argv.index("--install-root")
+            if idx + 1 < len(sys.argv):
+                save_root = Path(sys.argv[idx + 1]).expanduser().resolve()
+
+        if save_root is None:
+            script_dir = Path(__file__).resolve().parent
+            save_root = script_dir.parent  # repo root
+
+        config_path = save_root / "runtime" / "llm" / "launch_config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(hw["launch_config"], indent=2) + "\n", encoding="utf-8"

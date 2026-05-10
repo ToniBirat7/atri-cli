@@ -63,6 +63,12 @@ trap '_cleanup' ERR EXIT
 # ─── Helper: require a command ────────────────────────────────────────────
 need() { command -v "$1" &>/dev/null || die "'$1' is required but not found. Install it and retry."; }
 
+# Check essential tools upfront
+need curl
+need git
+need python3
+need unzip
+
 # ─── OS / Arch Detection ──────────────────────────────────────────────────
 header "Detecting system"
 
@@ -243,7 +249,6 @@ else
 fi
 
 # Create venv + install packages
-need python3
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install -q --upgrade pip
 "$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/services/orchestrator/requirements.txt"
@@ -262,9 +267,9 @@ mkdir -p "$DB_STATE_DIR"
 sed -i "s|ORCHESTRATOR_DATABASE_URL=.*|ORCHESTRATOR_DATABASE_URL=sqlite:///${DB_STATE_DIR}/orchestrator.db|" \
     "$SRC_DIR/services/orchestrator/.env"
 
-# Write hardware config
-python3 "$SRC_DIR/scripts/detect_hardware.py" --save \
-    --install-root "$ATRI_INSTALL_ROOT" 2>/dev/null || true
+# Write hardware config (saved to $SRC_DIR/runtime/llm/launch_config.json)
+"$VENV_DIR/bin/python" "$SRC_DIR/scripts/detect_hardware.py" --save \
+    --install-root "$SRC_DIR" 2>/dev/null || true
 
 ok "Orchestrator + CLI installed"
 

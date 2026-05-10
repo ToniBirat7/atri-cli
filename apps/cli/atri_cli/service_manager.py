@@ -34,11 +34,17 @@ def _find_repo_root() -> Path:
         return candidate
 
     # Fallback: check common install locations
-    for path in [
+    install_root_env = os.environ.get("ATRI_INSTALL_ROOT", "")
+    fallback_candidates = [
+        Path(install_root_env) / "src" if install_root_env else None,
+        Path.home() / ".local/share/atri/src",
         Path.home() / ".local/share/atri-code",
         Path.home() / "Agentic_AI",
         Path.cwd(),
-    ]:
+    ]
+    for path in fallback_candidates:
+        if path is None:
+            continue
         if path.is_dir() and (path / "runtime").is_dir():
             return path
 
@@ -125,17 +131,18 @@ class ServiceManager:
             except Exception:
                 pass
 
-        # Defaults — optimised for RTX 3060 6 GB; detect_hardware.py overrides these
+        # Conservative defaults used when detect_hardware.py hasn't run yet.
+        # detect_hardware.py writes launch_config.json with device-specific values.
         return {
             "recommended_n_gpu_layers": 99,
-            "recommended_ctx_size": 32768,
+            "recommended_ctx_size": 16384,
             "recommended_batch_size": 2048,
             "recommended_ubatch_size": 512,
             "recommended_threads": max(2, (os.cpu_count() or 4) - 2),
-            "flash_attn": True,
+            "flash_attn": False,
             "kv_cache_type_k": "q8_0",
             "kv_cache_type_v": "q8_0",
-            "mlock": True,
+            "mlock": False,
             "gpu_detected": False,
         }
 
@@ -282,25 +289,28 @@ class ServiceManager:
         env_file = self.repo_root / "services/orchestrator/.env"
         if env_file.exists():
             return
+        db_state = (self.repo_root / "runtime" / "state").resolve()
+        db_state.mkdir(parents=True, exist_ok=True)
         env_file.write_text(
             "\n".join([
                 f"LLM_BASE_URL=http://127.0.0.1:{self.llama_port}/v1",
                 "LLM_API_KEY=secret",
                 "LLM_MODEL=local-model",
-                "LLM_TEMPERATURE=0.7",
+                "LLM_TEMPERATURE=0.6",
                 "LLM_MAX_TOKENS=4096",
                 "LLM_TIMEOUT_SECONDS=120",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=15",
-                "AGENT_MAX_TURNS=15",
-                "AGENT_MAX_TOOL_CALLS_PER_TURN=5",
+                "AGENT_MAX_TURNS=10",
+                "AGENT_MAX_TOOL_CALLS_PER_TURN=3",
                 "AGENT_ENABLE_TOOL_USE=true",
-                "AGENT_ENABLE_THINKING=true",
+                "AGENT_THINKING_MODE=tool_calls_off",
                 "AGENT_STREAM_RESPONSES=false",
-                f"ORCHESTRATOR_DATABASE_URL=sqlite:///{(self.repo_root / 'runtime/state/orchestrator.db').resolve()}",
+                f"ORCHESTRATOR_DATABASE_URL=sqlite:///{db_state}/orchestrator.db",
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
+                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -363,8 +373,8 @@ class ServiceManager:
         if template_file.exists():
             cmd.extend(["--chat-template-file", str(template_file)])
         if flash:
-            cmd.extend(["--flash-attn", "on"])
-        if config.get("mlock", True):
+            cmd.append("--flash-attn")
+        if config.get("mlock", False):
             cmd.append("--mlock")
 
         log_path = self.repo_root / "llama.log"

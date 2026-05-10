@@ -1535,74 +1535,78 @@ def _mcp_deferred(client: OrchestratorClient, server_name: str, enabled: bool) -
 
 
 def _worktrees_list() -> None:
-    """List available worktrees."""
+    """List git worktrees using the git CLI."""
     try:
-        from orchestrator.worktree_manager import WorktreeManager
-        manager = WorktreeManager()
-        worktrees = manager.list_worktrees()
-        if not worktrees:
-            print("No worktrees found.")
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            print("No worktrees found (or not inside a git repository).")
             return
-        
-        print(f"Active worktrees ({len(worktrees)}):\n")
-        for wt in worktrees:
-            status = "dirty" if wt.is_dirty else "clean"
-            print(f"  {wt.path}")
-            print(f"    Conversation: {wt.conversation_id}")
-            print(f"    Branch: {wt.branch}")
-            print(f"    Status: {status}")
-            print()
+        print(result.stdout)
     except Exception as e:
         print(f"Error listing worktrees: {e}")
 
 
 def _worktrees_clean() -> None:
-    """Clean up dirty worktrees."""
+    """Prune stale worktree references."""
     try:
-        from orchestrator.worktree_manager import WorktreeManager
-        manager = WorktreeManager()
-        dirty = manager.cleanup_dirty_worktrees(auto_clean=False)
-        if not dirty:
-            print("No dirty worktrees found.")
-            return
-        
-        print(f"Dirty worktrees ({len(dirty)}):")
-        for name, needs_cleanup in dirty.items():
-            if needs_cleanup:
-                print(f"  {name}: cleaned")
-            else:
-                print(f"  {name}: requires manual cleanup")
+        result = subprocess.run(
+            ["git", "worktree", "prune", "-v"],
+            capture_output=True, text=True, check=False,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            print(output)
+        else:
+            print("No stale worktrees to prune.")
     except Exception as e:
         print(f"Error cleaning worktrees: {e}")
 
 
 def _cleanup(mode: str, assume_yes: bool) -> None:
+    import shutil
+
     repo_root = Path(__file__).resolve().parents[3]
-    script = repo_root / "scripts" / "reset_local_state.py"
-    if not script.exists():
-        raise RuntimeError(f"cleanup script not found: {script}")
 
-    command = [sys.executable, str(script)]
-    if assume_yes:
-        command.append("--yes")
+    targets: list[Path] = [
+        repo_root / "runtime" / "state" / "orchestrator.db",
+        repo_root / "runtime" / "state" / "code_index.db",
+        repo_root / "llama.log",
+        repo_root / "orchestrator.log",
+        repo_root / "frontend.log",
+    ]
     if mode in {"deep", "docker"}:
-        command.append("--include-frontend-build")
-    if mode == "docker":
-        command.append("--with-docker-volumes")
+        targets += [
+            repo_root / "apps" / "frontend" / ".next",
+            repo_root / "apps" / "frontend" / "node_modules",
+        ]
 
-    completed = subprocess.run(
-        command,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.stdout:
-        print(completed.stdout.rstrip())
-    if completed.returncode != 0:
-        if completed.stderr:
-            print(completed.stderr.rstrip(), file=sys.stderr)
-        raise RuntimeError(f"cleanup failed (mode={mode}, exit={completed.returncode})")
+    if not assume_yes:
+        items = [str(t) for t in targets if t.exists()]
+        if not items:
+            print("Nothing to clean.")
+            return
+        print("Will remove:")
+        for item in items:
+            print(f"  {item}")
+        answer = input("Proceed? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("Aborted.")
+            return
+
+    removed = 0
+    for target in targets:
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            print(f"  Removed: {target}")
+            removed += 1
+
+    print(f"Cleanup complete ({removed} items removed).")
 
 
 def _stop_services():

@@ -287,11 +287,12 @@ def _ensure_repo(repo_url: str, repo_dir: Path, branch: str, skip_clone: bool) -
 
 
 def _install_dependencies(repo_dir: Path, mode: str) -> None:
+    # cmake is only needed for building llama.cpp from source
     _which_or_fail("cmake")
-    _which_or_fail("node")
-    _which_or_fail("npm")
 
     if mode in {"full", "web"}:
+        _which_or_fail("node")
+        _which_or_fail("npm")
         print("[local-up] Installing frontend dependencies...")
         _run(["npm", "install"], cwd=repo_dir / "apps/frontend")
 
@@ -379,26 +380,33 @@ def _write_orchestrator_env(repo_dir: Path) -> None:
     if env_file.exists():
         return
 
+    # Use absolute path so the DB works regardless of which directory uvicorn
+    # is started from.
+    db_state_dir = (repo_dir / "runtime" / "state").resolve()
+    db_state_dir.mkdir(parents=True, exist_ok=True)
+    db_url = f"sqlite:///{db_state_dir}/orchestrator.db"
+
     env_file.write_text(
         "\n".join(
             [
                 "LLM_BASE_URL=http://127.0.0.1:8000/v1",
                 "LLM_API_KEY=secret",
                 "LLM_MODEL=local-model",
-                "LLM_TEMPERATURE=0.7",
+                "LLM_TEMPERATURE=0.6",
                 "LLM_MAX_TOKENS=4096",
                 "LLM_TIMEOUT_SECONDS=120",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=15",
-                "AGENT_MAX_TURNS=15",
-                "AGENT_MAX_TOOL_CALLS_PER_TURN=5",
+                "AGENT_MAX_TURNS=10",
+                "AGENT_MAX_TOOL_CALLS_PER_TURN=3",
                 "AGENT_ENABLE_TOOL_USE=true",
-                "AGENT_ENABLE_THINKING=true",
+                "AGENT_THINKING_MODE=tool_calls_off",
                 "AGENT_STREAM_RESPONSES=false",
-                "ORCHESTRATOR_DATABASE_URL=sqlite:///runtime/state/orchestrator.db",
+                f"ORCHESTRATOR_DATABASE_URL={db_url}",
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
+                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
             ]
         )
         + "\n",
@@ -597,7 +605,6 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
         str(llama_bin),
         "-m", str(model_path),
         "--jinja",
-        "--reasoning", "on",
         "--host", "127.0.0.1",
         "--port", "8000",
         "--threads", threads,
@@ -609,7 +616,7 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
         "--api-key", "secret",
     ]
     if flash_attn:
-        llama_cmd.extend(["--flash-attn", "on"])
+        llama_cmd.append("--flash-attn")
 
     print(f"[local-up] Starting llama server (ctx={ctx_size}, gpu_layers={n_gpu_layers}, flash_attn={flash_attn})...")
     _spawn(
