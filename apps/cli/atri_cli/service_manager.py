@@ -266,9 +266,15 @@ class ServiceManager:
 
     def _find_python(self) -> str:
         """Find the orchestrator venv python."""
+        # Check dev layout: services/orchestrator/.venv
         venv_py = self.repo_root / "services/orchestrator/.venv/bin/python"
         if venv_py.exists():
             return str(venv_py)
+        # Check installed layout: ~/.local/share/atri/venv
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+        installed_py = install_root / "venv/bin/python"
+        if installed_py.exists():
+            return str(installed_py)
         return sys.executable
 
     def _write_env_if_missing(self) -> None:
@@ -291,7 +297,7 @@ class ServiceManager:
                 "AGENT_ENABLE_TOOL_USE=true",
                 "AGENT_ENABLE_THINKING=true",
                 "AGENT_STREAM_RESPONSES=false",
-                "ORCHESTRATOR_DATABASE_URL=sqlite:///runtime/state/.internal.db",
+                f"ORCHESTRATOR_DATABASE_URL=sqlite:///{(self.repo_root / 'runtime/state/orchestrator.db').resolve()}",
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
@@ -380,6 +386,9 @@ class ServiceManager:
         """Start orchestrator if not already running."""
         if self.orch_running:
             return True
+
+        # Ensure runtime/state dir exists (SQLite DB lives here)
+        (self.repo_root / "runtime" / "state").mkdir(parents=True, exist_ok=True)
 
         self._write_env_if_missing()
         py = self._find_python()
