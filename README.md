@@ -4,6 +4,12 @@ A local-first agentic coding CLI powered by **Gemma 4 E2B** via llama.cpp — de
 
 ---
 
+> **Next Milestone — Gemma 4 26B A4B MoE**
+>
+> The next major model upgrade targets [`gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`](https://huggingface.co/) — a 25B-parameter Mixture-of-Experts model with vision support, 16K context window, and llama.cpp-optimized sparse inference (only ~4B parameters active per token). Higher quants (Q6_K / Q8_0) will be the recommended tier for users with 16GB+ VRAM. This upgrade will deliver significantly stronger reasoning and code quality while keeping inference fully local.
+
+---
+
 ## Install
 
 ```bash
