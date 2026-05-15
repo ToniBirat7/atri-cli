@@ -259,33 +259,84 @@ class RichTUI:
         )
         self.console.print(panel)
 
-    def render_tool_result(self, tool_name: str, result: str, success: bool = True) -> None:
-        """Render a tool result in a green/red panel."""
+    @staticmethod
+    def _detect_language(tool_name: str, result: str, tool_input: dict | None = None) -> str | None:
+        """Infer a Rich Syntax language for tool output, or None for plain text."""
+        # File reads: infer from path argument
+        if tool_name in ("read_text_file", "read_file", "write_file", "edit_file", "append_file"):
+            path = ""
+            if tool_input:
+                path = str(
+                    tool_input.get("target_file_path")
+                    or tool_input.get("path", "")
+                )
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+            lang_map = {
+                "py": "python", "ts": "typescript", "tsx": "typescript",
+                "js": "javascript", "jsx": "javascript", "rs": "rust",
+                "go": "go", "sh": "bash", "bash": "bash", "zsh": "bash",
+                "json": "json", "yaml": "yaml", "yml": "yaml",
+                "toml": "toml", "html": "html", "css": "css",
+                "md": "markdown", "sql": "sql", "c": "c", "cpp": "cpp",
+                "java": "java", "rb": "ruby", "php": "php",
+            }
+            if ext in lang_map:
+                return lang_map[ext]
+
+        stripped = result.strip()
+        # Diff output
+        if stripped.startswith("---") or stripped.startswith("@@") or stripped.startswith("diff --git"):
+            return "diff"
+        # JSON object or array
+        if (stripped.startswith("{") and stripped.endswith("}")) or \
+           (stripped.startswith("[") and stripped.endswith("]")):
+            return "json"
+        # Shell output with header from bash_exec
+        if tool_name == "bash_exec" or stripped.startswith("[exit:"):
+            return "bash"
+        # grep_codebase / search_symbols results as JSON
+        if tool_name in ("grep_codebase", "search_symbols", "get_repo_map", "directory_tree"):
+            return "json" if stripped.startswith("{") else None
+        return None
+
+    def render_tool_result(
+        self,
+        tool_name: str,
+        result: str,
+        success: bool = True,
+        tool_input: dict | None = None,
+    ) -> None:
+        """Render a tool result with syntax highlighting when content type is detected."""
         if not RICH_AVAILABLE:
             status = "ok" if success else "error"
             print(f"  {status} {tool_name}: {result[:200]}")
             return
 
-        # Truncate long results
-        display = result
-        if len(display) > 500:
-            display = display[:497] + "..."
-
-        style = "green" if success else "red"
+        border = "green" if success else "red"
         status_label = "[OK]" if success else "[ERROR]"
 
-        if not self._compact_mode:
-            panel = Panel(
-                Text(display, style="white"),
-                title=f"{status_label} {tool_name}",
-                title_align="left",
-                border_style=style,
-                box=ROUNDED,
-                padding=(0, 1),
-            )
-            self.console.print(panel)
+        if self._compact_mode:
+            self.console.print(f"  [bold {border}]{status_label}[/] {tool_name}", highlight=False)
+            return
+
+        max_chars = 2000
+        display = result if len(result) <= max_chars else result[:max_chars] + f"\n… ({len(result) - max_chars} chars omitted)"
+
+        lang = self._detect_language(tool_name, result, tool_input)
+        if lang:
+            content = Syntax(display, lang, theme="monokai", word_wrap=True, background_color="default")
         else:
-            self.console.print(f"  [bold {style}]{status_label}[/] {tool_name}", highlight=False)
+            content = Text(display, style="white")
+
+        panel = Panel(
+            content,
+            title=f"{status_label} {tool_name}",
+            title_align="left",
+            border_style=border,
+            box=ROUNDED,
+            padding=(0, 1),
+        )
+        self.console.print(panel)
 
     # ─── Assistant response ───────────────────────────────────────────────
 
@@ -490,8 +541,45 @@ class RichTUI:
         text.append(description, style="white")
         
         self.console.print(text)
+    # ─── Diff renderer ───────────────────────────────────────────────────
+
+    def render_diff(self, diff_text: str, title: str = "Diff") -> None:
+        """Render a unified diff inline with Rich color coding."""
+        if not RICH_AVAILABLE:
+            print(diff_text)
+            return
+
+        if not diff_text or not diff_text.strip():
+            self.console.print("  [dim](no diff)[/dim]")
+            return
+
+        from rich.console import Group as RichGroup
+
+        lines: list[Text] = []
+        for raw_line in diff_text.splitlines():
+            if raw_line.startswith("+++") or raw_line.startswith("---"):
+                lines.append(Text(raw_line, style="bold white"))
+            elif raw_line.startswith("@@"):
+                lines.append(Text(raw_line, style="bold cyan"))
+            elif raw_line.startswith("+"):
+                lines.append(Text(raw_line, style="bright_green"))
+            elif raw_line.startswith("-"):
+                lines.append(Text(raw_line, style="bright_red"))
+            else:
+                lines.append(Text(raw_line, style="dim white"))
+
+        panel = Panel(
+            RichGroup(*lines),
+            title=title,
+            title_align="left",
+            border_style="yellow",
+            box=ROUNDED,
+            padding=(0, 1),
+        )
+        self.console.print(panel)
+
     # ─── Review rendering ─────────────────────────────────────────────────
-    
+
     def render_review_header(self, path: str) -> None:
         """Render a premium header for the VS Code diff review."""
         if not RICH_AVAILABLE:
@@ -518,30 +606,47 @@ class RichTUI:
 
     # ─── Permission prompt ────────────────────────────────────────────────
     
-    def render_permission_prompt(self, tool_name: str, description: str = "") -> bool:
-        """Show an interactive permission prompt. Returns True if allowed."""
+    def render_permission_prompt(
+        self,
+        tool_name: str,
+        description: str = "",
+        risk_tier: str = "yellow",
+    ) -> bool:
+        """Show an interactive permission prompt with risk-tier coloring. Returns True if allowed."""
+        _tier_color = {"red": "bright_red", "yellow": "bright_yellow", "green": "bright_green"}
+        _tier_icon = {"red": "⛔ DANGER", "yellow": "⚠  Confirm", "green": "✓ Safe"}
+        color = _tier_color.get(risk_tier, "bright_yellow")
+        icon = _tier_icon.get(risk_tier, "⚠  Confirm")
+
         if not RICH_AVAILABLE:
-            resp = input(f"  Allow {tool_name}? [y/N]: ").strip().lower()
+            resp = input(f"  [{icon}] Allow {tool_name}? [y/N]: ").strip().lower()
             return resp in {"y", "yes"}
 
         content = Text()
-        content.append(f"  Tool: ", style="dim")
+        content.append(f"  {icon}  ", style=f"bold {color}")
         content.append(tool_name, style="bold bright_magenta")
         if description:
             content.append(f"\n  {description}", style="dim white")
+        content.append(f"\n\n  Risk tier: ", style="dim")
+        content.append(risk_tier.upper(), style=f"bold {color}")
+        content.append("   Press ", style="dim")
+        content.append("y", style="bold bright_green")
+        content.append(" to allow, ", style="dim")
+        content.append("n", style="bold bright_red")
+        content.append(" to deny", style="dim")
 
         panel = Panel(
             content,
             title="Permission Required",
             title_align="left",
-            border_style="bright_yellow",
-            box=ROUNDED,
+            border_style=color,
+            box=HEAVY,
             padding=(0, 1),
         )
         self.console.print(panel)
 
         try:
-            resp = input("  Allow? (y/n): ").strip().lower()
+            resp = input("  > ").strip().lower()
             return resp in {"y", "yes"}
         except (EOFError, KeyboardInterrupt):
             return False
