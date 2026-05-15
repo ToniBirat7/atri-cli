@@ -7,8 +7,8 @@
 #
 # What it does:
 #   1. Detects OS / architecture / GPU accelerator (CUDA / ROCm / Metal / CPU)
-#   2. Downloads the matching llama-server prebuilt binary (NVIDIA/macOS/CPU)
-#      or falls back to building from source for exotic targets
+#   2. Downloads the matching llama-server prebuilt binary (ROCm/macOS/CPU)
+#      or compiles from source for CUDA/exotic targets
 #   3. Installs the orchestrator + CLI Python packages into a venv
 #   4. Prompts for model storage path, then downloads Gemma 4 26B A4B MoE (~18 GB)
 #   5. Writes ~/.local/share/atri/ with a clean, minimal footprint
@@ -70,7 +70,11 @@ need() { command -v "$1" &>/dev/null || die "'$1' is required but not found. Ins
 need curl
 need git
 need python3
-need unzip
+need tar
+
+# ─── Python version check (3.10+ required) ────────────────────────────────
+python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" \
+    || die "Python 3.10+ is required (found $(python3 --version 2>&1)).\n  Install: sudo apt install python3.12  OR  brew install python@3.12"
 
 # ─── OS / Arch Detection ──────────────────────────────────────────────────
 header "Detecting system"
@@ -102,9 +106,13 @@ elif command -v nvidia-smi &>/dev/null; then
 fi
 
 if [ "$ACCEL" = "cpu" ]; then
-    if lspci 2>/dev/null | grep -qi 'AMD/ATI\|Radeon'; then
+    # Check for ROCm runtime — more reliable than lspci (which also matches iGPUs)
+    if command -v rocm-smi &>/dev/null && rocm-smi --showproductname &>/dev/null 2>&1; then
         ACCEL="rocm"
-        ok "AMD GPU detected → ROCm"
+        ok "AMD GPU detected (rocm-smi) → ROCm"
+    elif [ -d /opt/rocm ] && lspci 2>/dev/null | grep -qi 'VGA.*AMD\|3D.*AMD\|Display.*AMD'; then
+        ACCEL="rocm"
+        ok "AMD GPU detected (/opt/rocm + lspci) → ROCm"
     fi
 fi
 
@@ -142,22 +150,9 @@ fi
 USER_MODEL_DIR="${USER_MODEL_DIR/#\~/$HOME}"
 USER_MODEL_DIR="$(realpath -m "$USER_MODEL_DIR" 2>/dev/null || echo "$USER_MODEL_DIR")"
 
-# Validate parent directory exists and is writable
-PARENT_DIR="$(dirname "$USER_MODEL_DIR")"
-if [ ! -d "$PARENT_DIR" ]; then
-    die "Parent directory does not exist: $PARENT_DIR\nCreate it first and retry."
-fi
-if [ ! -w "$PARENT_DIR" ]; then
-    die "Cannot write to parent directory: $PARENT_DIR\nCheck permissions and retry."
-fi
-
-# Create model dir if needed
-if [ ! -d "$USER_MODEL_DIR" ]; then
-    mkdir -p "$USER_MODEL_DIR" || die "Failed to create model directory: $USER_MODEL_DIR"
-    ok "Created model directory: $USER_MODEL_DIR"
-else
-    ok "Model directory: $USER_MODEL_DIR"
-fi
+# Create model dir (including any missing parents)
+mkdir -p "$USER_MODEL_DIR" || die "Cannot create model directory: $USER_MODEL_DIR — check permissions and available disk space."
+ok "Model directory: $USER_MODEL_DIR"
 
 # Disk space check: require at least 20 GB free
 AVAIL_KB=$(df -k "$USER_MODEL_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
@@ -173,26 +168,44 @@ export ATRI_MODEL_DIR
 # ─── Pick llama-server prebuilt asset ────────────────────────────────────
 header "Selecting llama-server binary"
 
+# LLAMA_ASSET_GREP: substring to match in release asset URL
+# LLAMA_ASSET_EXCLUDE: extended-regex of substrings to exclude (grep -Ev)
+# LLAMA_NEEDS_COMPILE: true = skip prebuilt, build from source
 LLAMA_ASSET_GREP=""
+LLAMA_ASSET_EXCLUDE="win-|\.exe$"   # always exclude Windows artifacts
 LLAMA_NEEDS_COMPILE=false
 
 case "$OS-$ARCH_NORM-$ACCEL" in
     linux-x64-cuda)
-        LLAMA_ASSET_GREP="ubuntu-x64-cuda-12"
+        # No CUDA prebuilt for Linux in llama.cpp releases — build from source.
+        # This gives full CUDA performance with the correct compute arch.
+        LLAMA_NEEDS_COMPILE=true
+        info "NVIDIA/CUDA → building llama.cpp from source (no Linux CUDA prebuilt available)"
         ;;
     linux-x64-rocm)
-        LLAMA_ASSET_GREP="ubuntu-x64-rocm"
+        # e.g. llama-bXXXX-bin-ubuntu-rocm-7.2-x64.tar.gz
+        LLAMA_ASSET_GREP="ubuntu-rocm"
         ;;
     linux-x64-cpu)
-        LLAMA_ASSET_GREP="ubuntu-x64.zip"
+        # e.g. llama-bXXXX-bin-ubuntu-x64.tar.gz
+        # Exclude accelerated variants that also contain "ubuntu-x64"
+        LLAMA_ASSET_GREP="ubuntu-x64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|vulkan|openvino|sycl|rocm|kleidiai"
         ;;
-    linux-arm64-cpu|linux-arm64-*)
-        LLAMA_NEEDS_COMPILE=true
+    linux-arm64-*)
+        # e.g. llama-bXXXX-bin-ubuntu-arm64.tar.gz
+        LLAMA_ASSET_GREP="ubuntu-arm64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|vulkan"
         ;;
     darwin-arm64-metal)
+        # e.g. llama-bXXXX-bin-macos-arm64.tar.gz
+        # Prefer plain arm64 build for widest compatibility;
+        # kleidiai variant may not be stable on all macOS versions.
         LLAMA_ASSET_GREP="macos-arm64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|kleidiai"
         ;;
     darwin-x64-*)
+        # e.g. llama-bXXXX-bin-macos-x64.tar.gz
         LLAMA_ASSET_GREP="macos-x64"
         ;;
     *)
@@ -205,53 +218,56 @@ STAGING_DIR=$(mktemp -d)
 mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR" "$MODEL_DIR"
 
 if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
-    info "Downloading llama-server prebuilt ($ACCEL)..."
-    # Fetch release manifest and match the asset by fixed keyword strings (no sed wildcards)
+    info "Fetching llama.cpp release manifest..."
     RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
     ASSET_URL=$(echo "$RELEASE_JSON" \
         | grep "browser_download_url" \
         | grep -oE 'https://[^"]+' \
         | grep "$LLAMA_ASSET_GREP" \
-        | grep -v "\.exe$" \
-        | grep -v "win-" \
+        | grep -Ev "$LLAMA_ASSET_EXCLUDE" \
         | head -1 || true)
 
     if [ -z "$ASSET_URL" ]; then
-        warn "Could not find prebuilt asset for '$ACCEL' — falling back to compile"
+        warn "Could not find prebuilt binary for '$OS/$ARCH/$ACCEL' — falling back to compile"
         LLAMA_NEEDS_COMPILE=true
     else
-        info "Downloading: $ASSET_URL"
-        curl -fsSL --progress-bar -o "$STAGING_DIR/llama.zip" "$ASSET_URL"
-        unzip -q "$STAGING_DIR/llama.zip" -d "$STAGING_DIR/llama_extracted"
-        # Copy only what we need: llama-server + shared libs
+        info "Downloading: $(basename "$ASSET_URL")"
+        curl -fsSL --progress-bar -o "$STAGING_DIR/llama_bin.tar.gz" "$ASSET_URL"
+        mkdir -p "$STAGING_DIR/llama_extracted"
+        tar xzf "$STAGING_DIR/llama_bin.tar.gz" -C "$STAGING_DIR/llama_extracted"
+
+        # Copy llama-server binary
         LLAMA_SERVER_BIN=$(find "$STAGING_DIR/llama_extracted" -name "llama-server" ! -name "*.exe" | head -1)
         if [ -z "$LLAMA_SERVER_BIN" ]; then
-            warn "llama-server not found in prebuilt zip — falling back to compile"
+            warn "llama-server not found in prebuilt archive — falling back to compile"
             LLAMA_NEEDS_COMPILE=true
         else
             cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
-            find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
+            # Copy shared libraries that llama-server links against at runtime
+            find "$STAGING_DIR/llama_extracted" \( \
+                -name "libggml*.so*" -o -name "libllama*.so*" \
                 -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
                 -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
             chmod +x "$LLAMA_DIR/llama-server"
             ok "llama-server installed from prebuilt"
         fi
-        rm -rf "$STAGING_DIR/llama.zip" "$STAGING_DIR/llama_extracted"
+        rm -rf "$STAGING_DIR/llama_bin.tar.gz" "$STAGING_DIR/llama_extracted"
     fi
 fi
 
 if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
     header "Building llama.cpp from source"
-    warn "No prebuilt binary for $OS/$ARCH/$ACCEL — building from source (this takes 5-15 min)"
+    warn "Building from source for $OS/$ARCH/$ACCEL — this takes 5-15 min"
     need cmake
     need make
 
     LLAMA_SRC="$STAGING_DIR/llama_src"
     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
-    cmake_flags="-DLLAMA_NATIVE=ON"
+
+    cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
         cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
-        # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
+        # nvcc has a max supported GCC version — auto-detect a compatible one
         SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
         if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
             CUDA_HOST_CXX=""
@@ -265,17 +281,24 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
                 cmake_flags="$cmake_flags -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_CXX"
                 info "GCC $SYS_GCC_VER too new for CUDA — using host compiler: $CUDA_HOST_CXX"
             else
-                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 (AUR: yay -S gcc14) then rerun installer."
+                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 and rerun installer."
             fi
         fi
     elif [ "$ACCEL" = "rocm" ]; then
         cmake_flags="$cmake_flags -DGGML_HIP=ON"
+    elif [ "$ACCEL" = "metal" ]; then
+        cmake_flags="$cmake_flags -DGGML_METAL=ON"
     fi
-    cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" $cmake_flags -DLLAMA_BUILD_SERVER=ON \
-        -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
+
+    cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" $cmake_flags \
+        -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release \
+        -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
     cmake --build "$LLAMA_SRC/build" --target llama-server -j"$(nproc)"
-    find "$LLAMA_SRC/build" -name "llama-server" | head -1 | xargs -I{} cp {} "$LLAMA_DIR/"
-    find "$LLAMA_SRC/build" \( -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
+
+    find "$LLAMA_SRC/build" -name "llama-server" ! -name "*.exe" | head -1 \
+        | xargs -I{} cp {} "$LLAMA_DIR/"
+    find "$LLAMA_SRC/build" \( \
+        -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
         -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
     chmod +x "$LLAMA_DIR/llama-server"
     ok "llama-server built from source"
@@ -287,7 +310,10 @@ fi
 # ─── Install chat template ─────────────────────────────────────────────────
 header "Installing Gemma 4 chat template"
 
-# The template ships in the source repo; we clone a shallow copy to get it
+# The template lives in the source repo; the main clone (below) includes it.
+# We copy it to TEMPLATE_DIR so the launcher can find it independent of SRC_DIR.
+# The separate early clone here only runs when TEMPLATE_DIR is missing and SRC_DIR
+# hasn't been cloned yet — e.g. on a partial re-install.
 if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ]; then
     ATRI_TEMPLATE_SRC="$STAGING_DIR/atri_src"
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$ATRI_TEMPLATE_SRC" 2>/dev/null || true
@@ -311,11 +337,17 @@ else
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$SRC_DIR"
 fi
 
+# Ensure template is in TEMPLATE_DIR (may have been skipped above if SRC_DIR was new)
+if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ] \
+    && [ -f "$SRC_DIR/runtime/templates/gemma4-tooluse.jinja" ]; then
+    cp "$SRC_DIR/runtime/templates/gemma4-tooluse.jinja" "$TEMPLATE_DIR/"
+    ok "Gemma 4 Jinja template installed from source"
+fi
+
 # Create venv + install packages
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install -q --upgrade pip
 "$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/services/orchestrator/requirements.txt"
-"$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/apps/cli/requirements.txt" 2>/dev/null || true
 "$VENV_DIR/bin/pip" install -q -e "$SRC_DIR/apps/cli"
 
 # Set up .env if missing
