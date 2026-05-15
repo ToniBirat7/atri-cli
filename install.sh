@@ -3,14 +3,14 @@
 # Atri Code — Smart one-command installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/gemma4-26b/install.sh | bash
 #
 # What it does:
 #   1. Detects OS / architecture / GPU accelerator (CUDA / ROCm / Metal / CPU)
 #   2. Downloads the matching llama-server prebuilt binary (NVIDIA/macOS/CPU)
 #      or falls back to building from source for exotic targets
 #   3. Installs the orchestrator + CLI Python packages into a venv
-#   4. Lazy-fetches the Gemma 4 E2B Q4_K_M model on first run
+#   4. Prompts for model storage path, then downloads Gemma 4 26B A4B MoE (~18 GB)
 #   5. Writes ~/.local/share/atri/ with a clean, minimal footprint
 #   6. Symlinks `atri` into ~/.local/bin/
 #   7. Generates an uninstall script
@@ -21,10 +21,13 @@ set -euo pipefail
 ATRI_VERSION="${ATRI_VERSION:-latest}"
 ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
 ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
-ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf}"
+ATRI_MODEL_FILENAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+ATRI_MMPROJ_FILENAME="mmproj-BF16.gguf"
+ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf}"
+ATRI_MMPROJ_URL="${ATRI_MMPROJ_URL:-https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-BF16.gguf}"
 LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
-BRANCH="${ATRI_BRANCH:-master}"
+BRANCH="${ATRI_BRANCH:-gemma4-26b}"
 
 # Directories inside ATRI_INSTALL_ROOT
 LLAMA_DIR="$ATRI_INSTALL_ROOT/runtime/llama"
@@ -47,7 +50,7 @@ header()  { echo -e "\n${BOLD}${CYAN}── $* ──${RESET}"; }
 echo ""
 echo -e "${BOLD}${CYAN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${CYAN}  │  Atri Code — Local AI Coding Agent     │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 E2B + llama.cpp    │${RESET}"
+echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 26B A4B + llama.cpp│${RESET}"
 echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 
@@ -106,6 +109,66 @@ if [ "$ACCEL" = "cpu" ]; then
 fi
 
 [ "$ACCEL" = "cpu" ] && info "No GPU detected → CPU-only mode"
+
+# ─── Model storage path prompt ────────────────────────────────────────────
+header "Model storage"
+
+echo ""
+echo -e "${BOLD}  Gemma 4 26B A4B MoE requires two files:${RESET}"
+echo -e "    • ${CYAN}gemma-4-26B-A4B-it-UD-Q4_K_M.gguf${RESET}  — main model  (~16.9 GB)"
+echo -e "    • ${CYAN}mmproj-BF16.gguf${RESET}                     — vision proj  (~1.19 GB)"
+echo -e "    Total: ~18.1 GB"
+echo ""
+
+DEFAULT_MODEL_STORE="$HOME/models/gemma4-26b"
+if [ -n "${ATRI_MODEL_DIR:-}" ]; then
+    USER_MODEL_DIR="$ATRI_MODEL_DIR"
+    info "Using ATRI_MODEL_DIR override: $USER_MODEL_DIR"
+else
+    # Only prompt when running interactively (stdin is a terminal)
+    if [ -t 0 ]; then
+        echo -e "${BOLD}  Where should the models be stored?${RESET}"
+        echo -e "  ${DIM}(Press Enter to use default: $DEFAULT_MODEL_STORE)${RESET}"
+        printf "  Path: "
+        read -r USER_INPUT
+        USER_MODEL_DIR="${USER_INPUT:-$DEFAULT_MODEL_STORE}"
+    else
+        USER_MODEL_DIR="$DEFAULT_MODEL_STORE"
+        info "Non-interactive install — using default model dir: $USER_MODEL_DIR"
+    fi
+fi
+
+# Expand ~ and resolve
+USER_MODEL_DIR="${USER_MODEL_DIR/#\~/$HOME}"
+USER_MODEL_DIR="$(realpath -m "$USER_MODEL_DIR" 2>/dev/null || echo "$USER_MODEL_DIR")"
+
+# Validate parent directory exists and is writable
+PARENT_DIR="$(dirname "$USER_MODEL_DIR")"
+if [ ! -d "$PARENT_DIR" ]; then
+    die "Parent directory does not exist: $PARENT_DIR\nCreate it first and retry."
+fi
+if [ ! -w "$PARENT_DIR" ]; then
+    die "Cannot write to parent directory: $PARENT_DIR\nCheck permissions and retry."
+fi
+
+# Create model dir if needed
+if [ ! -d "$USER_MODEL_DIR" ]; then
+    mkdir -p "$USER_MODEL_DIR" || die "Failed to create model directory: $USER_MODEL_DIR"
+    ok "Created model directory: $USER_MODEL_DIR"
+else
+    ok "Model directory: $USER_MODEL_DIR"
+fi
+
+# Disk space check: require at least 20 GB free
+AVAIL_KB=$(df -k "$USER_MODEL_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
+if [ "$AVAIL_GB" -lt 20 ]; then
+    die "Not enough disk space in $USER_MODEL_DIR\nAvailable: ~${AVAIL_GB} GB, required: 20 GB"
+fi
+ok "Disk space OK (~${AVAIL_GB} GB available)"
+
+ATRI_MODEL_DIR="$USER_MODEL_DIR"
+export ATRI_MODEL_DIR
 
 # ─── Pick llama-server prebuilt asset ────────────────────────────────────
 header "Selecting llama-server binary"
@@ -283,9 +346,12 @@ cat > "$ATRI_BIN_DIR/atri" <<LAUNCHER
 export ATRI_INSTALL_ROOT="$ATRI_INSTALL_ROOT"
 export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
 export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
-export ATRI_MODEL_DIR="$MODEL_DIR"
+export ATRI_MODEL_DIR="$ATRI_MODEL_DIR"
+export ATRI_MMPROJ_PATH="$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME"
 export ATRI_SRC_DIR="$SRC_DIR"
 export LD_LIBRARY_PATH="$LLAMA_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+# Enable NVIDIA Zero-Copy Unified Memory for MoE model on limited VRAM
+export GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
 exec "$VENV_DIR/bin/atri" "\$@"
 LAUNCHER
 chmod +x "$ATRI_BIN_DIR/atri"
@@ -308,13 +374,40 @@ if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     export PATH="$ATRI_BIN_DIR:$PATH"
 fi
 
-# ─── Lazy model fetch on first run ────────────────────────────────────────
-# Model is NOT downloaded here to keep installer fast.
-# atri service_manager downloads it on first `atri` invocation.
-FIRST_RUN_MARKER="$MODEL_DIR/.fetch_on_first_run"
-if [ ! -f "$MODEL_DIR/gemma-4-E2B-it-Q4_K_M.gguf" ]; then
-    echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
-    info "Model will be downloaded (~3.1 GB) on first 'atri' run"
+# ─── Download Gemma 4 26B A4B MoE models ─────────────────────────────────
+header "Downloading Gemma 4 26B A4B models"
+
+_curl_download() {
+    local url="$1" dest="$2" label="$3"
+    if [ -f "$dest" ] && [ -s "$dest" ]; then
+        ok "$label already present — skipping download"
+        return 0
+    fi
+    info "Downloading $label..."
+    info "  URL: $url"
+    # -C - resumes interrupted downloads; --progress-bar gives human-readable output
+    curl -L --progress-bar -C - -o "$dest" "$url" \
+        || die "Download failed for $label. Check your internet connection and retry."
+    if [ ! -s "$dest" ]; then
+        die "Downloaded file is empty: $dest"
+    fi
+    ok "$label downloaded → $dest"
+}
+
+_curl_download "$ATRI_MODEL_URL"  "$ATRI_MODEL_DIR/$ATRI_MODEL_FILENAME"  "Main model (16.9 GB)"
+_curl_download "$ATRI_MMPROJ_URL" "$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME" "Vision projector (1.19 GB)"
+
+# Store model paths in .env so service_manager and orchestrator can find them
+ATRI_SRC="$SRC_DIR"
+if [ -f "$ATRI_SRC/services/orchestrator/.env" ]; then
+    # Remove any stale ATRI_MODEL_DIR / ATRI_MMPROJ_PATH lines before writing
+    grep -v "^ATRI_MODEL_DIR=" "$ATRI_SRC/services/orchestrator/.env" \
+        | grep -v "^ATRI_MMPROJ_PATH=" > "$ATRI_SRC/services/orchestrator/.env.tmp" \
+        && mv "$ATRI_SRC/services/orchestrator/.env.tmp" "$ATRI_SRC/services/orchestrator/.env"
+    {
+        echo "ATRI_MODEL_DIR=$ATRI_MODEL_DIR"
+        echo "ATRI_MMPROJ_PATH=$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME"
+    } >> "$ATRI_SRC/services/orchestrator/.env"
 fi
 
 # ─── Uninstall script ──────────────────────────────────────────────────────
@@ -345,6 +438,7 @@ echo ""
 echo -e "${BOLD}${GREEN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${GREEN}  │  Installation Complete!                 │${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Model:       Gemma 4 26B A4B MoE       │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Accelerator: ${ACCEL}$(printf '%*s' $((23 - ${#ACCEL})) '')│${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Start:    atri                         │${RESET}"

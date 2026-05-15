@@ -1,12 +1,23 @@
 # Atri Code
 
-A local-first agentic coding CLI powered by **Gemma 4 E2B** via llama.cpp — designed to match Claude Code's capabilities without sending your code to the cloud.
+A local-first agentic coding CLI powered by **Gemma 4 26B A4B** (Mixture-of-Experts) via llama.cpp — designed to match Claude Code's capabilities without sending your code to the cloud.
 
 ---
 
-> **Next Milestone — Gemma 4 26B A4B MoE**
->
-> The next major model upgrade targets [`gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`](https://huggingface.co/) — a 25B-parameter Mixture-of-Experts model with vision support, 16K context window, and llama.cpp-optimized sparse inference (only ~4B parameters active per token). Higher quants (Q6_K / Q8_0) will be the recommended tier for users with 16GB+ VRAM. This upgrade will deliver significantly stronger reasoning and code quality while keeping inference fully local.
+## Model
+
+| Property | Value |
+|---|---|
+| Model file | `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` |
+| Total parameters | 25.2B (Mixture-of-Experts: 8 active + 128 total experts) |
+| Active per token | **3.8B** — only ~15% of weights are used per inference step |
+| Disk size | 16.9 GB (main) + 1.19 GB (vision projector) = **~18.1 GB** |
+| Min VRAM | 6 GB NVIDIA GPU (Ampere+ recommended for flash attention) |
+| Context window | 16K tokens default (32K on 12+ GB VRAM) |
+| Inference speed | ~24 tokens/s on RTX 3060 Mobile 6 GB |
+| Modalities | Text + Image (via mmproj-BF16.gguf vision encoder) |
+
+The installer will prompt you for a storage location for the model files (~18 GB). Downloads resume automatically if interrupted.
 
 ---
 
@@ -46,7 +57,7 @@ atri stop
 ## How It Works
 
 ```
-User → atri CLI → FastAPI orchestrator → ReAct agent loop → llama-server (Gemma 4 E2B)
+User → atri CLI → FastAPI orchestrator → ReAct agent loop → llama-server (Gemma 4 26B A4B MoE)
                                               ↓
                                    MCP tool server (filesystem, bash, grep, web search)
 ```

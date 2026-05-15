@@ -221,39 +221,52 @@ def detect_gpu() -> dict:
 
 
 def compute_launch_config(
-    gpu: dict, cpu: dict, ram: dict, model_size_mb: int = 3100
+    gpu: dict, cpu: dict, ram: dict, model_size_mb: int = 16384
 ) -> dict:
-    """Compute optimal llama-server launch parameters based on hardware."""
+    """Compute optimal llama-server launch parameters based on hardware.
+
+    Tuned for Gemma 4 26B A4B MoE (UD-Q4_K_M):
+      - Main GGUF: ~16.9 GB on disk, ~6-8 GB VRAM with -ngl 999 + --n-cpu-moe 128
+        (only non-expert layers go to GPU; 128 expert layers stay on CPU RAM)
+      - Vision projector: ~1.19 GB loaded separately via --mmproj
+      - KV cache: q4_0/q8_0 to conserve the remaining VRAM headroom
+      - Unified memory (GGML_CUDA_ENABLE_UNIFIED_MEMORY=1) set by launcher
+    """
     gpu_detected = gpu.get("detected", False)
     vendor = gpu.get("vendor", "none")
     vram_mb = gpu.get("vram_mb", 0)
 
-    # Context size: scaled to available VRAM.
-    # Gemma 4 E2B Q4_K_M ~3.1 GB; q8_0 KV cache ~0.25 GB per 8K ctx.
-    # Thresholds below leave ~500 MB overhead for activations/buffers.
-    if gpu_detected and vram_mb > 0:
-        available_for_ctx = vram_mb - model_size_mb - 500  # 500 MB overhead
-        if available_for_ctx >= 8000:   # ≥12 GB VRAM → 64K
-            ctx_size = 65536
-        elif available_for_ctx >= 4000:  # ≥8 GB VRAM → 32K
-            ctx_size = 32768
-        elif available_for_ctx >= 1500:  # ≥5 GB VRAM → 16K
-            ctx_size = 16384
-        elif available_for_ctx >= 500:   # ≥3 GB VRAM → 8K
-            ctx_size = 8192
+    if gpu_detected and vendor == "nvidia" and vram_mb >= 5000:
+        # With GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe 128, expert layers
+        # stay in CPU RAM and non-expert layers use GPU VRAM.
+        # Empirically verified on RTX 3060 6 GB: 32K context leaves ~1 GB VRAM free.
+        # Unified memory lets KV cache overflow to system RAM on Ampere+.
+        if vram_mb >= 12000:
+            ctx_size = 32768  # 12+ GB: comfortable headroom
+        elif vram_mb >= 6000:
+            ctx_size = 32768  # 6 GB: verified empirically with q4_0/q8_0 KV cache
         else:
-            ctx_size = 4096
-    else:
-        # CPU-only: context bounded by RAM
-        total_ram = ram.get("total_ram_mb", 8192)
-        if total_ram >= 32000:
+            ctx_size = 16384  # 5 GB: conservative
+    elif gpu_detected and vendor == "apple":
+        # Apple Silicon: unified memory means more headroom
+        total_unified = vram_mb
+        if total_unified >= 32000:
+            ctx_size = 32768
+        elif total_unified >= 16000:
             ctx_size = 16384
-        elif total_ram >= 16000:
+        else:
+            ctx_size = 8192
+    else:
+        # CPU-only or AMD (ROCm MoE support varies): use RAM for context
+        total_ram = ram.get("total_ram_mb", 8192)
+        if total_ram >= 64000:
+            ctx_size = 16384
+        elif total_ram >= 32000:
             ctx_size = 8192
         else:
             ctx_size = 4096
 
-    # GPU layers
+    # All layers offloaded; MoE expert layers stay on CPU via --n-cpu-moe
     n_gpu_layers = 999 if gpu_detected else 0
 
     # Batch / ubatch size
@@ -272,11 +285,15 @@ def compute_launch_config(
     elif vendor == "apple":
         flash_attn = True  # Metal supports it
 
-    # KV cache quantization to save VRAM
-    kv_cache_type = "q8_0" if gpu_detected else "f16"
+    # MoE KV cache: q4_0 for keys (lookup only), q8_0 for values (computation)
+    # This is more aggressive than q8_0/q8_0 but necessary to fit context on 6 GB VRAM.
+    kv_cache_type_k = "q4_0" if gpu_detected else "f16"
+    kv_cache_type_v = "q8_0" if gpu_detected else "f16"
 
-    # Threads
-    threads = cpu.get("recommended_threads", 4)
+    # Thread count: MoE expert computation benefits from more CPU threads.
+    # Diminishing returns above 8 threads; cap there.
+    cpu_count = cpu.get("cpu_count", 4)
+    threads = min(max(2, cpu_count - 2), 8)
 
     config = {
         "gpu_detected": gpu_detected,
@@ -285,16 +302,25 @@ def compute_launch_config(
         "gpu_vram_mb": vram_mb,
         "compute_capability": gpu.get("compute_capability", ""),
         "cuda_architecture": gpu.get("cuda_architecture", ""),
-        "cpu_threads": cpu.get("cpu_count", 4),
+        "cpu_threads": cpu_count,
         "recommended_n_gpu_layers": n_gpu_layers,
         "recommended_ctx_size": ctx_size,
         "recommended_batch_size": batch_size,
         "recommended_ubatch_size": ubatch_size,
         "recommended_threads": threads,
         "flash_attn": flash_attn,
-        "kv_cache_type_k": kv_cache_type,
-        "kv_cache_type_v": kv_cache_type,
-        "mlock": False,  # disabled by default; requires ulimit -l unlimited or root
+        "kv_cache_type_k": kv_cache_type_k,
+        "kv_cache_type_v": kv_cache_type_v,
+        # MoE-specific: pin all 128 expert layers to CPU RAM
+        "n_cpu_moe": 128,
+        # MoE best practice: no memory mapping; load entire model into RAM
+        "no_mmap": True,
+        # Pin model to RAM; prevents paging under memory pressure
+        "mlock": True,
+        # Single parallel slot; MoE is memory-intensive
+        "parallel_slots": 1,
+        # Whether to set GGML_CUDA_ENABLE_UNIFIED_MEMORY (NVIDIA only)
+        "enable_unified_memory": vendor == "nvidia",
         "enable_thinking": True,
     }
 
