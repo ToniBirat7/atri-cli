@@ -7,13 +7,14 @@
 #
 # What it does:
 #   1. Detects OS / architecture / GPU accelerator (CUDA / ROCm / Metal / CPU)
-#   2. Downloads the matching llama-server prebuilt binary (ROCm/macOS/CPU)
+#   2. Asks whether you already have the model files or want them downloaded
+#   3. Downloads the matching llama-server prebuilt binary (ROCm/macOS/CPU)
 #      or compiles from source for CUDA/exotic targets
-#   3. Installs the orchestrator + CLI Python packages into a venv
-#   4. Prompts for model storage path, then downloads Gemma 4 26B A4B MoE (~18 GB)
-#   5. Writes ~/.local/share/atri/ with a clean, minimal footprint
-#   6. Symlinks `atri` into ~/.local/bin/
-#   7. Generates an uninstall script
+#   4. Installs the orchestrator + CLI Python packages into a venv
+#   5. Downloads Gemma 4 26B A4B MoE (~18 GB) if not already present
+#   6. Writes ~/.local/share/atri/ with a clean, minimal footprint
+#   7. Symlinks `atri` into ~/.local/bin/
+#   8. Generates an uninstall script
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -25,18 +26,16 @@ ATRI_MODEL_FILENAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
 ATRI_MMPROJ_FILENAME="mmproj-BF16.gguf"
 ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf}"
 ATRI_MMPROJ_URL="${ATRI_MMPROJ_URL:-https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-BF16.gguf}"
-LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
 BRANCH="${ATRI_BRANCH:-gemma4-26b}"
 
 # Directories inside ATRI_INSTALL_ROOT
 LLAMA_DIR="$ATRI_INSTALL_ROOT/runtime/llama"
 TEMPLATE_DIR="$ATRI_INSTALL_ROOT/runtime/templates"
-MODEL_DIR="$ATRI_INSTALL_ROOT/models"
 VENV_DIR="$ATRI_INSTALL_ROOT/venv"
 SRC_DIR="$ATRI_INSTALL_ROOT/src"
 
-# ─── Colors ────────────────────────────────────────────────────────────────
+# ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
 YELLOW='\033[0;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
@@ -46,7 +45,7 @@ warn()    { echo -e "${YELLOW}  ⚠${RESET} $*"; }
 die()     { echo -e "${RED}  ✗ ERROR:${RESET} $*" >&2; exit 1; }
 header()  { echo -e "\n${BOLD}${CYAN}── $* ──${RESET}"; }
 
-# ─── Banner ────────────────────────────────────────────────────────────────
+# ─── Banner ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${CYAN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${CYAN}  │  Atri Code — Local AI Coding Agent     │${RESET}"
@@ -54,7 +53,7 @@ echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 26B A4B + llama.cpp│${RESET}"
 echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 
-# ─── Cleanup trap (only fires on error) ────────────────────────────────────
+# ─── Cleanup trap (only fires on error) ──────────────────────────────────────
 STAGING_DIR=""
 _cleanup() {
     if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
@@ -63,7 +62,7 @@ _cleanup() {
 }
 trap '_cleanup' ERR EXIT
 
-# ─── Helper: require a command ────────────────────────────────────────────
+# ─── Helper: require a command ───────────────────────────────────────────────
 need() { command -v "$1" &>/dev/null || die "'$1' is required but not found. Install it and retry."; }
 
 # Check essential tools upfront
@@ -72,24 +71,24 @@ need git
 need python3
 need tar
 
-# ─── Python version check (3.10+ required) ────────────────────────────────
+# ─── Python version check (3.10+ required) ───────────────────────────────────
 python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" \
     || die "Python 3.10+ is required (found $(python3 --version 2>&1)).\n  Install: sudo apt install python3.12  OR  brew install python@3.12"
 
-# ─── OS / Arch Detection ──────────────────────────────────────────────────
+# ─── OS / Arch Detection ─────────────────────────────────────────────────────
 header "Detecting system"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64)  ARCH_NORM="x64" ;;
-    aarch64|arm64) ARCH_NORM="arm64" ;;
-    *)  ARCH_NORM="$ARCH" ;;
+    x86_64)           ARCH_NORM="x64" ;;
+    aarch64|arm64)    ARCH_NORM="arm64" ;;
+    *)                ARCH_NORM="$ARCH" ;;
 esac
 
 info "OS: $OS  Arch: $ARCH ($ARCH_NORM)"
 
-# ─── GPU / Accelerator Detection ─────────────────────────────────────────
+# ─── GPU / Accelerator Detection ─────────────────────────────────────────────
 ACCEL="cpu"
 COMPUTE_CAP=""
 
@@ -116,56 +115,124 @@ if [ "$ACCEL" = "cpu" ]; then
     fi
 fi
 
-[ "$ACCEL" = "cpu" ] && info "No GPU detected → CPU-only mode"
+[ "$ACCEL" = "cpu" ] && info "No dedicated GPU detected → CPU-only mode"
 
-# ─── Model storage path prompt ────────────────────────────────────────────
-header "Model storage"
+# ─── Model Setup (asked before any long-running steps) ───────────────────────
+header "Model Setup"
 
 echo ""
-echo -e "${BOLD}  Gemma 4 26B A4B MoE requires two files:${RESET}"
-echo -e "    • ${CYAN}gemma-4-26B-A4B-it-UD-Q4_K_M.gguf${RESET}  — main model  (~16.9 GB)"
-echo -e "    • ${CYAN}mmproj-BF16.gguf${RESET}                     — vision proj  (~1.19 GB)"
-echo -e "    Total: ~18.1 GB"
+echo -e "${BOLD}  Gemma 4 26B A4B MoE requires two GGUF files (~18 GB total):${RESET}"
+echo -e "    • ${CYAN}${ATRI_MODEL_FILENAME}${RESET}  (~16.9 GB)"
+echo -e "    • ${CYAN}${ATRI_MMPROJ_FILENAME}${RESET}                     (~1.19 GB)"
 echo ""
 
-DEFAULT_MODEL_STORE="$HOME/models/gemma4-26b"
+MODEL_ALREADY_DOWNLOADED=false
+USER_MODEL_DIR=""
+
 if [ -n "${ATRI_MODEL_DIR:-}" ]; then
-    USER_MODEL_DIR="$ATRI_MODEL_DIR"
+    # Env var override: resolve path and check if files are already present
+    USER_MODEL_DIR="${ATRI_MODEL_DIR/#\~/$HOME}"
+    USER_MODEL_DIR="$(realpath -m "$USER_MODEL_DIR" 2>/dev/null || echo "$USER_MODEL_DIR")"
     info "Using ATRI_MODEL_DIR override: $USER_MODEL_DIR"
-else
-    # Only prompt when running interactively (stdin is a terminal)
-    if [ -t 0 ]; then
-        echo -e "${BOLD}  Where should the models be stored?${RESET}"
-        echo -e "  ${DIM}(Press Enter to use default: $DEFAULT_MODEL_STORE)${RESET}"
-        printf "  Path: "
-        read -r USER_INPUT
-        USER_MODEL_DIR="${USER_INPUT:-$DEFAULT_MODEL_STORE}"
-    else
-        USER_MODEL_DIR="$DEFAULT_MODEL_STORE"
-        info "Non-interactive install — using default model dir: $USER_MODEL_DIR"
+    if [ -f "$USER_MODEL_DIR/$ATRI_MODEL_FILENAME" ] && [ -f "$USER_MODEL_DIR/$ATRI_MMPROJ_FILENAME" ]; then
+        MODEL_ALREADY_DOWNLOADED=true
+        ok "Both model files already present — download will be skipped"
     fi
+elif [ -t 0 ]; then
+    # Interactive: present a clear choice
+    echo -e "${BOLD}  Do you already have the model files downloaded?${RESET}"
+    echo -e "  ${GREEN}[1]${RESET} Yes — I'll provide the path to the existing files"
+    echo -e "  ${CYAN}[2]${RESET} No  — Download them now (I'll choose where to save)"
+    echo ""
+
+    while true; do
+        printf "  Choice [1/2]: "
+        read -r MODEL_CHOICE
+        case "${MODEL_CHOICE:-}" in
+            1)
+                echo ""
+                echo -e "${BOLD}  Enter the full path to the directory containing the GGUF files:${RESET}"
+                echo -e "  ${DIM}(The directory must contain both ${ATRI_MODEL_FILENAME}${RESET}"
+                echo -e "  ${DIM}and ${ATRI_MMPROJ_FILENAME})${RESET}"
+                while true; do
+                    printf "  Path: "
+                    read -r USER_INPUT
+                    USER_INPUT_EXP="${USER_INPUT/#\~/$HOME}"
+                    USER_INPUT_EXP="$(realpath -m "$USER_INPUT_EXP" 2>/dev/null || echo "$USER_INPUT_EXP")"
+                    if [ -z "$USER_INPUT_EXP" ]; then
+                        warn "No path provided. Please enter a valid directory path."; continue
+                    fi
+                    if [ ! -d "$USER_INPUT_EXP" ]; then
+                        warn "Directory not found: $USER_INPUT_EXP"; continue
+                    fi
+                    MISSING=""
+                    [ ! -f "$USER_INPUT_EXP/$ATRI_MODEL_FILENAME" ] && \
+                        MISSING="$MISSING\n    • $ATRI_MODEL_FILENAME"
+                    [ ! -f "$USER_INPUT_EXP/$ATRI_MMPROJ_FILENAME" ] && \
+                        MISSING="$MISSING\n    • $ATRI_MMPROJ_FILENAME"
+                    if [ -n "$MISSING" ]; then
+                        warn "The following files were not found in $USER_INPUT_EXP:$MISSING"
+                        printf "  Try a different path? [Y/n]: "
+                        read -r RETRY
+                        case "${RETRY:-y}" in
+                            [Nn]*) die "Model files not found. Aborting installation." ;;
+                            *)     continue ;;
+                        esac
+                    fi
+                    USER_MODEL_DIR="$USER_INPUT_EXP"
+                    MODEL_ALREADY_DOWNLOADED=true
+                    ok "Model files verified in: $USER_MODEL_DIR"
+                    break
+                done
+                break
+                ;;
+            2)
+                echo ""
+                DEFAULT_BASE_DIR="$HOME"
+                echo -e "${BOLD}  Enter the base directory for model storage:${RESET}"
+                echo -e "  ${DIM}Models will be saved to: <your_path>/models/${RESET}"
+                echo -e "  ${DIM}(Press Enter to use default: ${DEFAULT_BASE_DIR}/models)${RESET}"
+                printf "  Base path: "
+                read -r USER_INPUT
+                USER_BASE_DIR="${USER_INPUT:-$DEFAULT_BASE_DIR}"
+                USER_BASE_DIR="${USER_BASE_DIR/#\~/$HOME}"
+                USER_BASE_DIR="$(realpath -m "$USER_BASE_DIR" 2>/dev/null || echo "$USER_BASE_DIR")"
+                USER_MODEL_DIR="$USER_BASE_DIR/models"
+                MODEL_ALREADY_DOWNLOADED=false
+                info "Models will be downloaded to: $USER_MODEL_DIR"
+                break
+                ;;
+            *)
+                warn "Please enter 1 or 2."
+                ;;
+        esac
+    done
+else
+    # Non-interactive (piped install): use default download location
+    USER_MODEL_DIR="$HOME/models"
+    info "Non-interactive install — using default model dir: $USER_MODEL_DIR"
 fi
 
-# Expand ~ and resolve
-USER_MODEL_DIR="${USER_MODEL_DIR/#\~/$HOME}"
-USER_MODEL_DIR="$(realpath -m "$USER_MODEL_DIR" 2>/dev/null || echo "$USER_MODEL_DIR")"
-
-# Create model dir (including any missing parents)
-mkdir -p "$USER_MODEL_DIR" || die "Cannot create model directory: $USER_MODEL_DIR — check permissions and available disk space."
+# Ensure model dir exists (covers both the "already downloaded" and "download" paths)
+mkdir -p "$USER_MODEL_DIR" \
+    || die "Cannot create model directory: $USER_MODEL_DIR — check permissions and available disk space."
 ok "Model directory: $USER_MODEL_DIR"
 
-# Disk space check: require at least 20 GB free
-AVAIL_KB=$(df -k "$USER_MODEL_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
-AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
-if [ "$AVAIL_GB" -lt 20 ]; then
-    die "Not enough disk space in $USER_MODEL_DIR\nAvailable: ~${AVAIL_GB} GB, required: 20 GB"
+# Disk space check: only required when we need to download the model (~20 GB)
+if [ "$MODEL_ALREADY_DOWNLOADED" = "false" ]; then
+    AVAIL_KB=$(df -k "$USER_MODEL_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
+    if [ "$AVAIL_GB" -lt 20 ]; then
+        die "Not enough disk space in $USER_MODEL_DIR\nAvailable: ~${AVAIL_GB} GB, required: ~20 GB"
+    fi
+    ok "Disk space OK (~${AVAIL_GB} GB available)"
 fi
-ok "Disk space OK (~${AVAIL_GB} GB available)"
 
+# Export so launcher and service_manager can find the model
 ATRI_MODEL_DIR="$USER_MODEL_DIR"
 export ATRI_MODEL_DIR
 
-# ─── Pick llama-server prebuilt asset ────────────────────────────────────
+# ─── Pick llama-server prebuilt asset ────────────────────────────────────────
 header "Selecting llama-server binary"
 
 # LLAMA_ASSET_GREP: substring to match in release asset URL
@@ -199,8 +266,7 @@ case "$OS-$ARCH_NORM-$ACCEL" in
         ;;
     darwin-arm64-metal)
         # e.g. llama-bXXXX-bin-macos-arm64.tar.gz
-        # Prefer plain arm64 build for widest compatibility;
-        # kleidiai variant may not be stable on all macOS versions.
+        # Prefer plain arm64 build; kleidiai variant may not be stable on all macOS versions.
         LLAMA_ASSET_GREP="macos-arm64"
         LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|kleidiai"
         ;;
@@ -213,9 +279,9 @@ case "$OS-$ARCH_NORM-$ACCEL" in
         ;;
 esac
 
-# ─── Download + extract llama-server ─────────────────────────────────────
+# ─── Download + extract llama-server ─────────────────────────────────────────
 STAGING_DIR=$(mktemp -d)
-mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR" "$MODEL_DIR"
+mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR"
 
 if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
     info "Fetching llama.cpp release manifest..."
@@ -281,7 +347,7 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
                 cmake_flags="$cmake_flags -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_CXX"
                 info "GCC $SYS_GCC_VER too new for CUDA — using host compiler: $CUDA_HOST_CXX"
             else
-                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 and rerun installer."
+                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 and rerun."
             fi
         fi
     elif [ "$ACCEL" = "rocm" ]; then
@@ -307,13 +373,11 @@ fi
 # Verify llama-server exists
 [ -f "$LLAMA_DIR/llama-server" ] || die "llama-server binary not found after install"
 
-# ─── Install chat template ─────────────────────────────────────────────────
+# ─── Install chat template ────────────────────────────────────────────────────
 header "Installing Gemma 4 chat template"
 
 # The template lives in the source repo; the main clone (below) includes it.
 # We copy it to TEMPLATE_DIR so the launcher can find it independent of SRC_DIR.
-# The separate early clone here only runs when TEMPLATE_DIR is missing and SRC_DIR
-# hasn't been cloned yet — e.g. on a partial re-install.
 if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ]; then
     ATRI_TEMPLATE_SRC="$STAGING_DIR/atri_src"
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$ATRI_TEMPLATE_SRC" 2>/dev/null || true
@@ -323,7 +387,7 @@ if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ]; then
     fi
 fi
 
-# ─── Install orchestrator + CLI ────────────────────────────────────────────
+# ─── Install orchestrator + CLI ───────────────────────────────────────────────
 header "Installing Atri Code (orchestrator + CLI)"
 
 # Clone/update source
@@ -368,7 +432,7 @@ sed -i "s|ORCHESTRATOR_DATABASE_URL=.*|ORCHESTRATOR_DATABASE_URL=sqlite:///${DB_
 
 ok "Orchestrator + CLI installed"
 
-# ─── Create `atri` launcher ────────────────────────────────────────────────
+# ─── Create `atri` launcher ───────────────────────────────────────────────────
 header "Creating launcher"
 
 mkdir -p "$ATRI_BIN_DIR"
@@ -389,7 +453,7 @@ LAUNCHER
 chmod +x "$ATRI_BIN_DIR/atri"
 ok "atri launcher → $ATRI_BIN_DIR/atri"
 
-# ─── PATH check ────────────────────────────────────────────────────────────
+# ─── PATH check ──────────────────────────────────────────────────────────────
 SENTINEL="# >>> atri-code installer added >>>"
 if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
@@ -406,46 +470,52 @@ if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     export PATH="$ATRI_BIN_DIR:$PATH"
 fi
 
-# ─── Download Gemma 4 26B A4B MoE models ─────────────────────────────────
-header "Downloading Gemma 4 26B A4B models"
+# ─── Download Gemma 4 26B A4B MoE models ─────────────────────────────────────
+if [ "$MODEL_ALREADY_DOWNLOADED" = "true" ]; then
+    header "Using existing model files"
+    ok "Main model:       $ATRI_MODEL_DIR/$ATRI_MODEL_FILENAME"
+    ok "Vision projector: $ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME"
+else
+    header "Downloading Gemma 4 26B A4B models"
 
-_curl_download() {
-    local url="$1" dest="$2" label="$3"
-    if [ -f "$dest" ] && [ -s "$dest" ]; then
-        ok "$label already present — skipping download"
-        return 0
-    fi
-    info "Downloading $label..."
-    info "  URL: $url"
-    # -C - resumes interrupted downloads; --progress-bar gives human-readable output
-    curl -L --progress-bar -C - -o "$dest" "$url" \
-        || die "Download failed for $label. Check your internet connection and retry."
-    if [ ! -s "$dest" ]; then
-        die "Downloaded file is empty: $dest"
-    fi
-    ok "$label downloaded → $dest"
-}
+    _curl_download() {
+        local url="$1" dest="$2" label="$3"
+        if [ -f "$dest" ] && [ -s "$dest" ]; then
+            ok "$label already present — skipping download"
+            return 0
+        fi
+        info "Downloading $label..."
+        info "  URL: $url"
+        # -C - resumes interrupted downloads; --progress-bar gives human-readable output
+        curl -L --progress-bar -C - -o "$dest" "$url" \
+            || die "Download failed for $label. Check your internet connection and retry."
+        if [ ! -s "$dest" ]; then
+            die "Downloaded file is empty: $dest"
+        fi
+        ok "$label downloaded → $dest"
+    }
 
-_curl_download "$ATRI_MODEL_URL"  "$ATRI_MODEL_DIR/$ATRI_MODEL_FILENAME"  "Main model (16.9 GB)"
-_curl_download "$ATRI_MMPROJ_URL" "$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME" "Vision projector (1.19 GB)"
+    _curl_download "$ATRI_MODEL_URL"  "$ATRI_MODEL_DIR/$ATRI_MODEL_FILENAME"  "Main model (16.9 GB)"
+    _curl_download "$ATRI_MMPROJ_URL" "$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME" "Vision projector (1.19 GB)"
+fi
 
 # Store model paths in .env so service_manager and orchestrator can find them
-ATRI_SRC="$SRC_DIR"
-if [ -f "$ATRI_SRC/services/orchestrator/.env" ]; then
+if [ -f "$SRC_DIR/services/orchestrator/.env" ]; then
     # Remove any stale ATRI_MODEL_DIR / ATRI_MMPROJ_PATH lines before writing
-    grep -v "^ATRI_MODEL_DIR=" "$ATRI_SRC/services/orchestrator/.env" \
-        | grep -v "^ATRI_MMPROJ_PATH=" > "$ATRI_SRC/services/orchestrator/.env.tmp" \
-        && mv "$ATRI_SRC/services/orchestrator/.env.tmp" "$ATRI_SRC/services/orchestrator/.env"
+    grep -v "^ATRI_MODEL_DIR=" "$SRC_DIR/services/orchestrator/.env" \
+        | grep -v "^ATRI_MMPROJ_PATH=" > "$SRC_DIR/services/orchestrator/.env.tmp" \
+        && mv "$SRC_DIR/services/orchestrator/.env.tmp" "$SRC_DIR/services/orchestrator/.env"
     {
         echo "ATRI_MODEL_DIR=$ATRI_MODEL_DIR"
         echo "ATRI_MMPROJ_PATH=$ATRI_MODEL_DIR/$ATRI_MMPROJ_FILENAME"
-    } >> "$ATRI_SRC/services/orchestrator/.env"
+    } >> "$SRC_DIR/services/orchestrator/.env"
 fi
 
-# ─── Uninstall script ──────────────────────────────────────────────────────
+# ─── Uninstall script ────────────────────────────────────────────────────────
 cat > "$ATRI_INSTALL_ROOT/uninstall.sh" <<UNINSTALL
 #!/usr/bin/env bash
 # Atri Code uninstaller — removes everything under $ATRI_INSTALL_ROOT
+# Note: model files in $ATRI_MODEL_DIR are NOT removed (they are your data).
 set -e
 echo "Removing Atri Code..."
 rm -rf "$ATRI_INSTALL_ROOT"
@@ -456,26 +526,29 @@ for RC in "\$HOME/.bashrc" "\$HOME/.zshrc" "\$HOME/.profile"; do
         sed -i '/# >>> atri-code installer added >>>/,/# <<< atri-code installer added <<</d' "\$RC" 2>/dev/null || true
     fi
 done
-echo "Atri Code removed. Restart your shell to apply PATH changes."
+echo "Atri Code removed."
+echo "Model files in $ATRI_MODEL_DIR were preserved."
+echo "Restart your shell to apply PATH changes."
 UNINSTALL
 chmod +x "$ATRI_INSTALL_ROOT/uninstall.sh"
 ok "Uninstall script → $ATRI_INSTALL_ROOT/uninstall.sh"
 
-# ─── Clean up staging ──────────────────────────────────────────────────────
+# ─── Clean up staging ────────────────────────────────────────────────────────
 rm -rf "$STAGING_DIR"
 STAGING_DIR=""  # prevent trap from double-cleaning
 
-# ─── Summary ───────────────────────────────────────────────────────────────
+# ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${GREEN}  │  Installation Complete!                 │${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Model:       Gemma 4 26B A4B MoE       │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Accelerator: ${ACCEL}$(printf '%*s' $((23 - ${#ACCEL})) '')│${RESET}"
+echo -e "${BOLD}${GREEN}  │  Model dir:   ${ATRI_MODEL_DIR:0:22}$(printf '%*s' $((23 - ${#ATRI_MODEL_DIR} > 0 ? (${#ATRI_MODEL_DIR} < 23 ? 23 - ${#ATRI_MODEL_DIR} : 0) : 23)) '')│${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Start:    atri                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Diagnose: atri doctor                  │${RESET}"
-echo -e "${BOLD}${GREEN}  │  Remove:   $ATRI_INSTALL_ROOT/uninstall.sh${RESET}"
+echo -e "${BOLD}${GREEN}  │  Remove:   ~/.local/share/atri/uninstall.sh${RESET}"
 echo -e "${BOLD}${GREEN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 echo -e "${DIM}  Restart your shell or run: export PATH=\"$ATRI_BIN_DIR:\$PATH\"${RESET}"

@@ -343,7 +343,7 @@ class ServiceManager:
             if tui:
                 tui.render_error(
                     "llama-server binary not found. Run the installer first:\n"
-                    "  curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash"
+                    "  curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/gemma4-26b/install.sh | bash"
                 )
             return False
 
