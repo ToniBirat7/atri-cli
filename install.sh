@@ -67,7 +67,11 @@ need() { command -v "$1" &>/dev/null || die "'$1' is required but not found. Ins
 need curl
 need git
 need python3
-need unzip
+need tar
+
+# ─── Python version check (3.10+ required) ────────────────────────────────
+python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" \
+    || die "Python 3.10+ is required (found $(python3 --version 2>&1)).\n  Install: sudo apt install python3.12  OR  brew install python@3.12"
 
 # ─── OS / Arch Detection ──────────────────────────────────────────────────
 header "Detecting system"
@@ -99,9 +103,13 @@ elif command -v nvidia-smi &>/dev/null; then
 fi
 
 if [ "$ACCEL" = "cpu" ]; then
-    if lspci 2>/dev/null | grep -qi 'AMD/ATI\|Radeon'; then
+    # Check for ROCm runtime — more reliable than lspci (which also matches iGPUs)
+    if command -v rocm-smi &>/dev/null && rocm-smi --showproductname &>/dev/null 2>&1; then
         ACCEL="rocm"
-        ok "AMD GPU detected → ROCm"
+        ok "AMD GPU detected (rocm-smi) → ROCm"
+    elif [ -d /opt/rocm ] && lspci 2>/dev/null | grep -qi 'VGA.*AMD\|3D.*AMD\|Display.*AMD'; then
+        ACCEL="rocm"
+        ok "AMD GPU detected (/opt/rocm + lspci) → ROCm"
     fi
 fi
 
@@ -110,24 +118,37 @@ fi
 # ─── Pick llama-server prebuilt asset ────────────────────────────────────
 header "Selecting llama-server binary"
 
+# LLAMA_ASSET_GREP: substring to match in release asset URL
+# LLAMA_ASSET_EXCLUDE: extended-regex of substrings to exclude (grep -Ev)
+# LLAMA_NEEDS_COMPILE: true = skip prebuilt, build from source
 LLAMA_ASSET_GREP=""
+LLAMA_ASSET_EXCLUDE="win-|\.exe$"   # always exclude Windows artifacts
 LLAMA_NEEDS_COMPILE=false
 
 case "$OS-$ARCH_NORM-$ACCEL" in
     linux-x64-cuda)
-        LLAMA_ASSET_GREP="ubuntu-x64-cuda-12"
+        # No CUDA prebuilt for Linux in llama.cpp releases — build from source.
+        LLAMA_NEEDS_COMPILE=true
+        info "NVIDIA/CUDA → building llama.cpp from source (no Linux CUDA prebuilt available)"
         ;;
     linux-x64-rocm)
-        LLAMA_ASSET_GREP="ubuntu-x64-rocm"
+        # e.g. llama-bXXXX-bin-ubuntu-rocm-7.2-x64.tar.gz
+        LLAMA_ASSET_GREP="ubuntu-rocm"
         ;;
     linux-x64-cpu)
-        LLAMA_ASSET_GREP="ubuntu-x64.zip"
+        # e.g. llama-bXXXX-bin-ubuntu-x64.tar.gz
+        LLAMA_ASSET_GREP="ubuntu-x64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|vulkan|openvino|sycl|rocm|kleidiai"
         ;;
-    linux-arm64-cpu|linux-arm64-*)
-        LLAMA_NEEDS_COMPILE=true
+    linux-arm64-*)
+        # e.g. llama-bXXXX-bin-ubuntu-arm64.tar.gz
+        LLAMA_ASSET_GREP="ubuntu-arm64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|vulkan"
         ;;
     darwin-arm64-metal)
+        # e.g. llama-bXXXX-bin-macos-arm64.tar.gz
         LLAMA_ASSET_GREP="macos-arm64"
+        LLAMA_ASSET_EXCLUDE="$LLAMA_ASSET_EXCLUDE|kleidiai"
         ;;
     darwin-x64-*)
         LLAMA_ASSET_GREP="macos-x64"
@@ -142,38 +163,38 @@ STAGING_DIR=$(mktemp -d)
 mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR" "$MODEL_DIR"
 
 if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
-    info "Downloading llama-server prebuilt ($ACCEL)..."
-    # Fetch release manifest and match the asset by fixed keyword strings (no sed wildcards)
+    info "Fetching llama.cpp release manifest..."
     RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
     ASSET_URL=$(echo "$RELEASE_JSON" \
         | grep "browser_download_url" \
         | grep -oE 'https://[^"]+' \
         | grep "$LLAMA_ASSET_GREP" \
-        | grep -v "\.exe$" \
-        | grep -v "win-" \
+        | grep -Ev "$LLAMA_ASSET_EXCLUDE" \
         | head -1 || true)
 
     if [ -z "$ASSET_URL" ]; then
-        warn "Could not find prebuilt asset for '$ACCEL' — falling back to compile"
+        warn "Could not find prebuilt binary for '$OS/$ARCH/$ACCEL' — falling back to compile"
         LLAMA_NEEDS_COMPILE=true
     else
-        info "Downloading: $ASSET_URL"
-        curl -fsSL --progress-bar -o "$STAGING_DIR/llama.zip" "$ASSET_URL"
-        unzip -q "$STAGING_DIR/llama.zip" -d "$STAGING_DIR/llama_extracted"
+        info "Downloading: $(basename "$ASSET_URL")"
+        curl -fsSL --progress-bar -o "$STAGING_DIR/llama_bin.tar.gz" "$ASSET_URL"
+        mkdir -p "$STAGING_DIR/llama_extracted"
+        tar xzf "$STAGING_DIR/llama_bin.tar.gz" -C "$STAGING_DIR/llama_extracted"
         # Copy only what we need: llama-server + shared libs
         LLAMA_SERVER_BIN=$(find "$STAGING_DIR/llama_extracted" -name "llama-server" ! -name "*.exe" | head -1)
         if [ -z "$LLAMA_SERVER_BIN" ]; then
-            warn "llama-server not found in prebuilt zip — falling back to compile"
+            warn "llama-server not found in prebuilt archive — falling back to compile"
             LLAMA_NEEDS_COMPILE=true
         else
             cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
-            find "$STAGING_DIR/llama_extracted" \( -name "libggml*.so*" -o -name "libllama*.so*" \
+            find "$STAGING_DIR/llama_extracted" \( \
+                -name "libggml*.so*" -o -name "libllama*.so*" \
                 -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
                 -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
             chmod +x "$LLAMA_DIR/llama-server"
             ok "llama-server installed from prebuilt"
         fi
-        rm -rf "$STAGING_DIR/llama.zip" "$STAGING_DIR/llama_extracted"
+        rm -rf "$STAGING_DIR/llama_bin.tar.gz" "$STAGING_DIR/llama_extracted"
     fi
 fi
 
@@ -185,7 +206,7 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
 
     LLAMA_SRC="$STAGING_DIR/llama_src"
     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
-    cmake_flags="-DLLAMA_NATIVE=ON"
+    cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
         cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
         # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
