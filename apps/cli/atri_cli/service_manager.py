@@ -131,18 +131,23 @@ class ServiceManager:
             except Exception:
                 pass
 
-        # Conservative defaults used when detect_hardware.py hasn't run yet.
-        # detect_hardware.py writes launch_config.json with device-specific values.
+        # Conservative defaults for Gemma 4 26B A4B MoE when detect_hardware.py
+        # hasn't run yet. detect_hardware.py writes device-specific values.
+        cpu_count = os.cpu_count() or 4
         return {
-            "recommended_n_gpu_layers": 99,
+            "recommended_n_gpu_layers": 999,
             "recommended_ctx_size": 16384,
             "recommended_batch_size": 2048,
             "recommended_ubatch_size": 512,
-            "recommended_threads": max(2, (os.cpu_count() or 4) - 2),
+            "recommended_threads": min(max(2, cpu_count - 2), 8),
             "flash_attn": False,
-            "kv_cache_type_k": "q8_0",
+            "kv_cache_type_k": "q4_0",
             "kv_cache_type_v": "q8_0",
-            "mlock": False,
+            "n_cpu_moe": 128,
+            "no_mmap": True,
+            "mlock": True,
+            "parallel_slots": 1,
+            "enable_unified_memory": False,
             "gpu_detected": False,
         }
 
@@ -172,67 +177,79 @@ class ServiceManager:
                 return c
         return None
 
-    def _find_model(self) -> Optional[Path]:
-        """Find the GGUF model file.
+    # Ordered list of model filenames to search for (primary names first)
+    _MODEL_NAMES = [
+        "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "gemma-4-26b-a4b-it-ud-q4_k_m.gguf",
+    ]
+    _MMPROJ_NAMES = [
+        "mmproj-BF16.gguf",
+        "mmproj-bf16.gguf",
+    ]
 
-        Also handles lazy first-run download when .fetch_on_first_run marker exists.
-        """
+    def _find_model(self) -> Optional[Path]:
+        """Find the Gemma 4 26B A4B GGUF model file."""
         install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
-        model_dirs = [
-            Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
+
+        # Check explicit env var from installer / launcher first
+        env_model_dir = os.environ.get("ATRI_MODEL_DIR", "")
+        model_dirs = []
+        if env_model_dir:
+            model_dirs.append(Path(env_model_dir))
+        model_dirs += [
+            install_root / "models",
+            Path.home() / "models" / "gemma4-26b",
             self.repo_root / "models",
         ]
 
         for mdir in model_dirs:
-            for name in ["gemma-4-e2b-it-Q4_K_M.gguf", "gemma-4-E2B-it-Q4_K_M.gguf"]:
+            if not mdir.is_dir():
+                continue
+            for name in self._MODEL_NAMES:
                 p = mdir / name
                 if p.exists():
                     return p
-            for gguf in mdir.glob("*.gguf"):
-                return gguf
-
-        # Check for lazy-fetch marker written by installer
-        for mdir in model_dirs:
-            marker = mdir / ".fetch_on_first_run"
-            if marker.exists():
-                self._fetch_model_lazy(mdir, marker)
-                for gguf in mdir.glob("*.gguf"):
+            # Fallback: any gguf in the dir that is not a projector
+            for gguf in sorted(mdir.glob("*.gguf")):
+                if not any(proj in gguf.name.lower() for proj in ("mmproj", "projector")):
                     return gguf
 
         return None
 
-    def _fetch_model_lazy(self, model_dir: Path, marker: Path) -> None:
-        """Download the model on first run using the URL stored in the marker file."""
-        import urllib.request
+    def _find_mmproj(self, model_path: Optional[Path]) -> Optional[Path]:
+        """Find the vision projector (mmproj-BF16.gguf) for the 26B MoE model."""
+        # 1. Explicit env var from installer / launcher
+        env_mmproj = os.environ.get("ATRI_MMPROJ_PATH", "")
+        if env_mmproj:
+            p = Path(env_mmproj)
+            if p.exists():
+                return p
 
-        try:
-            lines = marker.read_text().strip().splitlines()
-            url = next((l.split("=", 1)[1] for l in lines if l.startswith("MODEL_URL=")), None)
-        except Exception:
-            url = None
+        # 2. Same directory as the main model
+        search_dirs: list[Path] = []
+        if model_path:
+            search_dirs.append(model_path.parent)
 
-        if not url:
-            return
+        env_model_dir = os.environ.get("ATRI_MODEL_DIR", "")
+        if env_model_dir:
+            search_dirs.append(Path(env_model_dir))
 
-        dest = model_dir / "gemma-4-E2B-it-Q4_K_M.gguf"
-        print(f"\n  Downloading Gemma 4 E2B model (~3.1 GB) on first run…")
-        print(f"  This happens once. Subsequent starts will be instant.\n")
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+        search_dirs += [
+            install_root / "models",
+            Path.home() / "models" / "gemma4-26b",
+            self.repo_root / "models",
+        ]
 
-        def _progress(block_count, block_size, total_size):
-            done = block_count * block_size
-            pct = min(100, int(done * 100 / total_size)) if total_size > 0 else 0
-            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-            print(f"\r  [{bar}] {pct}%  {done // 1_000_000} MB / {total_size // 1_000_000} MB", end="", flush=True)
+        for mdir in search_dirs:
+            if not mdir.is_dir():
+                continue
+            for name in self._MMPROJ_NAMES:
+                p = mdir / name
+                if p.exists():
+                    return p
 
-        try:
-            urllib.request.urlretrieve(url, dest, reporthook=_progress)
-            print()
-            marker.unlink(missing_ok=True)
-        except Exception as exc:
-            print(f"\n  Model download failed: {exc}")
-            if dest.exists():
-                dest.unlink()
-            raise
+        return None
 
     # ── PID file helpers ─────────────────────────────────────────────────────
 
@@ -311,7 +328,7 @@ class ServiceManager:
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
-                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
+                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3-26b",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -334,20 +351,26 @@ class ServiceManager:
         if not model:
             if tui:
                 tui.render_error(
-                    "No model file found in models/. Expected gemma-4-E2B-it-Q4_K_M.gguf"
+                    "No model file found. Expected gemma-4-26B-A4B-it-UD-Q4_K_M.gguf\n"
+                    "Set ATRI_MODEL_DIR to the directory containing your model files."
                 )
             return False
 
+        mmproj = self._find_mmproj(model)
+
         config = self._get_launch_config()
 
-        n_gpu = str(config.get("recommended_n_gpu_layers", 99))
-        ctx = str(config.get("recommended_ctx_size", 32768))
-        threads = str(config.get("recommended_threads", max(2, (os.cpu_count() or 4) - 2)))
+        cpu_count = os.cpu_count() or 4
+        n_gpu = str(config.get("recommended_n_gpu_layers", 999))
+        ctx = str(config.get("recommended_ctx_size", 16384))
+        threads = str(config.get("recommended_threads", min(max(2, cpu_count - 2), 8)))
         batch = str(config.get("recommended_batch_size", 2048))
         ubatch = str(config.get("recommended_ubatch_size", 512))
         flash = config.get("flash_attn", True)
-        kv_k = config.get("kv_cache_type_k", "q8_0")
+        kv_k = config.get("kv_cache_type_k", "q4_0")
         kv_v = config.get("kv_cache_type_v", "q8_0")
+        n_cpu_moe = str(config.get("n_cpu_moe", 128))
+        parallel_slots = str(config.get("parallel_slots", 1))
 
         # Gemma 4 chat template — try install-root first, then repo fallback
         install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
@@ -368,14 +391,20 @@ class ServiceManager:
             "--ubatch-size", ubatch,
             "--cache-type-k", kv_k,
             "--cache-type-v", kv_v,
-            "--parallel", "2",
+            "--parallel", parallel_slots,
             "--api-key", "secret",
+            # MoE: pin all 128 expert layers to CPU RAM
+            "--n-cpu-moe", n_cpu_moe,
+            # MoE: disable memory mapping (required for stable MoE inference)
+            "--no-mmap",
         ]
+        if mmproj:
+            cmd.extend(["--mmproj", str(mmproj)])
         if template_file.exists():
             cmd.extend(["--chat-template-file", str(template_file)])
         if flash:
             cmd.extend(["--flash-attn", "on"])
-        if config.get("mlock", False):
+        if config.get("mlock", True):
             cmd.append("--mlock")
 
         log_path = self.repo_root / "llama.log"
@@ -386,6 +415,10 @@ class ServiceManager:
         env = os.environ.copy()
         existing_ld = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld}" if existing_ld else lib_dir
+        # Enable NVIDIA Zero-Copy Unified Memory so the MoE model can use more
+        # VRAM than physically available via page migration (Ampere+ GPUs).
+        if config.get("enable_unified_memory", False):
+            env["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
 
         proc = subprocess.Popen(
             cmd,

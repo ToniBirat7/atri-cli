@@ -271,6 +271,22 @@ class ManagedSettingsConfig(BaseModel):
     managed_path: Optional[str] = Field(default=None)
 
 
+class ModelPathConfig(BaseModel):
+    """Model file paths (populated by installer or env vars)."""
+
+    model_dir: str = Field(
+        default="",
+        description="Directory containing the GGUF model and mmproj files"
+    )
+    mmproj_path: str = Field(
+        default="",
+        description="Full path to the vision projector (mmproj-BF16.gguf)"
+    )
+
+    class Config:
+        env_prefix = "ATRI_"
+
+
 class OrchestratorConfig(BaseModel):
     """Root orchestrator configuration."""
 
@@ -285,6 +301,7 @@ class OrchestratorConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     hooks: HookConfig = Field(default_factory=HookConfig)
     managed_settings: ManagedSettingsConfig = Field(default_factory=ManagedSettingsConfig)
+    model_paths: ModelPathConfig = Field(default_factory=ModelPathConfig)
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR)"
@@ -368,6 +385,10 @@ class OrchestratorConfig(BaseModel):
             ),
             hooks=HookConfig(
                 enabled=os.getenv("ORCHESTRATOR_HOOKS_ENABLED", "true").lower() == "true",
+            ),
+            model_paths=ModelPathConfig(
+                model_dir=os.getenv("ATRI_MODEL_DIR", ""),
+                mmproj_path=os.getenv("ATRI_MMPROJ_PATH", ""),
             ),
             managed_settings=ManagedSettingsConfig(
                 user_path=os.getenv("ORCHESTRATOR_SETTINGS_USER_PATH"),

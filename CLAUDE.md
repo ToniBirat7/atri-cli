@@ -11,8 +11,11 @@
 
 ## Target Model
 
-- **File:** `gemma-4-E2B-it-Q4_K_M.gguf` (Text Decoder only).
-- **Implementation Rules:** Strict adherence to Gemma 4 E2B prompt formatting, system prompts, and tool-calling best practices. All agentic features must be tailored to this specific model's capabilities.
+- **File:** `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` + `mmproj-BF16.gguf` (MoE, Text + Vision).
+- **Architecture:** 25.2B total params, 3.8B active per token (Mixture-of-Experts: 8 active / 128 total experts).
+- **Launch flags:** `--n-gpu-layers 999 --n-cpu-moe 128 --no-mmap --mlock -ctk q4_0 -ctv q8_0 -fa on`
+- **Env:** `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` required on NVIDIA for 6 GB VRAM cards.
+- **Implementation Rules:** Strict adherence to Gemma 4 26B MoE inference settings. All llama-server flags must use the MoE-optimized values above. The vision projector (mmproj-BF16.gguf) must be passed via `--mmproj`.
 
 ## Core Features & Deliverables
 
@@ -108,15 +111,27 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 
 ## Branches
 
-- `master`: Production CLI + web UI; stable, fully deployable
+- `master`: Production CLI + web UI with Gemma 4 E2B; stable baseline
+- `gemma4-26b`: **Active development** — Gemma 4 26B A4B MoE model migration (this branch)
 - `web`: Web-first variant of master; documents web UI startup defaults
-- `atri-cli-v3`: V3 feature development (multi-model arena, prompt profile hardening); active work
+- `atri-cli-v3`: V3 feature development (multi-model arena, prompt profile hardening)
 - `v2-development`: Archived V2 work (diff engine, context amnesia fixes); merged to master
+
+## Gotchas (MoE-specific, gemma4-26b branch)
+
+- `--n-cpu-moe 128` is required for Gemma 4 26B — pins all 128 expert layers to CPU RAM
+- `--no-mmap` is required for stable MoE inference — do not remove it
+- `--mlock` pins model to RAM; may fail without `ulimit -l unlimited` on some Linux configs
+- `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` is set by the launcher for NVIDIA GPUs automatically
+- `mmproj-BF16.gguf` must be downloaded alongside the main GGUF; `--mmproj` flag wires it up
+- Model search checks `ATRI_MODEL_DIR` env var first, then common paths — set this if model is in a custom location
+- `detect_hardware.py` default `model_size_mb` is now 16384 (was 3100 for E2B)
+- `PROMPT_POLICY_DEFAULT_PROFILE` defaults to `agent-v3-26b` (not `agent-v3`)
 
 ## Current Status
 
-**Completed:** CLI TUI (interactive + print mode), orchestrator API with SSE, MCP filesystem/search/diff tools, JWT + API key auth, SQLite persistence, Docker Compose full stack, frontend Next.js chat UI, `agent-v3` prompt profile (Gemma-optimized)
-**In Progress:** V3 multi-model support (atri-cli-v3 branch), Tree-sitter code intelligence
+**Completed:** CLI TUI (interactive + print mode), orchestrator API with SSE, MCP filesystem/search/diff tools, JWT + API key auth, SQLite persistence, Docker Compose full stack, frontend Next.js chat UI, `agent-v3-26b` prompt profile (26B MoE-optimized), MoE launch flags, hardware-aware config
+**In Progress:** End-to-end testing with Gemma 4 26B A4B model, streaming token output
 **Not Started:** PostgreSQL migration tooling, test suite (`services/orchestrator/tests/` empty), Redis rate limiting integration, i18n
 
 ## Compaction Rules
