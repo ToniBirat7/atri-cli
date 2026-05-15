@@ -919,6 +919,8 @@ def bash_exec(
 
     timeout = min(int(timeout_seconds), 120)
 
+    import time
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
             command,
@@ -929,18 +931,29 @@ def bash_exec(
             timeout=timeout,
             env={**os.environ},
         )
+        elapsed = time.monotonic() - t0
         combined = result.stdout + result.stderr
-        truncated = len(combined) > _MAX_OUTPUT_CHARS
+        total_bytes = len(combined.encode("utf-8", errors="replace"))
+        truncated = total_bytes > _MAX_OUTPUT_CHARS
         if truncated:
-            combined = combined[:_MAX_OUTPUT_CHARS] + "\n[...output truncated...]"
+            head = combined[:_MAX_OUTPUT_CHARS // 2]
+            tail = combined[-(min(_MAX_OUTPUT_CHARS // 10, 5000)):]
+            combined = (
+                head
+                + f"\n\n[...{total_bytes - len(head.encode()) - len(tail.encode())} bytes omitted...]\n\n"
+                + tail
+            )
+        header = f"[exit:{result.returncode} | elapsed:{elapsed:.1f}s | {total_bytes} bytes]\n"
         return {
             "ok": result.returncode == 0,
             "exit_code": result.returncode,
-            "output": combined,
+            "output": header + combined,
             "truncated": truncated,
+            "elapsed_seconds": round(elapsed, 2),
         }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"Command timed out after {timeout}s"}
+        elapsed = time.monotonic() - t0
+        return {"ok": False, "error": f"Command timed out after {timeout}s (elapsed: {elapsed:.1f}s)"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -1035,6 +1048,337 @@ def grep_codebase(
                         return {"ok": True, "matches": matches, "count": len(matches), "engine": "python", "truncated": True}
 
     return {"ok": True, "matches": matches, "count": len(matches), "engine": "python"}
+
+
+# ─── Code intelligence ────────────────────────────────────────────────────────
+
+_SYMBOL_SKIP_DIRS = frozenset({
+    "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+    ".next", "build", "dist", ".pytest_cache", "models", ".mypy_cache",
+})
+
+_SYMBOL_PATTERNS = [
+    # Python
+    (r"^\s*(async\s+)?def\s+({query})\s*\(", "function"),
+    (r"^\s*class\s+({query})\s*[\(:]", "class"),
+    # JavaScript / TypeScript
+    (r"^\s*(export\s+)?(async\s+)?function\s+({query})\s*\(", "function"),
+    (r"^\s*(export\s+)?(const|let|var)\s+({query})\s*=", "variable"),
+    (r"^\s*(export\s+)?(class|interface|type)\s+({query})\b", "class"),
+    # Rust
+    (r"^\s*(pub\s+)?(async\s+)?fn\s+({query})\s*[\(<]", "function"),
+    (r"^\s*(pub\s+)?(struct|enum|impl|trait)\s+({query})\b", "class"),
+    # Go
+    (r"^\s*func\s+\(?.*?\)?\s*({query})\s*\(", "function"),
+    (r"^\s*type\s+({query})\s+(struct|interface)", "class"),
+    # Shell / generic variable assignment
+    (r"^({query})\s*\(\)\s*\{{", "function"),
+]
+
+
+@mcp.tool
+def search_symbols(
+    query: str,
+    file_glob: str = "*",
+    max_results: int = 20,
+) -> dict[str, Any]:
+    """
+    Search for function, class, method, or variable definitions across the codebase.
+
+    Uses ripgrep when available; falls back to pure Python.
+
+    Args:
+        query: Symbol name to search for (exact match, case-sensitive).
+        file_glob: Glob to restrict files, e.g. '*.py', '*.ts'. Defaults to all files.
+        max_results: Maximum results to return (cap 100).
+
+    Returns a list of matches with file, line number, kind (function/class/variable), and the matching line.
+    """
+    import re
+    import subprocess
+
+    if not query or not query.strip():
+        return {"ok": False, "error": "query must be a non-empty symbol name", "matches": []}
+
+    q = re.escape(query.strip())
+    max_results = min(int(max_results), 100)
+
+    search_root = POLICY.get_allowed_dirs()[0]
+
+    # Build a combined regex that matches any definition pattern containing the query.
+    combined_pattern = "|".join(
+        pat.replace("{query}", q) for pat, _ in _SYMBOL_PATTERNS
+    )
+
+    rg = shutil.which("rg")
+    raw_matches: list[dict[str, Any]] = []
+
+    if rg:
+        cmd = [
+            rg, "--json", "-m", str(max_results * 3),
+            "--glob", file_glob,
+            "--max-filesize", "512K",
+            combined_pattern, str(search_root),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            for line in proc.stdout.splitlines():
+                try:
+                    obj = json.loads(line)
+                    if obj.get("type") == "match":
+                        data = obj["data"]
+                        raw_matches.append({
+                            "file": _to_relative_display(Path(data["path"]["text"])),
+                            "line": data["line_number"],
+                            "content": data["lines"]["text"].rstrip("\n"),
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        except Exception:
+            pass
+
+    if not raw_matches:
+        # Pure Python fallback
+        import re as _re
+        import fnmatch as _fn
+        pat_re = _re.compile(combined_pattern)
+        glob_re = _re.compile(_fn.translate(file_glob))
+        for dirpath, dirnames, filenames in os.walk(str(search_root)):
+            dirnames[:] = [d for d in dirnames if d not in _SYMBOL_SKIP_DIRS]
+            for fname in filenames:
+                if not glob_re.match(fname):
+                    continue
+                fpath = Path(dirpath) / fname
+                try:
+                    for lineno, text in enumerate(fpath.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        if pat_re.search(text):
+                            raw_matches.append({
+                                "file": _to_relative_display(fpath),
+                                "line": lineno,
+                                "content": text.rstrip("\n"),
+                            })
+                            if len(raw_matches) >= max_results * 3:
+                                break
+                except OSError:
+                    continue
+                if len(raw_matches) >= max_results * 3:
+                    break
+
+    # Annotate with inferred kind
+    import re as _re2
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for m in raw_matches:
+        key = (m["file"], m["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        kind = "symbol"
+        for pat, k in _SYMBOL_PATTERNS:
+            if _re2.search(pat.replace("{query}", q), m["content"]):
+                kind = k
+                break
+        results.append({
+            "name": query,
+            "kind": kind,
+            "file": m["file"],
+            "line": m["line"],
+            "snippet": m["content"].strip(),
+        })
+        if len(results) >= max_results:
+            break
+
+    return {"ok": True, "matches": results, "count": len(results), "query": query}
+
+
+@mcp.tool
+def get_repo_map(max_depth: int = 3) -> str:
+    """
+    Get a high-level overview of the project structure.
+
+    Returns a text summary including: top-level directories, file counts by
+    language, and the first docstring/comment line of key entry-point files
+    (main.py, app.py, index.ts, etc.).
+
+    Args:
+        max_depth: How many directory levels to traverse (1–6).
+    """
+    max_depth = max(1, min(int(max_depth), 6))
+    root = POLICY.get_allowed_dirs()[0]
+
+    _SKIP = frozenset({
+        "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+        ".next", "build", "dist", ".pytest_cache", "models", ".mypy_cache",
+        ".ruff_cache", ".mypy_cache", "target", "out",
+    })
+    _ENTRY_NAMES = frozenset({
+        "main.py", "app.py", "server.py", "api.py", "index.py",
+        "index.ts", "index.js", "app.ts", "app.js", "main.ts", "main.js",
+        "manage.py", "__init__.py", "cli.py",
+    })
+    _EXT_LANG: dict[str, str] = {
+        ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript",
+        ".js": "JavaScript", ".jsx": "JavaScript", ".rs": "Rust",
+        ".go": "Go", ".sh": "Shell", ".md": "Markdown",
+        ".json": "JSON", ".yaml": "YAML", ".yml": "YAML",
+        ".toml": "TOML", ".html": "HTML", ".css": "CSS",
+    }
+
+    ext_counts: dict[str, int] = {}
+    entry_points: list[dict[str, str]] = []
+    dir_lines: list[str] = []
+
+    def _walk(path: Path, depth: int, prefix: str) -> None:
+        if depth <= 0:
+            return
+        try:
+            items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        except PermissionError:
+            return
+        for item in items:
+            if item.name.startswith(".") or item.name in _SKIP:
+                continue
+            rel = _to_relative_display(item)
+            if item.is_dir():
+                dir_lines.append(f"{prefix}{item.name}/")
+                _walk(item, depth - 1, prefix + "  ")
+            else:
+                ext = item.suffix.lower()
+                lang = _EXT_LANG.get(ext, "other")
+                ext_counts[lang] = ext_counts.get(lang, 0) + 1
+                if item.name in _ENTRY_NAMES:
+                    # Grab first non-empty line (docstring/comment hint)
+                    hint = ""
+                    try:
+                        first_lines = item.read_text(encoding="utf-8", errors="replace").splitlines()
+                        for ln in first_lines[:10]:
+                            stripped = ln.strip().strip('"""').strip("'''").strip("#").strip()
+                            if stripped and not stripped.startswith("from ") and not stripped.startswith("import "):
+                                hint = stripped[:80]
+                                break
+                    except OSError:
+                        pass
+                    entry_points.append({"path": rel, "hint": hint})
+
+    _walk(root, max_depth, "")
+
+    lines = [f"# Project: {root.name}", ""]
+    if dir_lines:
+        lines.append("## Structure")
+        lines.extend(dir_lines[:80])
+        if len(dir_lines) > 80:
+            lines.append(f"  ... ({len(dir_lines) - 80} more entries)")
+        lines.append("")
+
+    if ext_counts:
+        lines.append("## File Counts by Language")
+        for lang, count in sorted(ext_counts.items(), key=lambda x: -x[1]):
+            lines.append(f"  {lang}: {count}")
+        lines.append("")
+
+    if entry_points:
+        lines.append("## Entry Points")
+        for ep in entry_points[:20]:
+            hint_str = f"  — {ep['hint']}" if ep["hint"] else ""
+            lines.append(f"  {ep['path']}{hint_str}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool
+def propose_plan(goal: str, steps: list[str]) -> dict[str, Any]:
+    """
+    Propose a multi-step plan for a complex task.
+
+    Call this before starting a large task so the user can review the approach.
+    The plan is saved to the todo list so it persists across turns.
+
+    Args:
+        goal: High-level description of what you're trying to accomplish.
+        steps: Ordered list of concrete actions you plan to take.
+
+    Returns the saved plan. The orchestrator will display it to the user.
+    """
+    if not goal or not goal.strip():
+        return {"ok": False, "error": "goal must be non-empty"}
+    if not steps or not isinstance(steps, list):
+        return {"ok": False, "error": "steps must be a non-empty list"}
+
+    todos = [
+        {"content": f"[Goal] {goal.strip()}", "status": "in_progress", "priority": "high"},
+    ]
+    for i, step in enumerate(steps, 1):
+        todos.append({
+            "content": f"Step {i}: {str(step).strip()}",
+            "status": "pending",
+            "priority": "medium",
+        })
+
+    # Persist to todo store so the user sees it
+    todo_write(todos=todos)
+
+    return {
+        "ok": True,
+        "goal": goal.strip(),
+        "steps": [str(s).strip() for s in steps],
+        "step_count": len(steps),
+        "message": "Plan saved to todo list. Proceed step by step and mark each complete with todo_write.",
+    }
+
+
+# ─── Git diff (read-only) ─────────────────────────────────────────────────────
+
+@mcp.tool
+def view_git_diff(
+    path: str = ".",
+    staged: bool = False,
+    base: str = "HEAD",
+) -> dict[str, Any]:
+    """
+    Show git diff for a file or directory (read-only, no side effects).
+
+    Args:
+        path: File or directory to diff, relative to project root. Defaults to '.'.
+        staged: If True, show staged changes (git diff --cached). Defaults to False.
+        base: Base ref to diff against, e.g. 'HEAD', 'main', 'HEAD~1'. Defaults to 'HEAD'.
+
+    Returns the unified diff text, or a message if there are no changes.
+    """
+    import subprocess
+
+    try:
+        target = _resolve_user_path(path)
+    except (PermissionError, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "diff": ""}
+
+    cmd = ["git", "diff", base]
+    if staged:
+        cmd = ["git", "diff", "--cached", base]
+    cmd.append(str(target))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(POLICY.get_allowed_dirs()[0]),
+        )
+        diff_text = result.stdout
+        if not diff_text.strip():
+            diff_text = "(No changes)" if not staged else "(No staged changes)"
+        return {
+            "ok": True,
+            "path": _to_relative_display(target),
+            "staged": staged,
+            "base": base,
+            "diff": diff_text,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "git diff timed out after 15s", "diff": ""}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "diff": ""}
 
 
 if __name__ == "__main__":
