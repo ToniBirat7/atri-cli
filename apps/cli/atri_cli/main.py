@@ -78,6 +78,36 @@ PATH_INPUT_KEYS = {
 _TUI = TUIRenderer()
 _RICH = RichTUI()
 
+_TOOL_RISK_TIER: dict[str, str] = {
+    # red: destructive / irreversible
+    "bash_exec": "red",
+    "write_file": "red",
+    "delete_file": "red",
+    # yellow: mutating but recoverable
+    "edit_file": "yellow",
+    "edit_diff": "yellow",
+    "create_directory": "yellow",
+    "move_file": "yellow",
+    "rename_file": "yellow",
+    "create_file": "yellow",
+    # green: read-only / safe
+    "read_text_file": "green",
+    "list_directory": "green",
+    "grep_codebase": "green",
+    "search_symbols": "green",
+    "get_repo_map": "green",
+    "view_git_diff": "green",
+    "search_web": "green",
+    "fetch_url": "green",
+    "todo_write": "green",
+    "propose_plan": "green",
+    "bash_exec_safe": "green",
+}
+
+
+def _tool_risk_tier(tool_name: str) -> str:
+    return _TOOL_RISK_TIER.get(tool_name, "yellow")
+
 SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/help": "Show interactive command help",
     "/mode": "Show or set permission mode",
@@ -640,8 +670,20 @@ def _render_permission_event(
             "deny": permission_state.deny,
         },
     )
+    action = response.get("action", "ask")
+    reason = response.get("reason", "")
+    tier = _tool_risk_tier(tool_name)
+
     if not quiet:
-        print(f"\n[permission] {tool_call} -> {response.get('action')} ({response.get('reason')})")
+        if interactive and action == "ask":
+            allowed = _RICH.render_permission_prompt(tool_name, reason, risk_tier=tier)
+            if not allowed:
+                permission_state.deny.append(tool_name)
+        else:
+            _tier_badge = {"red": "⛔", "yellow": "⚠", "green": "✓"}.get(tier, "•")
+            _RICH.console.print(
+                f"  {_tier_badge} [dim]{tool_call}[/dim] → {action}  [dim]{reason}[/dim]"
+            )
 
     if tool_name not in WRITE_LIKE_TOOLS:
         return
