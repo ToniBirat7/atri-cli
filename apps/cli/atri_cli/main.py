@@ -591,7 +591,7 @@ def _handle_interactive_local_command(user_input: str, permission_state: Permiss
 
     if user_input == "/model":
         info = {
-            "Model": "Gemma 4 E2B Instruct (Q4_K_M)",
+            "Model": "Gemma 4 26B A4B MoE (Q4_K_M)",
             "Runtime": "llama.cpp",
             "Reasoning": "enabled",
         }
@@ -1037,7 +1037,7 @@ def _run_interactive(
         _RICH.render_welcome(
             api_url=client.base_url,
             permission_mode=permission_state.mode,
-            model="Gemma 4 E2B Instruct (Q4_K_M)",
+            model="Gemma 4 26B A4B MoE (Q4_K_M)",
             reasoning=True,
         )
         if conversation_id:
