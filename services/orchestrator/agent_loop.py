@@ -339,8 +339,9 @@ class AgentLoop:
                             completion = await llm_adapter.chat_completion(
                                 messages=self.state.messages,
                                 tools=available_tools,
-                                # Very low temp for tool-call turns — peg-native needs deterministic JSON
-                                temperature=0.1 if available_tools else None,
+                                # Clamp tool-call temperature: 0.3 min for deterministic JSON,
+                                # but respect config (26B handles 0.3–0.6 well; E2B needed 0.1).
+                                temperature=max(0.3, min(self.config.llm.temperature, 0.6)) if available_tools else None,
                                 enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
                             )
                     except Exception as e:
