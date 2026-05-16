@@ -75,6 +75,14 @@ need tar
 python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" \
     || die "Python 3.10+ is required (found $(python3 --version 2>&1)).\n  Install: sudo apt install python3.12  OR  brew install python@3.12"
 
+# ─── Re-attach stdin to terminal when piped (curl | bash) ────────────────────
+# `curl ... | bash` sets bash's stdin to the pipe, making [ -t 0 ] false and
+# causing interactive prompts to be skipped. Reopening /dev/tty restores the
+# terminal as stdin so read/prompts work correctly.
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec 0</dev/tty
+fi
+
 # ─── OS / Arch Detection ─────────────────────────────────────────────────────
 header "Detecting system"
 
