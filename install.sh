@@ -299,91 +299,95 @@ esac
 STAGING_DIR=$(mktemp -d)
 mkdir -p "$LLAMA_DIR" "$TEMPLATE_DIR"
 
-if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
-    info "Fetching llama.cpp release manifest..."
-    RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
-    ASSET_URL=$(echo "$RELEASE_JSON" \
-        | grep "browser_download_url" \
-        | grep -oE 'https://[^"]+' \
-        | grep "$LLAMA_ASSET_GREP" \
-        | grep -Ev "$LLAMA_ASSET_EXCLUDE" \
-        | head -1 || true)
+if [ -f "$LLAMA_DIR/llama-server" ]; then
+    ok "llama-server already installed — skipping"
+else
+    if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
+        info "Fetching llama.cpp release manifest..."
+        RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+        ASSET_URL=$(echo "$RELEASE_JSON" \
+            | grep "browser_download_url" \
+            | grep -oE 'https://[^"]+' \
+            | grep "$LLAMA_ASSET_GREP" \
+            | grep -Ev "$LLAMA_ASSET_EXCLUDE" \
+            | head -1 || true)
 
-    if [ -z "$ASSET_URL" ]; then
-        warn "Could not find prebuilt binary for '$OS/$ARCH/$ACCEL' — falling back to compile"
-        LLAMA_NEEDS_COMPILE=true
-    else
-        info "Downloading: $(basename "$ASSET_URL")"
-        curl -fsSL --progress-bar -o "$STAGING_DIR/llama_bin.tar.gz" "$ASSET_URL"
-        mkdir -p "$STAGING_DIR/llama_extracted"
-        tar xzf "$STAGING_DIR/llama_bin.tar.gz" -C "$STAGING_DIR/llama_extracted"
-
-        # Copy llama-server binary
-        LLAMA_SERVER_BIN=$(find "$STAGING_DIR/llama_extracted" -name "llama-server" ! -name "*.exe" | head -1)
-        if [ -z "$LLAMA_SERVER_BIN" ]; then
-            warn "llama-server not found in prebuilt archive — falling back to compile"
+        if [ -z "$ASSET_URL" ]; then
+            warn "Could not find prebuilt binary for '$OS/$ARCH/$ACCEL' — falling back to compile"
             LLAMA_NEEDS_COMPILE=true
         else
-            cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
-            # Copy shared libraries that llama-server links against at runtime
-            find "$STAGING_DIR/llama_extracted" \( \
-                -name "libggml*.so*" -o -name "libllama*.so*" \
-                -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
-                -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
-            chmod +x "$LLAMA_DIR/llama-server"
-            ok "llama-server installed from prebuilt"
-        fi
-        rm -rf "$STAGING_DIR/llama_bin.tar.gz" "$STAGING_DIR/llama_extracted"
-    fi
-fi
+            info "Downloading: $(basename "$ASSET_URL")"
+            curl -fsSL --progress-bar -o "$STAGING_DIR/llama_bin.tar.gz" "$ASSET_URL"
+            mkdir -p "$STAGING_DIR/llama_extracted"
+            tar xzf "$STAGING_DIR/llama_bin.tar.gz" -C "$STAGING_DIR/llama_extracted"
 
-if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
-    header "Building llama.cpp from source"
-    warn "Building from source for $OS/$ARCH/$ACCEL — this takes 5-15 min"
-    need cmake
-    need make
-
-    LLAMA_SRC="$STAGING_DIR/llama_src"
-    git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
-
-    cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
-    if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
-        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
-        # nvcc has a max supported GCC version — auto-detect a compatible one
-        SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
-        if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
-            CUDA_HOST_CXX=""
-            for _ver in 14 13 12 11 10; do
-                if command -v "g++-$_ver" &>/dev/null; then
-                    CUDA_HOST_CXX=$(command -v "g++-$_ver")
-                    break
-                fi
-            done
-            if [ -n "$CUDA_HOST_CXX" ]; then
-                cmake_flags="$cmake_flags -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_CXX"
-                info "GCC $SYS_GCC_VER too new for CUDA — using host compiler: $CUDA_HOST_CXX"
+            # Copy llama-server binary
+            LLAMA_SERVER_BIN=$(find "$STAGING_DIR/llama_extracted" -name "llama-server" ! -name "*.exe" | head -1)
+            if [ -z "$LLAMA_SERVER_BIN" ]; then
+                warn "llama-server not found in prebuilt archive — falling back to compile"
+                LLAMA_NEEDS_COMPILE=true
             else
-                warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 and rerun."
+                cp "$LLAMA_SERVER_BIN" "$LLAMA_DIR/"
+                # Copy shared libraries that llama-server links against at runtime
+                find "$STAGING_DIR/llama_extracted" \( \
+                    -name "libggml*.so*" -o -name "libllama*.so*" \
+                    -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
+                    -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+                chmod +x "$LLAMA_DIR/llama-server"
+                ok "llama-server installed from prebuilt"
             fi
+            rm -rf "$STAGING_DIR/llama_bin.tar.gz" "$STAGING_DIR/llama_extracted"
         fi
-    elif [ "$ACCEL" = "rocm" ]; then
-        cmake_flags="$cmake_flags -DGGML_HIP=ON"
-    elif [ "$ACCEL" = "metal" ]; then
-        cmake_flags="$cmake_flags -DGGML_METAL=ON"
     fi
 
-    cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" $cmake_flags \
-        -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release \
-        -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
-    cmake --build "$LLAMA_SRC/build" --target llama-server -j"$(nproc)"
+    if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
+        header "Building llama.cpp from source"
+        warn "Building from source for $OS/$ARCH/$ACCEL — this takes 5-15 min"
+        need cmake
+        need make
 
-    find "$LLAMA_SRC/build" -name "llama-server" ! -name "*.exe" | head -1 \
-        | xargs -I{} cp {} "$LLAMA_DIR/"
-    find "$LLAMA_SRC/build" \( \
-        -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
-        -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
-    chmod +x "$LLAMA_DIR/llama-server"
-    ok "llama-server built from source"
+        LLAMA_SRC="$STAGING_DIR/llama_src"
+        git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
+
+        cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
+        if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
+            cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+            # nvcc has a max supported GCC version — auto-detect a compatible one
+            SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
+            if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
+                CUDA_HOST_CXX=""
+                for _ver in 14 13 12 11 10; do
+                    if command -v "g++-$_ver" &>/dev/null; then
+                        CUDA_HOST_CXX=$(command -v "g++-$_ver")
+                        break
+                    fi
+                done
+                if [ -n "$CUDA_HOST_CXX" ]; then
+                    cmake_flags="$cmake_flags -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_CXX"
+                    info "GCC $SYS_GCC_VER too new for CUDA — using host compiler: $CUDA_HOST_CXX"
+                else
+                    warn "GCC $SYS_GCC_VER may be incompatible with CUDA. If build fails, install gcc14 and rerun."
+                fi
+            fi
+        elif [ "$ACCEL" = "rocm" ]; then
+            cmake_flags="$cmake_flags -DGGML_HIP=ON"
+        elif [ "$ACCEL" = "metal" ]; then
+            cmake_flags="$cmake_flags -DGGML_METAL=ON"
+        fi
+
+        cmake -S "$LLAMA_SRC" -B "$LLAMA_SRC/build" $cmake_flags \
+            -DLLAMA_BUILD_SERVER=ON -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF
+        cmake --build "$LLAMA_SRC/build" --target llama-server -j"$(nproc)"
+
+        find "$LLAMA_SRC/build" -name "llama-server" ! -name "*.exe" | head -1 \
+            | xargs -I{} cp {} "$LLAMA_DIR/"
+        find "$LLAMA_SRC/build" \( \
+            -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
+            -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
+        chmod +x "$LLAMA_DIR/llama-server"
+        ok "llama-server built from source"
+    fi
 fi
 
 # Verify llama-server exists
@@ -413,6 +417,8 @@ if [ -d "$SRC_DIR/.git" ]; then
     git -C "$SRC_DIR" checkout "$BRANCH"
     git -C "$SRC_DIR" pull --ff-only origin "$BRANCH" 2>/dev/null || true
 else
+    # Directory may exist but lack .git (partial/interrupted prior install) — remove and re-clone
+    [ -d "$SRC_DIR" ] && rm -rf "$SRC_DIR"
     info "Cloning Atri Code source..."
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$SRC_DIR"
 fi
@@ -425,6 +431,11 @@ if [ ! -f "$TEMPLATE_DIR/gemma4-tooluse.jinja" ] \
 fi
 
 # Create venv + install packages
+# If venv exists but is broken (e.g. after a Python version upgrade), recreate it
+if [ -d "$VENV_DIR" ] && ! "$VENV_DIR/bin/python" -c "import sys" 2>/dev/null; then
+    warn "Existing venv is broken — recreating..."
+    rm -rf "$VENV_DIR"
+fi
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install -q --upgrade pip
 "$VENV_DIR/bin/pip" install -q -r "$SRC_DIR/services/orchestrator/requirements.txt"
