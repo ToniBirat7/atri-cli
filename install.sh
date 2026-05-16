@@ -528,24 +528,99 @@ if [ -f "$SRC_DIR/services/orchestrator/.env" ]; then
 fi
 
 # ─── Uninstall script ────────────────────────────────────────────────────────
-cat > "$ATRI_INSTALL_ROOT/uninstall.sh" <<UNINSTALL
+# Wrapped in a function so bash reads the entire body into memory before
+# execution begins — safe even though rm -rf deletes the script's own directory.
+cat > "$ATRI_INSTALL_ROOT/uninstall.sh" <<'UNINSTALL_OUTER'
 #!/usr/bin/env bash
-# Atri Code uninstaller — removes everything under $ATRI_INSTALL_ROOT
-# Note: model files in $ATRI_MODEL_DIR are NOT removed (they are your data).
-set -e
-echo "Removing Atri Code..."
-rm -rf "$ATRI_INSTALL_ROOT"
-rm -f  "$ATRI_BIN_DIR/atri"
-# Remove PATH block from shell rc files
-for RC in "\$HOME/.bashrc" "\$HOME/.zshrc" "\$HOME/.profile"; do
-    if [ -f "\$RC" ]; then
-        sed -i '/# >>> atri-code installer added >>>/,/# <<< atri-code installer added <<</d' "\$RC" 2>/dev/null || true
+# Atri Code uninstaller
+# Usage: bash ~/.local/share/atri/uninstall.sh [--yes]
+#   --yes   Skip confirmation prompt
+# Model files are NOT removed.
+
+_ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
+_ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
+_SENTINEL_START="# >>> atri-code installer added >>>"
+_SENTINEL_END="# <<< atri-code installer added <<<"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+ok()   { echo -e "${GREEN}  ✓${RESET} $*"; }
+info() { echo -e "${CYAN}  ▸${RESET} $*"; }
+err()  { echo -e "${RED}  ✗${RESET} $*" >&2; }
+
+_do_uninstall() {
+    local YES=false
+    [ "${1:-}" = "--yes" ] && YES=true
+
+    echo ""
+    echo -e "${BOLD}Atri Code Uninstaller${RESET}"
+    echo ""
+    echo "  The following will be permanently removed:"
+    [ -d "$_ATRI_INSTALL_ROOT" ] && echo "    • $_ATRI_INSTALL_ROOT  (install root)"
+    [ -f "$_ATRI_BIN_DIR/atri" ]  && echo "    • $_ATRI_BIN_DIR/atri  (launcher)"
+    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        grep -qF "$_SENTINEL_START" "$RC" 2>/dev/null && echo "    • PATH block in $(basename "$RC")"
+    done
+    echo ""
+    echo "  Model files (GGUF) will NOT be removed."
+    echo ""
+
+    if [ "$YES" = "false" ]; then
+        printf "  Uninstall Atri Code? [y/N]: "
+        read -r CONFIRM </dev/tty 2>/dev/null || read -r CONFIRM
+        case "${CONFIRM:-n}" in
+            [Yy]*) ;;
+            *) info "Uninstall cancelled."; return 0 ;;
+        esac
     fi
-done
-echo "Atri Code removed."
-echo "Model files in $ATRI_MODEL_DIR were preserved."
-echo "Restart your shell to apply PATH changes."
-UNINSTALL
+
+    # Kill running services
+    info "Stopping running services..."
+    for PORT in 8000 8001; do
+        PIDS=$(lsof -t -i:"$PORT" 2>/dev/null || true)
+        for PID in $PIDS; do
+            kill -TERM "$PID" 2>/dev/null || true
+        done
+    done
+
+    # Strip PATH blocks from shell rc files (do before removing install root)
+    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [ -f "$RC" ] && grep -qF "$_SENTINEL_START" "$RC" 2>/dev/null; then
+            # Use Python for portable in-place multi-line block removal
+            python3 - "$RC" "$_SENTINEL_START" "$_SENTINEL_END" <<'PYEOF'
+import sys
+path, start, end = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path, errors="ignore").readlines()
+out, skip = [], False
+for ln in lines:
+    if start in ln: skip = True
+    if not skip: out.append(ln)
+    if end in ln: skip = False
+open(path, "w").writelines(out)
+PYEOF
+            ok "Removed PATH block from $(basename "$RC")"
+        fi
+    done
+
+    # Remove launcher
+    if [ -f "$_ATRI_BIN_DIR/atri" ]; then
+        rm -f "$_ATRI_BIN_DIR/atri"
+        ok "Removed $_ATRI_BIN_DIR/atri"
+    fi
+
+    # Remove install root LAST (this script lives inside it)
+    if [ -d "$_ATRI_INSTALL_ROOT" ]; then
+        rm -rf "$_ATRI_INSTALL_ROOT"
+        ok "Removed $_ATRI_INSTALL_ROOT"
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}  Atri Code has been fully uninstalled.${RESET}"
+    echo "  Restart your shell to apply PATH changes."
+    echo ""
+}
+
+_do_uninstall "$@"
+UNINSTALL_OUTER
 chmod +x "$ATRI_INSTALL_ROOT/uninstall.sh"
 ok "Uninstall script → $ATRI_INSTALL_ROOT/uninstall.sh"
 
@@ -569,7 +644,7 @@ echo -e "${BOLD}${GREEN}  │  Model dir:   ${_MDIR_COL}│${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Start:    atri                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Diagnose: atri doctor                  │${RESET}"
-echo -e "${BOLD}${GREEN}  │  Remove:   uninstall.sh (see ~/.local)  │${RESET}"
+echo -e "${BOLD}${GREEN}  │  Remove:   atri uninstall               │${RESET}"
 echo -e "${BOLD}${GREEN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 echo -e "${DIM}  Restart your shell or run: export PATH=\"$ATRI_BIN_DIR:\$PATH\"${RESET}"

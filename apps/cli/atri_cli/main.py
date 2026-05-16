@@ -1707,6 +1707,98 @@ def _upgrade():
         _RICH.render_error(f"Upgrade failed: {e}")
 
 
+def _uninstall(yes: bool = False) -> None:
+    """Remove all Atri Code artifacts (preserves model files)."""
+    import shutil
+
+    install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+    bin_dir = Path(os.environ.get("ATRI_BIN_DIR", Path.home() / ".local/bin"))
+    launcher = bin_dir / "atri"
+    rc_files = [Path.home() / rc for rc in (".bashrc", ".zshrc", ".profile")]
+    sentinel_start = "# >>> atri-code installer added >>>"
+    sentinel_end = "# <<< atri-code installer added <<<"
+
+    def _has_sentinel(path: Path) -> bool:
+        try:
+            return sentinel_start in path.read_text(errors="ignore")
+        except OSError:
+            return False
+
+    def _strip_sentinel(path: Path) -> bool:
+        try:
+            lines = path.read_text(errors="ignore").splitlines(keepends=True)
+        except OSError:
+            return False
+        new_lines: list[str] = []
+        in_block = False
+        changed = False
+        for line in lines:
+            if sentinel_start in line:
+                in_block = True
+                changed = True
+            if not in_block:
+                new_lines.append(line)
+            if sentinel_end in line:
+                in_block = False
+        if changed:
+            path.write_text("".join(new_lines))
+        return changed
+
+    # ── Show what will be removed ─────────────────────────────────────────
+    _RICH.console.print()
+    _RICH.console.print("[bold]Atri Code Uninstaller[/bold]")
+    _RICH.console.print()
+    _RICH.console.print("  The following will be [bold red]permanently removed[/bold red]:")
+    if install_root.exists():
+        _RICH.console.print(f"    • {install_root}  [dim](install root — venv, llama-server, source)[/dim]")
+    if launcher.exists():
+        _RICH.console.print(f"    • {launcher}  [dim](launcher binary)[/dim]")
+    for rc in rc_files:
+        if _has_sentinel(rc):
+            _RICH.console.print(f"    • PATH block in [cyan]{rc}[/cyan]")
+    _RICH.console.print()
+    _RICH.console.print("  [green]Model files (GGUF) will NOT be removed.[/green]")
+    _RICH.console.print()
+
+    # ── Confirmation ──────────────────────────────────────────────────────
+    if not yes:
+        try:
+            answer = input("  Uninstall Atri Code? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            _RICH.render_info("Uninstall cancelled.")
+            return
+
+    # ── Stop services before wiping files ────────────────────────────────
+    _RICH.render_info("Stopping running services...")
+    _stop_services()
+
+    # ── Remove install root ───────────────────────────────────────────────
+    if install_root.exists():
+        shutil.rmtree(install_root, ignore_errors=True)
+        _RICH.render_success(f"Removed {install_root}")
+    else:
+        _RICH.render_info(f"Install root not found: {install_root}  (already removed?)")
+
+    # ── Remove launcher ───────────────────────────────────────────────────
+    try:
+        launcher.unlink(missing_ok=True)
+        _RICH.render_success(f"Removed {launcher}")
+    except OSError as exc:
+        _RICH.render_error(f"Could not remove {launcher}: {exc}")
+
+    # ── Strip PATH blocks from shell rc files ─────────────────────────────
+    for rc in rc_files:
+        if _strip_sentinel(rc):
+            _RICH.render_success(f"Removed PATH block from {rc.name}")
+
+    _RICH.console.print()
+    _RICH.console.print("[bold green]  Atri Code has been fully uninstalled.[/bold green]")
+    _RICH.console.print("  [dim]Restart your shell to apply PATH changes.[/dim]")
+    _RICH.console.print()
+
+
 def _doctor(client: OrchestratorClient, output_format: str) -> None:
     checks: list[dict[str, Any]] = []
 
@@ -1850,6 +1942,8 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("stop", help="Stop all background services (llama-server, orchestrator)")
     subparsers.add_parser("upgrade", help="Upgrade Atri Code to the latest version")
     subparsers.add_parser("doctor", help="Run health diagnostics and auto-start services")
+    _uninstall_p = subparsers.add_parser("uninstall", help="Remove Atri Code completely (preserves model files)")
+    _uninstall_p.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     refresh.add_argument(
         "--cached",
         action="store_true",
@@ -1895,7 +1989,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     argv = sys.argv[1:]
-    known_commands = {"sessions", "permissions", "mcp", "worktrees", "doctor", "cleanup", "stop", "upgrade"}
+    known_commands = {"sessions", "permissions", "mcp", "worktrees", "doctor", "cleanup", "stop", "upgrade", "uninstall"}
     if argv and not argv[0].startswith("-") and argv[0] not in known_commands:
         # Convenience mode: `atri-cli "prompt"` maps to print mode.
         prompt = " ".join(argv)
@@ -1907,7 +2001,7 @@ def main() -> None:
     svc = ServiceManager()
 
     # Doctor command can run even without services
-    if args.command not in {"cleanup", "stop"}:
+    if args.command not in {"cleanup", "stop", "uninstall"}:
         if not svc.ensure_services(tui=_RICH):
             raise SystemExit(1)
 
@@ -2003,6 +2097,10 @@ def main() -> None:
 
         if args.command == "stop":
             _stop_services()
+            return
+
+        if args.command == "uninstall":
+            _uninstall(yes=getattr(args, "yes", False))
             return
 
         if args.command == "upgrade":
