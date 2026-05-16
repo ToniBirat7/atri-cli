@@ -504,14 +504,14 @@ class ServiceManager:
         if not llama_was_running:
             llama_ok = _wait_for_health(
                 self.llama_health_url,
-                timeout_sec=120,
+                timeout_sec=300,
                 label="llama-server",
             )
             if not llama_ok:
                 if tui:
                     tui.stop_thinking()
                     tui.render_error(
-                        "llama-server failed to start within 120s.\n"
+                        "llama-server failed to start within 300s.\n"
                         "Check llama.log for details."
                     )
                 return False

@@ -1,28 +1,4 @@
 """
-Deterministic Agent Loop.
-
-Implements the core agentic AI loop:
-1. User message -> LLM
-2. LLM response with tool calls -> Tool execution
-3. Tool results -> LLM context
-4. Repeat until max turns or no more tool calls
-
-Supports budget controls:
-- Max turns (agent loop iterations)
-- Max tool calls per turn
-- Tool execution timeouts
-
-Phase 1: Basic deterministic loop with budgets.
-Phase 2: Streaming responses.
-Phase 3: Error recovery and backtracking.
-Phase 5: Circuit-breaker, retry logic, observability.
-Phase 7: Full observability with structured logging and tracing.
-"""
-
-from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable
-from dataclasses import dataclass, field
-from enum import Enum
-"""
 Atri Code Agent Loop - The core reasoning engine.
 
 Implements a multi-turn ReAct loop that:
@@ -135,6 +111,7 @@ class AgentLoop:
         tool_timeout_seconds: int = 10,
         max_tool_call_retries: int = 2,
         permission_mode: str = "default",
+        temperature: float = 0.6,
         # Legacy alias kept so existing callers don't break during the transition
         enable_thinking: bool = False,
     ):
@@ -149,6 +126,7 @@ class AgentLoop:
         self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_call_retries = max_tool_call_retries
         self.permission_mode = permission_mode
+        self.temperature = temperature
         self.state = AgentState()
 
     async def _stream_final_answer(
@@ -160,9 +138,14 @@ class AgentLoop:
     ) -> str:
         """Stream the final answer turn token-by-token, emitting text_delta events."""
         chunks: list[str] = []
+
+        async def _thinking_cb(content: str) -> None:
+            await self._emit_event(event_callback, {"type": "thinking_block", "content": content})
+
         async for delta in llm_adapter.stream_chat_completion(
             messages=messages,
             enable_thinking=enable_thinking,
+            thinking_callback=_thinking_cb,
         ):
             chunks.append(delta)
             await self._emit_event(event_callback, {"type": "text_delta", "content": delta})
@@ -341,7 +324,7 @@ class AgentLoop:
                                 tools=available_tools,
                                 # Clamp tool-call temperature: 0.3 min for deterministic JSON,
                                 # but respect config (26B handles 0.3–0.6 well; E2B needed 0.1).
-                                temperature=max(0.3, min(self.config.llm.temperature, 0.6)) if available_tools else None,
+                                temperature=max(0.3, min(self.temperature, 0.6)) if available_tools else None,
                                 enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
                             )
                     except Exception as e:

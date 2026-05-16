@@ -173,6 +173,44 @@ class RichTUI:
         self.console.print(panel)
         self.console.print()
 
+    # ─── Turn header ──────────────────────────────────────────────────────
+
+    def render_turn_header(self, turn_number: int, mode: str) -> None:
+        """Render a clean turn separator using a Rich Rule."""
+        if not RICH_AVAILABLE:
+            print(f"\n─── Turn {turn_number} · {mode} ───")
+            return
+        self.console.print(
+            Rule(f" Turn {turn_number} · [bold bright_yellow]{mode}[/] ", style="dim cyan", align="left"),
+        )
+
+    # ─── Reasoning display ────────────────────────────────────────────────
+
+    def render_thinking(self, content: str, max_lines: int = 8) -> None:
+        """Render model reasoning in a dim collapsible-style panel."""
+        if not RICH_AVAILABLE:
+            return
+        if not content or not content.strip():
+            return
+        lines = content.strip().splitlines()
+        truncated = False
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            truncated = True
+        display = "\n".join(lines)
+        if truncated:
+            display += f"\n  [dim]… ({len(content.strip().splitlines()) - max_lines} more lines)[/dim]"
+
+        panel = Panel(
+            Text(display, style="dim italic"),
+            title="[dim]Reasoning[/dim]",
+            title_align="left",
+            border_style="dim",
+            box=SIMPLE,
+            padding=(0, 1),
+        )
+        self.console.print(panel)
+
     # ─── Thinking spinner ──────────────────────────────────────────────────
 
     def start_thinking(self, turn_number: int = 0) -> None:

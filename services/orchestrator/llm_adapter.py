@@ -276,6 +276,7 @@ class LLMAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         enable_thinking: bool = False,
+        thinking_callback=None,
     ):
         """
         Stream a non-tool-call completion from llama-server token by token.
@@ -313,11 +314,19 @@ class LLMAdapter:
                         delta = chunk["choices"][0].get("delta", {}).get("content") or ""
                         if delta:
                             buffer += delta
-                            # Strip thinking blocks on the fly when they close
-                            if "<channel|>" in buffer:
+                            # When a thinking block closes, emit it via callback then strip
+                            if "<channel|>" in buffer or "</think>" in buffer:
+                                if thinking_callback:
+                                    for block in _THINKING_BLOCK_RE.findall(buffer):
+                                        try:
+                                            cb = thinking_callback(block)
+                                            if asyncio.iscoroutine(cb):
+                                                await cb
+                                        except Exception:
+                                            pass
                                 buffer = self.strip_thinking_blocks(buffer)
                             # Yield only when we have content outside thinking blocks
-                            if "<|channel>" not in buffer:
+                            if "<|channel>" not in buffer and "<think>" not in buffer:
                                 yield buffer
                                 buffer = ""
                     except (json.JSONDecodeError, KeyError, IndexError):
