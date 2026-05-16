@@ -555,16 +555,21 @@ STAGING_DIR=""  # prevent trap from double-cleaning
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
+# Box inner width is 41 chars; label prefix "  Foo:         " is 15 chars → value field is 26 chars.
+_bpad() { printf "%-26s" "${1:0:26}"; }
+_ACCEL_COL=$(_bpad "$ACCEL")
+_MDIR_SHORT="${ATRI_MODEL_DIR/#$HOME/\~}"
+_MDIR_COL=$(_bpad "$_MDIR_SHORT")
 echo -e "${BOLD}${GREEN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${GREEN}  │  Installation Complete!                 │${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Model:       Gemma 4 26B A4B MoE       │${RESET}"
-echo -e "${BOLD}${GREEN}  │  Accelerator: ${ACCEL}$(printf '%*s' $((23 - ${#ACCEL})) '')│${RESET}"
-echo -e "${BOLD}${GREEN}  │  Model dir:   ${ATRI_MODEL_DIR:0:22}$(printf '%*s' $((23 - ${#ATRI_MODEL_DIR} > 0 ? (${#ATRI_MODEL_DIR} < 23 ? 23 - ${#ATRI_MODEL_DIR} : 0) : 23)) '')│${RESET}"
+echo -e "${BOLD}${GREEN}  │  Accelerator: ${_ACCEL_COL}│${RESET}"
+echo -e "${BOLD}${GREEN}  │  Model dir:   ${_MDIR_COL}│${RESET}"
 echo -e "${BOLD}${GREEN}  │                                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Start:    atri                         │${RESET}"
 echo -e "${BOLD}${GREEN}  │  Diagnose: atri doctor                  │${RESET}"
-echo -e "${BOLD}${GREEN}  │  Remove:   ~/.local/share/atri/uninstall.sh${RESET}"
+echo -e "${BOLD}${GREEN}  │  Remove:   uninstall.sh (see ~/.local)  │${RESET}"
 echo -e "${BOLD}${GREEN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 echo -e "${DIM}  Restart your shell or run: export PATH=\"$ATRI_BIN_DIR:\$PATH\"${RESET}"
