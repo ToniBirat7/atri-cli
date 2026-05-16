@@ -75,13 +75,21 @@ need tar
 python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" \
     || die "Python 3.10+ is required (found $(python3 --version 2>&1)).\n  Install: sudo apt install python3.12  OR  brew install python@3.12"
 
-# ─── Re-attach stdin to terminal when piped (curl | bash) ────────────────────
-# `curl ... | bash` sets bash's stdin to the pipe, making [ -t 0 ] false and
-# causing interactive prompts to be skipped. Reopening /dev/tty restores the
-# terminal as stdin so read/prompts work correctly.
+# ─── Interactive input setup ─────────────────────────────────────────────────
+# When run as `curl | bash`, bash's stdin (fd 0) is the pipe carrying the
+# script — not the terminal. exec 0</dev/tty would sever that pipe mid-script
+# and cause "curl: Failed writing body". Instead, open /dev/tty on fd 3 and
+# route all read calls through it. Falls back to fd 0 for direct execution.
+TTY_FD=0
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
-    exec 0</dev/tty
+    exec 3</dev/tty
+    TTY_FD=3
+elif [ -t 0 ]; then
+    exec 3<&0
+    TTY_FD=3
 fi
+_read()          { IFS= read -r "$1" <&"$TTY_FD"; }
+_is_interactive(){ [ "$TTY_FD" -eq 3 ]; }
 
 # ─── OS / Arch Detection ─────────────────────────────────────────────────────
 header "Detecting system"
@@ -146,7 +154,7 @@ if [ -n "${ATRI_MODEL_DIR:-}" ]; then
         MODEL_ALREADY_DOWNLOADED=true
         ok "Both model files already present — download will be skipped"
     fi
-elif [ -t 0 ]; then
+elif _is_interactive; then
     # Interactive: present a clear choice
     echo -e "${BOLD}  Do you already have the model files downloaded?${RESET}"
     echo -e "  ${GREEN}[1]${RESET} Yes — I'll provide the path to the existing files"
@@ -155,7 +163,7 @@ elif [ -t 0 ]; then
 
     while true; do
         printf "  Choice [1/2]: "
-        read -r MODEL_CHOICE
+        _read MODEL_CHOICE
         case "${MODEL_CHOICE:-}" in
             1)
                 echo ""
@@ -164,7 +172,7 @@ elif [ -t 0 ]; then
                 echo -e "  ${DIM}and ${ATRI_MMPROJ_FILENAME})${RESET}"
                 while true; do
                     printf "  Path: "
-                    read -r USER_INPUT
+                    _read USER_INPUT
                     USER_INPUT_EXP="${USER_INPUT/#\~/$HOME}"
                     USER_INPUT_EXP="$(realpath -m "$USER_INPUT_EXP" 2>/dev/null || echo "$USER_INPUT_EXP")"
                     if [ -z "$USER_INPUT_EXP" ]; then
@@ -181,7 +189,7 @@ elif [ -t 0 ]; then
                     if [ -n "$MISSING" ]; then
                         warn "The following files were not found in $USER_INPUT_EXP:$MISSING"
                         printf "  Try a different path? [Y/n]: "
-                        read -r RETRY
+                        _read RETRY
                         case "${RETRY:-y}" in
                             [Nn]*) die "Model files not found. Aborting installation." ;;
                             *)     continue ;;
@@ -201,7 +209,7 @@ elif [ -t 0 ]; then
                 echo -e "  ${DIM}Models will be saved to: <your_path>/models/${RESET}"
                 echo -e "  ${DIM}(Press Enter to use default: ${DEFAULT_BASE_DIR}/models)${RESET}"
                 printf "  Base path: "
-                read -r USER_INPUT
+                _read USER_INPUT
                 USER_BASE_DIR="${USER_INPUT:-$DEFAULT_BASE_DIR}"
                 USER_BASE_DIR="${USER_BASE_DIR/#\~/$HOME}"
                 USER_BASE_DIR="$(realpath -m "$USER_BASE_DIR" 2>/dev/null || echo "$USER_BASE_DIR")"
