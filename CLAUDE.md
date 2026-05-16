@@ -68,7 +68,7 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `/apps/frontend/` — Next.js 15 web UI with SSE streaming chat
 - `/runtime/llm/llama.cpp/` — Customized llama.cpp build (git submodule)
 - `/runtime/state/` — SQLite DB (`orchestrator.db`), logs, compiled bytecode
-- `/models/` — GGUF model files (`gemma-4-e2b-it-Q4_K_M.gguf`, `gemma-4-E4B-it-Q4_K_M.gguf`)
+- `/models/` — GGUF model files (`gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`)
 - `/scripts/` — `local_up.py` (GPU autodetect bootstrap), `doctor.py`, `detect_hardware.py`
 
 ## Data Flow
@@ -80,7 +80,7 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 - `services/orchestrator/api.py`: FastAPI app, all routes, startup lifecycle, SSE streaming
 - `services/orchestrator/agent_loop.py`: Multi-turn ReAct loop, tool budget controls
 - `services/orchestrator/config.py`: All env vars via `OrchestratorConfig.from_env()`
-- `services/orchestrator/prompt_policy.py`: Profiles (`general-purpose`, `agent-v3`, etc.)
+- `services/orchestrator/prompt_policy.py`: Profiles (`general-purpose`, `agent-v3`, `agent-v3-26b`, etc.)
 - `services/orchestrator/mcp_orchestrator.py`: MCP server lifecycle, tool dispatch
 - `services/mcp/main.py`: All filesystem/search/shell tools (FastMCP)
 - `services/mcp/diff_engine.py`: Unified diff applier for code edits
@@ -130,9 +130,8 @@ Entry points: `atri` CLI binary · `uvicorn api:app` (orchestrator) · `next dev
 
 ## Current Status
 
-**Completed:** CLI TUI (interactive + print mode), orchestrator API with SSE, MCP filesystem/search/diff tools, JWT + API key auth, SQLite persistence, Docker Compose full stack, frontend Next.js chat UI, `agent-v3-26b` prompt profile (26B MoE-optimized), MoE launch flags, hardware-aware config
-**In Progress:** End-to-end testing with Gemma 4 26B A4B model, streaming token output
-**Not Started:** PostgreSQL migration tooling, test suite (`services/orchestrator/tests/` empty), Redis rate limiting integration, i18n
+**Completed:** CLI TUI (interactive + print mode), orchestrator API with SSE, MCP filesystem/search/diff tools, JWT + API key auth, SQLite persistence, Docker Compose full stack, frontend Next.js chat UI, `agent-v3-26b` prompt profile (26B MoE-optimized), MoE launch flags, hardware-aware config, harness improvements (syntax highlighting, diff renderer, new tools), risk-tier permission prompt UI, install.sh model prompt redesign (pre-existing model support, path at `user_path/models/` for downloads)
+**Not Started:** E2E testing with Gemma 4 26B A4B model, PostgreSQL migration tooling, test suite (`services/orchestrator/tests/` empty), Redis rate limiting integration, i18n
 
 ## Compaction Rules
 
