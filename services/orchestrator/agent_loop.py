@@ -15,6 +15,9 @@ import ast
 import logging
 import re
 import os
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
 try:
     from ..mcp.diff_engine import DiffEngine
 except (ImportError, ValueError):
