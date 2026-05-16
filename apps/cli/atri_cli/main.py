@@ -421,7 +421,10 @@ def _status_clear() -> None:
 
 
 def _print_turn_card(turn_number: int, mode: str) -> None:
-    _TUI.print_turn_card(turn_number, mode)
+    if RichTUI.is_available():
+        _RICH.render_turn_header(turn_number, mode)
+    else:
+        _TUI.print_turn_card(turn_number, mode)
 
 
 def _render_timeline_event(event: dict[str, Any], output_format: str, quiet: bool = False) -> None:
@@ -436,14 +439,20 @@ def _render_timeline_event(event: dict[str, Any], output_format: str, quiet: boo
             res = event.get("tool_result")
             status = event.get("status", "ok")
             is_success = status != "error"
-            
+
             if not is_success and not res:
                 res = event.get("error", "Unknown error")
 
             if res is not None and not isinstance(res, str):
                 res = json.dumps(res, indent=2)
-            
+
             _RICH.render_tool_result(event.get("tool_name", "tool"), res or "", success=is_success)
+            return
+        if etype == "thinking_block":
+            _RICH.render_thinking(event.get("content", ""))
+            return
+        # These events are surfaced via the live spinner — no separate line needed
+        if etype in ("turn_start", "llm_response", "turn_complete", "agent_complete"):
             return
     _TUI.render_timeline_event(event, output_format)
 
@@ -491,20 +500,21 @@ def _print_turn_status_summary(
     phase: str,
     output_tokens_exact: Optional[int] = None,
 ) -> None:
-    _TUI.print_status_summary(
-        TurnStatus(
-            turn_number=turn_number,
-            elapsed_seconds=max(0.0, time.time() - turn_start),
-            input_tokens=input_tokens,
-            output_tokens=(
-                output_tokens_exact
-                if output_tokens_exact is not None
-                else max(0, math.ceil(output_chars / 4))
-            ),
-            tool_calls=tool_calls,
-            phase=phase,
+    elapsed = max(0.0, time.time() - turn_start)
+    tok_out = output_tokens_exact if output_tokens_exact is not None else max(0, math.ceil(output_chars / 4))
+    if RichTUI.is_available():
+        _RICH.render_turn_summary(turn_number, elapsed, input_tokens, tok_out, tool_calls, output_tokens_exact)
+    else:
+        _TUI.print_status_summary(
+            TurnStatus(
+                turn_number=turn_number,
+                elapsed_seconds=elapsed,
+                input_tokens=input_tokens,
+                output_tokens=tok_out,
+                tool_calls=tool_calls,
+                phase=phase,
+            )
         )
-    )
 
 
 def _build_payload(
@@ -924,9 +934,6 @@ def _print_stream_response(
             "complete",
             output_tokens_exact=exact_output_tokens if has_exact_usage else None,
         )
-        if active_conversation_id:
-            _print_info(f"conversation_id: {active_conversation_id}")
-    
     return response_text
 
 
@@ -1320,10 +1327,6 @@ def _run_interactive(
                 "complete",
                 output_tokens_exact=exact_output_tokens if has_exact_usage else None,
             )
-            if active_conversation_id:
-                _print_info(f"conversation_id: {active_conversation_id}")
-
-
         if telemetry:
             if has_exact_usage:
                 telemetry.total_input_tokens += exact_input_tokens
@@ -1392,8 +1395,6 @@ def _run_interactive(
                     "complete",
                     output_tokens_exact=exact_output_tokens if has_exact_usage else None,
                 )
-                if active_conversation_id:
-                    _print_info(f"conversation_id: {active_conversation_id}")
 
 
 def _sessions_list(client: OrchestratorClient) -> None:
