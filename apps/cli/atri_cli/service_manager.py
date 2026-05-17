@@ -115,7 +115,7 @@ class ServiceManager:
         and regenerates them automatically before falling back to hardcoded defaults.
         """
         config_path = self.repo_root / "runtime" / "llm" / "launch_config.json"
-        _MOE_KEYS = {"n_cpu_moe", "enable_unified_memory", "mlock", "no_mmap", "parallel_slots"}
+        _MOE_KEYS = {"n_cpu_moe", "enable_unified_memory", "mlock", "no_mmap", "parallel_slots", "cmake_flags_version"}
 
         if config_path.exists():
             try:

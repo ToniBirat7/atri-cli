@@ -48,7 +48,7 @@ def main():
     else:
         print_status("Orchestrator", "FAIL", f"Port {orch_port} - {err}")
 
-    # 3. Check Filesystem
+    # 3. Check Filesystem + CUDA binary health
     logs = ["llama.log", "orchestrator.log"]
     for log in logs:
         path = repo_root / log
@@ -57,6 +57,16 @@ def main():
             print_status(f"Log: {log}", "OK", f"{size:.1f} KB")
         else:
             print_status(f"Log: {log}", "MISSING")
+
+    llama_log = repo_root / "llama.log"
+    if llama_log.exists():
+        log_head = llama_log.read_text(errors="ignore")[:4000]
+        if "CUDA0" in log_head or "ggml_cuda" in log_head.lower():
+            print_status("CUDA in llama log", "OK", "GPU detected by llama-server")
+        elif "CUDA" in log_head:
+            print_status("CUDA in llama log", "OK", "CUDA present")
+        else:
+            print_status("CUDA in llama log", "WARN", "No CUDA found — binary may be CPU-only. Run: make llama-build-gpu")
 
     # 4. Check Environment
     venv = repo_root / "services/orchestrator/.venv"
