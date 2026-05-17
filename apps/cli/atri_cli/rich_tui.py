@@ -84,6 +84,8 @@ class RichTUI:
         self._console = Console(theme=ATRI_THEME) if (RICH_AVAILABLE and ATRI_THEME) else (Console() if RICH_AVAILABLE else None)
         self._live: Optional[Live] = None
         self._stream_buffer = ""
+        self._stream_start: Optional[float] = None
+        self._stream_chars = 0
 
     @property
     def console(self) -> Console:
@@ -407,6 +409,18 @@ class RichTUI:
         self.console.print(md, width=min(120, self.console.width - 4))
         self.console.print()
 
+    def _stream_footer(self) -> Text:
+        """Build the live tok/s footer shown during streaming."""
+        elapsed = time.time() - self._stream_start if self._stream_start else 0.0
+        tps = (self._stream_chars / 4) / elapsed if elapsed > 1.0 and self._stream_chars > 0 else None
+        footer = Text()
+        footer.append("  ", style="")
+        if tps is not None:
+            footer.append(f"{tps:.1f} tok/s", style="bold #06B6D4")
+            footer.append("  ·  ", style="dim #334155")
+        footer.append(f"{elapsed:.0f}s", style="dim #64748B")
+        return footer
+
     def print_streaming_token(self, token: str, is_first: bool = False) -> None:
         """Stream response in real-time with markdown rendering."""
         if not RICH_AVAILABLE:
@@ -416,19 +430,24 @@ class RichTUI:
             return
 
         self._stream_buffer += token
-        
+        self._stream_chars += len(token)
+
         if is_first:
+            self._stream_start = time.time()
+            self._stream_chars = len(token)
             self.console.print()
             self.console.print(Text("  atri ", style="bold white on #7C3AED"))
+            from rich.console import Group
             self._live = Live(
-                Markdown(self._stream_buffer),
+                Group(Markdown(self._stream_buffer), self._stream_footer()),
                 console=self.console,
                 refresh_per_second=12,
                 transient=False,
             )
             self._live.start()
         elif self._live:
-            self._live.update(Markdown(self._stream_buffer))
+            from rich.console import Group
+            self._live.update(Group(Markdown(self._stream_buffer), self._stream_footer()))
 
     def finish_streaming(self) -> None:
         """Finalize streaming output."""
@@ -437,12 +456,13 @@ class RichTUI:
             return
 
         if self._live:
-            # Final update to ensure everything is rendered
             self._live.update(Markdown(self._stream_buffer))
             self._live.stop()
             self._live = None
             self._stream_buffer = ""
-            self.console.print() # Final spacing
+            self._stream_start = None
+            self._stream_chars = 0
+            self.console.print()
 
     # ─── Status / summary ─────────────────────────────────────────────────
 
