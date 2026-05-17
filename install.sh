@@ -352,6 +352,7 @@ else
         cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
         if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
             cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+            cmake_flags="$cmake_flags -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
             # nvcc has a max supported GCC version — auto-detect a compatible one
             SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
             if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then

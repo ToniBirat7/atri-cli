@@ -290,10 +290,14 @@ def compute_launch_config(
     kv_cache_type_k = "q4_0" if gpu_detected else "f16"
     kv_cache_type_v = "q8_0" if gpu_detected else "f16"
 
-    # Thread count: MoE expert computation benefits from more CPU threads.
-    # Diminishing returns above 8 threads; cap there.
+    # Thread count: MoE expert computation runs on CPU. On GPU builds, using half
+    # the logical cores (max 6) avoids scheduler contention and gives better MoE
+    # throughput than saturating all threads. CPU-only builds use more threads.
     cpu_count = cpu.get("cpu_count", 4)
-    threads = min(max(2, cpu_count - 2), 8)
+    if gpu_detected:
+        threads = min(max(2, cpu_count // 2), 6)
+    else:
+        threads = min(max(2, cpu_count - 2), 12)
 
     config = {
         "gpu_detected": gpu_detected,
@@ -311,8 +315,15 @@ def compute_launch_config(
         "flash_attn": flash_attn,
         "kv_cache_type_k": kv_cache_type_k,
         "kv_cache_type_v": kv_cache_type_v,
-        # MoE-specific: pin all 128 expert layers to CPU RAM
-        "n_cpu_moe": 128,
+        # MoE-specific: dynamic n_cpu_moe based on available VRAM.
+        # Non-expert layers (attention, embeddings) for Gemma 4 26B Q4_K_M ≈ 4000 MiB.
+        # Each expert ≈ 93 MiB at Q4_K_M. Reserve 512 MiB headroom.
+        # Keeping some experts GPU-resident improves throughput over all-CPU routing.
+        "n_cpu_moe": (lambda: (
+            max(108, 128 - min(20, max(0, vram_mb - 4000 - 512) // 93))
+            if gpu_detected and vendor == "nvidia" and vram_mb >= 5500
+            else 128
+        ))(),
         # MoE best practice: no memory mapping; load entire model into RAM
         "no_mmap": True,
         # Pin model to RAM; prevents paging under memory pressure
@@ -322,6 +333,8 @@ def compute_launch_config(
         # Whether to set GGML_CUDA_ENABLE_UNIFIED_MEMORY (NVIDIA only)
         "enable_unified_memory": vendor == "nvidia",
         "enable_thinking": True,
+        # Bumped when cmake build flags change — triggers launch_config.json regeneration
+        "cmake_flags_version": 2,
     }
 
     return config
@@ -345,6 +358,9 @@ def compute_cmake_args(gpu: dict, cpu: dict) -> list[str]:
         if cuda_arch:
             args.append(f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}")
         args.append("-DGGML_NATIVE=ON")
+        # Required for flash attention with quantized KV caches (q4_0, q8_0)
+        args.append("-DGGML_FLASH_ATTN=ON")
+        args.append("-DGGML_CUDA_FA_ALL_QUANTS=ON")
 
     elif vendor == "amd":
         args.append("-DGGML_HIP=ON")

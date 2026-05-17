@@ -256,7 +256,7 @@ clean: dev-down ## Clean build artifacts and temporary files
 llama-build-gpu: ## Rebuild llama.cpp with CUDA support for NVIDIA GPUs
 	@echo "$(BLUE)Configuring llama.cpp with CUDA backend...$(NC)"
 	@cd runtime/llm/llama.cpp && \
-		cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$(LLAMA_CUDA_ARCH) -DLLAMA_BUILD_TESTS=OFF && \
+		cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$(LLAMA_CUDA_ARCH) -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DLLAMA_BUILD_TESTS=OFF && \
 		cmake --build build --config Release -j $$(nproc) --target llama-server llama-cli
 
 # ===== Internal Targets =====
