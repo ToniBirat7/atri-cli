@@ -44,21 +44,22 @@ TIMELINE_VERBOSITY_LEVELS = ("minimal", "normal", "debug")
 
 if RICH_AVAILABLE:
     ATRI_THEME = Theme({
-        "atri.header": "bold bright_cyan",
-        "atri.prompt": "bold bright_cyan",
-        "atri.assistant": "bright_white",
-        "atri.success": "bold green",
-        "atri.warning": "bold yellow",
-        "atri.error": "bold red",
-        "atri.dim": "dim white",
-        "atri.tool": "bold magenta",
-        "atri.tool_result": "green",
-        "atri.thinking": "dim italic cyan",
-        "atri.tokens": "dim bright_blue",
-        "atri.mode": "bold bright_yellow",
-        "atri.separator": "dim cyan",
-        "atri.key": "bold bright_white",
-        "atri.value": "bright_white",
+        "atri.header":      "bold #7C3AED",
+        "atri.prompt":      "bold #06B6D4",
+        "atri.assistant":   "bright_white",
+        "atri.success":     "#10B981",
+        "atri.warning":     "#F59E0B",
+        "atri.error":       "bold #EF4444",
+        "atri.dim":         "dim #94A3B8",
+        "atri.tool":        "bold #A78BFA",
+        "atri.tool_result": "#34D399",
+        "atri.thinking":    "italic #818CF8",
+        "atri.tokens":      "#64748B",
+        "atri.mode":        "bold #F59E0B",
+        "atri.separator":   "#334155",
+        "atri.speed":       "bold #06B6D4",
+        "atri.key":         "bold bright_white",
+        "atri.value":       "bright_white",
     })
 else:
     ATRI_THEME = None
@@ -134,43 +135,38 @@ class RichTUI:
         except Exception:
             pass
 
-        # Build welcome content
-        header = Text()
-        header.append("Atri Code", style="bold bright_white")
-        header.append("  ", style="")
-        header.append("v1.0", style="dim white")
-
-        table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
-        table.add_column(style="dim cyan", width=14)
-        table.add_column(style="bright_white")
-        table.add_row("Model", model)
-        table.add_row("Hardware", gpu_name)
-        table.add_row("Context", ctx_size)
-        table.add_row("Reasoning", "enabled" if reasoning else "disabled")
-        table.add_row("Mode", f"[bold bright_yellow]{permission_mode}[/]")
-        table.add_row("API", f"[dim]{api_url}[/]")
-
-        hints = Text()
-        hints.append("  Type ", style="dim")
-        hints.append("/help", style="bold bright_cyan")
-        hints.append(" for commands  •  ", style="dim")
-        hints.append("/mode", style="bold bright_cyan")
-        hints.append(" to change permissions  •  ", style="dim")
-        hints.append("Ctrl+C", style="bold bright_cyan")
-        hints.append(" to exit", style="dim")
-
         from rich.console import Group
-        content = Group(header, Text("  Local AI agentic coding infrastructure\n", style="dim"), table, Text(""), hints)
 
-        panel = Panel(
-            content,
-            border_style="bright_cyan",
-            box=ROUNDED,
-            padding=(1, 2),
-            expand=False,
-        )
+        # Header row
+        header = Text()
+        header.append("  Atri Code", style="bold #7C3AED")
+        header.append("  ·  ", style="dim #64748B")
+        header.append(model, style="bright_white")
+        header.append("  ·  ", style="dim #64748B")
+        header.append(gpu_name, style="#94A3B8")
+        header.append("  ·  ", style="dim #64748B")
+        header.append(ctx_size + " ctx", style="#94A3B8")
+        if reasoning:
+            header.append("  ·  ", style="dim #64748B")
+            header.append("reasoning", style="#818CF8")
+
+        # Mode + hints row
+        hints = Text()
+        hints.append("  mode:", style="dim #64748B")
+        hints.append(f" {permission_mode}", style="bold #F59E0B")
+        hints.append("  ·  ", style="dim #64748B")
+        hints.append("/help", style="#06B6D4")
+        hints.append("  /mode", style="#06B6D4")
+        hints.append("  Ctrl+C", style="#06B6D4")
+
+        rule_top = Rule(style="#334155")
+        rule_bot = Rule(style="#334155")
+
         self.console.print()
-        self.console.print(panel)
+        self.console.print(rule_top)
+        self.console.print(header)
+        self.console.print(hints)
+        self.console.print(rule_bot)
         self.console.print()
 
     # ─── Turn header ──────────────────────────────────────────────────────
@@ -181,32 +177,32 @@ class RichTUI:
             print(f"\n─── Turn {turn_number} · {mode} ───")
             return
         self.console.print(
-            Rule(f" Turn {turn_number} · [bold bright_yellow]{mode}[/] ", style="dim cyan", align="left"),
+            Rule(f" Turn {turn_number} · [bold #F59E0B]{mode}[/] ", style="#334155", align="left"),
         )
 
     # ─── Reasoning display ────────────────────────────────────────────────
 
-    def render_thinking(self, content: str, max_lines: int = 8) -> None:
-        """Render model reasoning in a dim collapsible-style panel."""
+    def render_thinking(self, content: str, max_lines: int = 60) -> None:
+        """Render model reasoning in a styled panel."""
         if not RICH_AVAILABLE:
             return
         if not content or not content.strip():
             return
         lines = content.strip().splitlines()
-        truncated = False
-        if len(lines) > max_lines:
+        total_lines = len(lines)
+        truncated = total_lines > max_lines
+        if truncated:
             lines = lines[:max_lines]
-            truncated = True
         display = "\n".join(lines)
         if truncated:
-            display += f"\n  [dim]… ({len(content.strip().splitlines()) - max_lines} more lines)[/dim]"
+            display += f"\n  … ({total_lines - max_lines} more lines)"
 
         panel = Panel(
-            Text(display, style="dim italic"),
-            title="[dim]Reasoning[/dim]",
+            Text(display, style="italic #818CF8"),
+            title="[bold #818CF8]Reasoning[/bold #818CF8]",
             title_align="left",
-            border_style="dim",
-            box=SIMPLE,
+            border_style="#4C1D95",
+            box=ROUNDED,
             padding=(0, 1),
         )
         self.console.print(panel)
@@ -221,8 +217,8 @@ class RichTUI:
 
         label = Text()
         label.append("  ", style="")
-        label.append(f"Turn {turn_number} — ", style="dim") if turn_number else None
-        label.append("Thinking", style="italic bright_cyan")
+        label.append(f"Turn {turn_number} — ", style="dim #64748B") if turn_number else None
+        label.append("Thinking", style="italic #7C3AED")
         label.append("...", style="dim")
 
         self._live = Live(
@@ -242,14 +238,14 @@ class RichTUI:
         label.append("  ", style="")
 
         if phase == "tool":
-            label.append("Tool: ", style="bright_magenta")
-            label.append(f"Running {tool_name}", style="bold magenta")
+            label.append("⚙ ", style="#A78BFA")
+            label.append(f"{tool_name}", style="bold #A78BFA")
         elif phase == "thinking":
-            label.append("Thinking", style="italic bright_cyan")
+            label.append("thinking", style="italic #7C3AED")
         elif phase == "finalizing":
-            label.append("Composing response", style="italic bright_green")
+            label.append("composing", style="italic #10B981")
         else:
-            label.append(phase, style="italic")
+            label.append(phase, style="italic #94A3B8")
 
         if elapsed > 0:
             label.append(f"  ({elapsed:.1f}s)", style="dim")
@@ -289,9 +285,9 @@ class RichTUI:
 
         panel = Panel(
             content,
-            title=f"Tool: {tool_name}",
+            title=f"[bold #A78BFA]⚙ {tool_name}[/]",
             title_align="left",
-            border_style="bright_magenta",
+            border_style="#6D28D9",
             box=ROUNDED,
             padding=(0, 1),
         )
@@ -386,7 +382,7 @@ class RichTUI:
         
         self.console.print()
         self.console.print(
-            Text("  you ", style="bold bright_white on dim cyan"),
+            Text("  you ", style="bold white on #0F172A"),
             Text(f" {text}", style="bright_white"),
         )
 
@@ -401,7 +397,7 @@ class RichTUI:
 
         self.console.print()
         self.console.print(
-            Text("  atri ", style="bold black on bright_cyan"),
+            Text("  atri ", style="bold white on #7C3AED"),
             end="",
         )
         self.console.print()
@@ -423,12 +419,12 @@ class RichTUI:
         
         if is_first:
             self.console.print()
-            self.console.print(Text("  atri ", style="bold black on bright_cyan"))
+            self.console.print(Text("  atri ", style="bold white on #7C3AED"))
             self._live = Live(
                 Markdown(self._stream_buffer),
                 console=self.console,
-                refresh_per_second=4,
-                transient=False, # We want to keep the final output
+                refresh_per_second=12,
+                transient=False,
             )
             self._live.start()
         elif self._live:
@@ -466,18 +462,23 @@ class RichTUI:
             return
 
         tok_out = output_tokens_exact if output_tokens_exact is not None else output_tokens
+        tps = tok_out / elapsed if elapsed > 0.5 and tok_out > 0 else None
+
         status = Text()
         status.append("  ", style="")
         status.append(f"Turn {turn}", style="bold bright_white")
-        status.append("  •  ", style="dim")
-        status.append(f"{elapsed:.1f}s", style="bright_cyan")
-        status.append("  •  ", style="dim")
-        status.append(f"in:{input_tokens}", style="dim bright_blue")
-        status.append(" ", style="")
-        status.append(f"out:{tok_out}", style="dim bright_green")
+        status.append("  •  ", style="dim #64748B")
+        status.append(f"{elapsed:.1f}s", style="#06B6D4")
+        status.append("  •  ", style="dim #64748B")
+        status.append(f"in:{input_tokens}", style="#64748B")
+        status.append("  ", style="")
+        status.append(f"out:{tok_out}", style="#64748B")
+        if tps is not None:
+            status.append("  •  ", style="dim #64748B")
+            status.append(f"{tps:.1f} tok/s", style="bold #06B6D4")
         if tool_calls > 0:
-            status.append("  •  ", style="dim")
-            status.append(f"{tool_calls} tools", style="dim bright_magenta")
+            status.append("  •  ", style="dim #64748B")
+            status.append(f"{tool_calls} tools", style="#A78BFA")
 
         self.console.print(status)
 
@@ -502,21 +503,21 @@ class RichTUI:
     def render_warning(self, message: str) -> None:
         """Render a warning message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [bold yellow]warning[/] {message}")
+            self.console.print(f"  [bold #F59E0B]warning[/] {message}")
         else:
             print(f"  warning {message}")
 
     def render_success(self, message: str) -> None:
         """Render a success message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [bold green]ok[/] {message}")
+            self.console.print(f"  [bold #10B981]ok[/] {message}")
         else:
             print(f"  ok {message}")
 
     def render_info(self, message: str) -> None:
         """Render an info message."""
         if RICH_AVAILABLE:
-            self.console.print(f"  [dim bright_cyan]info[/] {message}")
+            self.console.print(f"  [#06B6D4]info[/] {message}")
         else:
             print(f"  info {message}")
 
@@ -706,15 +707,15 @@ class RichTUI:
 
         table = Table(
             show_header=True,
-            header_style="bold bright_cyan",
+            header_style="bold #7C3AED",
             box=ROUNDED,
-            border_style="dim cyan",
+            border_style="#334155",
             padding=(0, 2),
             title="Atri Code Commands",
-            title_style="bold bright_cyan",
+            title_style="bold #7C3AED",
         )
-        table.add_column("Command", style="bold bright_white", width=16)
-        table.add_column("Description", style="white")
+        table.add_column("Command", style="bold #06B6D4", width=16)
+        table.add_column("Description", style="bright_white")
         table.add_row("/help", "Show this help")
         table.add_row("/mode [name]", "Show or change permission mode")
         table.add_row("/compact", "Toggle compact output mode")
@@ -739,16 +740,16 @@ class RichTUI:
             return
 
         self.console.print()
-        self.console.print(Text("  Atri Code Doctor", style="bold bright_cyan"))
+        self.console.print(Text("  Atri Code Doctor", style="bold #7C3AED"))
         self.console.print()
 
         for item in checks:
             if item["ok"]:
-                self.console.print(f"  [bold green][OK][/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold #10B981][OK][/] {item['name']} [dim #64748B]{item.get('path', '')}[/]")
             else:
-                self.console.print(f"  [bold red][ERROR][/] {item['name']} [dim]{item.get('path', '')}[/]")
+                self.console.print(f"  [bold #EF4444][ERROR][/] {item['name']} [dim #64748B]{item.get('path', '')}[/]")
                 if item.get("error"):
-                    self.console.print(f"    [dim red]{item['error']}[/]")
+                    self.console.print(f"    [dim #EF4444]{item['error']}[/]")
 
         self.console.print()
 
@@ -757,7 +758,7 @@ class RichTUI:
     def separator(self, title: str = "") -> None:
         """Print a horizontal rule."""
         if RICH_AVAILABLE:
-            self.console.print(Rule(title, style="dim cyan"))
+            self.console.print(Rule(title, style="#334155"))
         else:
             width = os.get_terminal_size((80, 24)).columns
             if title:
@@ -782,16 +783,16 @@ class RichTUI:
             return
 
         table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column(style="bold bright_cyan", width=20)
+        table.add_column(style="bold #06B6D4", width=20)
         table.add_column(style="bright_white")
         for key, value in info.items():
             table.add_row(key, str(value))
 
         panel = Panel(
             table,
-            title="Model Info",
+            title="[bold #7C3AED]Model Info[/]",
             title_align="left",
-            border_style="bright_cyan",
+            border_style="#4C1D95",
             box=ROUNDED,
             padding=(1, 1),
         )

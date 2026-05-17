@@ -109,19 +109,29 @@ class ServiceManager:
         return _check_health(self.orch_health_url)
 
     def _get_launch_config(self) -> dict:
-        """Load launch_config.json or return defaults."""
+        """Load launch_config.json or return defaults.
+
+        Detects stale configs (missing MoE keys from older detect_hardware.py versions)
+        and regenerates them automatically before falling back to hardcoded defaults.
+        """
         config_path = self.repo_root / "runtime" / "llm" / "launch_config.json"
+        _MOE_KEYS = {"n_cpu_moe", "enable_unified_memory", "mlock", "no_mmap", "parallel_slots"}
+
         if config_path.exists():
             try:
-                return json.loads(config_path.read_text(encoding="utf-8"))
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                if _MOE_KEYS.issubset(data.keys()):
+                    return data
+                # Stale config missing MoE keys — delete and regenerate
+                config_path.unlink(missing_ok=True)
             except Exception:
                 pass
 
-        # Generate config if detect_hardware.py exists
+        # Generate config via detect_hardware.py
         detect_script = self.repo_root / "scripts" / "detect_hardware.py"
         if detect_script.exists():
             try:
-                result = subprocess.run(
+                subprocess.run(
                     [sys.executable, str(detect_script), "--save"],
                     capture_output=True, text=True, timeout=30, check=True,
                     cwd=str(self.repo_root),
@@ -131,12 +141,11 @@ class ServiceManager:
             except Exception:
                 pass
 
-        # Conservative defaults for Gemma 4 26B A4B MoE when detect_hardware.py
-        # hasn't run yet. detect_hardware.py writes device-specific values.
+        # Conservative defaults for Gemma 4 26B A4B MoE.
         cpu_count = os.cpu_count() or 4
         return {
             "recommended_n_gpu_layers": 999,
-            "recommended_ctx_size": 16384,
+            "recommended_ctx_size": 32768,
             "recommended_batch_size": 2048,
             "recommended_ubatch_size": 512,
             "recommended_threads": min(max(2, cpu_count - 2), 8),
@@ -417,7 +426,13 @@ class ServiceManager:
         env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld}" if existing_ld else lib_dir
         # Enable NVIDIA Zero-Copy Unified Memory so the MoE model can use more
         # VRAM than physically available via page migration (Ampere+ GPUs).
-        if config.get("enable_unified_memory", False):
+        # Fall back to checking gpu_vendor when enable_unified_memory key is absent
+        # (e.g. stale configs that slipped through the staleness guard).
+        use_unified = config.get(
+            "enable_unified_memory",
+            config.get("gpu_vendor", "").lower() == "nvidia",
+        )
+        if use_unified:
             env["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
 
         proc = subprocess.Popen(
