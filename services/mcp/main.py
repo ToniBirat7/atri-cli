@@ -1251,138 +1251,210 @@ _SYMBOL_SKIP_DIRS = frozenset({
     ".next", "build", "dist", ".pytest_cache", "models", ".mypy_cache",
 })
 
-_SYMBOL_PATTERNS = [
-    # Python
-    (r"^\s*(async\s+)?def\s+({query})\s*\(", "function"),
-    (r"^\s*class\s+({query})\s*[\(:]", "class"),
-    # JavaScript / TypeScript
-    (r"^\s*(export\s+)?(async\s+)?function\s+({query})\s*\(", "function"),
-    (r"^\s*(export\s+)?(const|let|var)\s+({query})\s*=", "variable"),
-    (r"^\s*(export\s+)?(class|interface|type)\s+({query})\b", "class"),
-    # Rust
-    (r"^\s*(pub\s+)?(async\s+)?fn\s+({query})\s*[\(<]", "function"),
-    (r"^\s*(pub\s+)?(struct|enum|impl|trait)\s+({query})\b", "class"),
-    # Go
-    (r"^\s*func\s+\(?.*?\)?\s*({query})\s*\(", "function"),
-    (r"^\s*type\s+({query})\s+(struct|interface)", "class"),
-    # Shell / generic variable assignment
-    (r"^({query})\s*\(\)\s*\{{", "function"),
-]
+# Tree-sitter availability — try import at module load; degrade gracefully
+try:
+    import tree_sitter  # noqa: F401
+    from tree_sitter import Language, Parser
+    _TS_AVAILABLE = True
+except ImportError:
+    _TS_AVAILABLE = False
+
+# Lazy cache of loaded tree-sitter Language objects
+_TS_LANGUAGES: dict[str, Any] = {}
 
 
-@mcp.tool
+def _load_ts_language(lang: str) -> Any:
+    """Lazy-load a tree-sitter language grammar. Returns None if unavailable."""
+    if lang in _TS_LANGUAGES:
+        return _TS_LANGUAGES[lang]
+    try:
+        if lang == "python":
+            import tree_sitter_python as tsp
+            _TS_LANGUAGES[lang] = Language(tsp.language())
+        elif lang == "typescript":
+            import tree_sitter_typescript as tsts
+            _TS_LANGUAGES[lang] = Language(tsts.language_typescript())
+        elif lang == "javascript":
+            import tree_sitter_javascript as tsjs
+            _TS_LANGUAGES[lang] = Language(tsjs.language())
+        elif lang == "go":
+            import tree_sitter_go as tsgo
+            _TS_LANGUAGES[lang] = Language(tsgo.language())
+        elif lang == "rust":
+            import tree_sitter_rust as tsrust
+            _TS_LANGUAGES[lang] = Language(tsrust.language())
+    except (ImportError, Exception):
+        pass
+    return _TS_LANGUAGES.get(lang)
+
+
+@mcp.tool()
 def search_symbols(
     query: str,
-    file_glob: str = "*",
-    max_results: int = 20,
+    path: str = ".",
+    language: str = "auto",
+    kinds: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Search for function, class, method, or variable definitions across the codebase.
-
-    Uses ripgrep when available; falls back to pure Python.
+    Search for code symbols (functions, classes, methods) by name pattern.
+    Supports glob patterns (e.g. 'get_*', '*Handler'). Uses tree-sitter when
+    available, falls back to regex grep.
 
     Args:
-        query: Symbol name to search for (exact match, case-sensitive).
-        file_glob: Glob to restrict files, e.g. '*.py', '*.ts'. Defaults to all files.
-        max_results: Maximum results to return (cap 100).
-
-    Returns a list of matches with file, line number, kind (function/class/variable), and the matching line.
+        query: Symbol name pattern (supports * and ? glob wildcards)
+        path: Directory or file to search (default: current directory)
+        language: Language hint ('python','typescript','javascript','go','rust','auto')
+        kinds: Symbol types to find ('function','class','method','variable'). Default: all
     """
+    import fnmatch
     import re
-    import subprocess
 
-    if not query or not query.strip():
-        return {"ok": False, "error": "query must be a non-empty symbol name", "matches": []}
+    if kinds is None:
+        kinds = ["function", "class", "method", "variable"]
 
-    q = re.escape(query.strip())
-    max_results = min(int(max_results), 100)
+    root = _resolve_user_path(path)
+    results: list[dict] = []
 
-    search_root = POLICY.get_allowed_dirs()[0]
+    # Extension → language map
+    EXT_LANG = {
+        ".py": "python", ".pyi": "python",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".js": "javascript", ".jsx": "javascript",
+        ".go": "go",
+        ".rs": "rust",
+    }
 
-    # Build a combined regex that matches any definition pattern containing the query.
-    combined_pattern = "|".join(
-        pat.replace("{query}", q) for pat, _ in _SYMBOL_PATTERNS
-    )
+    # Regex fallbacks per language
+    REGEX_PATTERNS: dict[str, dict[str, str]] = {
+        "python": {
+            "function": r"^def\s+(\w+)",
+            "class": r"^class\s+(\w+)",
+            "method": r"^\s+def\s+(\w+)",
+        },
+        "typescript": {
+            "function": r"(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\()",
+            "class": r"class\s+(\w+)",
+        },
+        "javascript": {
+            "function": r"(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\()",
+            "class": r"class\s+(\w+)",
+        },
+        "go": {
+            "function": r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)",
+        },
+        "rust": {
+            "function": r"^(?:pub\s+)?fn\s+(\w+)",
+            "struct": r"^(?:pub\s+)?struct\s+(\w+)",
+        },
+    }
 
-    rg = shutil.which("rg")
-    raw_matches: list[dict[str, Any]] = []
-
-    if rg:
-        cmd = [
-            rg, "--json", "-m", str(max_results * 3),
-            "--glob", file_glob,
-            "--max-filesize", "512K",
-            combined_pattern, str(search_root),
+    files_to_search: list[Path] = []
+    if root.is_file():
+        files_to_search = [root]
+    else:
+        for ext in EXT_LANG:
+            files_to_search.extend(root.rglob(f"*{ext}"))
+        files_to_search = [
+            f for f in files_to_search
+            if not any(part in (".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build")
+                       for part in f.parts)
         ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            for line in proc.stdout.splitlines():
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "match":
-                        data = obj["data"]
-                        raw_matches.append({
-                            "file": _to_relative_display(Path(data["path"]["text"])),
-                            "line": data["line_number"],
-                            "content": data["lines"]["text"].rstrip("\n"),
-                        })
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        except Exception:
-            pass
 
-    if not raw_matches:
-        # Pure Python fallback
-        import re as _re
-        import fnmatch as _fn
-        pat_re = _re.compile(combined_pattern)
-        glob_re = _re.compile(_fn.translate(file_glob))
-        for dirpath, dirnames, filenames in os.walk(str(search_root)):
-            dirnames[:] = [d for d in dirnames if d not in _SYMBOL_SKIP_DIRS]
-            for fname in filenames:
-                if not glob_re.match(fname):
-                    continue
-                fpath = Path(dirpath) / fname
+    # glob pattern: if query contains no wildcards, treat as substring match
+    glob_query = query if ("*" in query or "?" in query) else f"*{query}*"
+
+    for fpath in files_to_search:
+        if len(results) >= 200:
+            break
+        lang = language if language != "auto" else EXT_LANG.get(fpath.suffix, "")
+        if not lang:
+            continue
+
+        try:
+            src = fpath.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        found_via_ts = False
+        if _TS_AVAILABLE:
+            ts_lang = _load_ts_language(lang)
+            if ts_lang:
                 try:
-                    for lineno, text in enumerate(fpath.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                        if pat_re.search(text):
-                            raw_matches.append({
-                                "file": _to_relative_display(fpath),
-                                "line": lineno,
-                                "content": text.rstrip("\n"),
+                    parser = Parser(ts_lang)
+                    tree = parser.parse(src.encode("utf-8"))
+
+                    TS_KIND_TYPES: dict[str, dict[str, list[str]]] = {
+                        "python": {
+                            "function": ["function_definition"],
+                            "class": ["class_definition"],
+                            "method": ["function_definition"],
+                        },
+                        "typescript": {
+                            "function": ["function_declaration", "arrow_function", "method_definition"],
+                            "class": ["class_declaration"],
+                        },
+                        "javascript": {
+                            "function": ["function_declaration", "arrow_function"],
+                            "class": ["class_declaration"],
+                        },
+                        "go": {"function": ["function_declaration", "method_declaration"]},
+                        "rust": {"function": ["function_item"], "struct": ["struct_item"]},
+                    }
+                    lang_types = TS_KIND_TYPES.get(lang, {})
+
+                    def _walk(node: Any) -> None:
+                        for kind, ts_types in lang_types.items():
+                            if kind not in kinds:
+                                continue
+                            if node.type in ts_types:
+                                for child in node.children:
+                                    if child.type in ("identifier", "name", "property_identifier"):
+                                        name = child.text.decode("utf-8") if child.text else ""
+                                        if name and fnmatch.fnmatch(name, glob_query):
+                                            results.append({
+                                                "name": name,
+                                                "kind": kind,
+                                                "file": str(_to_relative_display(fpath)),
+                                                "line": node.start_point[0] + 1,
+                                            })
+                                        break
+                        for child in node.children:
+                            if len(results) < 200:
+                                _walk(child)
+
+                    _walk(tree.root_node)
+                    found_via_ts = True
+                except Exception:
+                    pass
+
+        if not found_via_ts:
+            lang_patterns = REGEX_PATTERNS.get(lang, {})
+            lines = src.splitlines()
+            for i, line_text in enumerate(lines, 1):
+                for kind, pat in lang_patterns.items():
+                    if kind not in kinds:
+                        continue
+                    m = re.search(pat, line_text)
+                    if m:
+                        name = next((g for g in m.groups() if g), None)
+                        if name and fnmatch.fnmatch(name, glob_query):
+                            results.append({
+                                "name": name,
+                                "kind": kind,
+                                "file": str(_to_relative_display(fpath)),
+                                "line": i,
                             })
-                            if len(raw_matches) >= max_results * 3:
-                                break
-                except OSError:
-                    continue
-                if len(raw_matches) >= max_results * 3:
+                if len(results) >= 200:
                     break
 
-    # Annotate with inferred kind
-    import re as _re2
-    results: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-    for m in raw_matches:
-        key = (m["file"], m["line"])
-        if key in seen:
-            continue
-        seen.add(key)
-        kind = "symbol"
-        for pat, k in _SYMBOL_PATTERNS:
-            if _re2.search(pat.replace("{query}", q), m["content"]):
-                kind = k
-                break
-        results.append({
-            "name": query,
-            "kind": kind,
-            "file": m["file"],
-            "line": m["line"],
-            "snippet": m["content"].strip(),
-        })
-        if len(results) >= max_results:
-            break
-
-    return {"ok": True, "matches": results, "count": len(results), "query": query}
+    return {
+        "ok": True,
+        "query": query,
+        "results": results,
+        "total": len(results),
+        "engine": "tree-sitter" if _TS_AVAILABLE else "regex",
+        "truncated": len(results) >= 200,
+    }
 
 
 @mcp.tool
@@ -1573,6 +1645,55 @@ def view_git_diff(
         return {"ok": False, "error": "git diff timed out after 15s", "diff": ""}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "diff": ""}
+
+
+# ─── File watch / monitor tools ───────────────────────────────────────────────
+
+@mcp.tool()
+def watch_file(watch_id: str, path: str, pattern: str = "") -> dict[str, Any]:
+    """
+    Start watching a file or directory for changes. Changes are logged to the event history.
+
+    Args:
+        watch_id: Unique identifier for this watcher (used to stop it later)
+        path: File or directory path to watch
+        pattern: Optional glob pattern to filter files (e.g. '*.py'). Only for directories.
+    """
+    try:
+        from .monitor import start_watch, _WATCHDOG_AVAILABLE
+    except ImportError:
+        try:
+            from monitor import start_watch, _WATCHDOG_AVAILABLE
+        except ImportError:
+            return {"ok": False, "error": "monitor module not available"}
+
+    resolved = _resolve_user_path(path)
+
+    def _on_change(event: dict) -> None:
+        LOGGER.info("File watch event: %s %s", event.get("type"), event.get("path"))
+
+    start_watch(watch_id, str(resolved), _on_change, pattern or None)
+    return {
+        "ok": True,
+        "watch_id": watch_id,
+        "path": str(resolved),
+        "backend": "watchdog" if _WATCHDOG_AVAILABLE else "polling",
+    }
+
+
+@mcp.tool()
+def stop_watch_file(watch_id: str) -> dict[str, Any]:
+    """Stop a file watcher started with watch_file."""
+    try:
+        from .monitor import stop_watch, list_watches
+    except ImportError:
+        try:
+            from monitor import stop_watch, list_watches
+        except ImportError:
+            return {"ok": False, "error": "monitor module not available"}
+
+    stopped = stop_watch(watch_id)
+    return {"ok": stopped, "watch_id": watch_id, "remaining_watches": list_watches()}
 
 
 if __name__ == "__main__":

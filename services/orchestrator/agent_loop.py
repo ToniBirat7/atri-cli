@@ -39,6 +39,8 @@ import ast
 import logging
 import re
 import os
+import hashlib
+import time
 try:
     from ..mcp.diff_engine import DiffEngine
 except (ImportError, ValueError):
@@ -133,6 +135,93 @@ class AgentState:
     status: str = "initialized"
 
 
+class _ToolResultCache:
+    """LRU cache for tool results. Keyed on (tool_name, args_hash). File tools invalidated by mtime."""
+
+    def __init__(self, max_size: int = 128):
+        self._cache: Dict[str, tuple] = {}  # key -> (result, timestamp)
+        self._mtimes: Dict[str, float] = {}  # key -> mtime at cache time
+        self._max_size = max_size
+        self._access_order: List[str] = []
+
+    def _key(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
+        canonical = json.dumps(tool_input, sort_keys=True, ensure_ascii=True)
+        return f"{tool_name}:{hashlib.md5(canonical.encode()).hexdigest()}"
+
+    def _file_path_from_input(self, tool_input: Dict[str, Any]) -> Optional[str]:
+        return (
+            tool_input.get("target_file_path")
+            or tool_input.get("target_path")
+            or tool_input.get("path")
+        )
+
+    def get(self, tool_name: str, tool_input: Dict[str, Any]) -> Tuple[Any, bool]:
+        """Returns (result, hit). File tools validated against mtime."""
+        key = self._key(tool_name, tool_input)
+        if key not in self._cache:
+            return None, False
+
+        result, ts = self._cache[key]
+
+        # Web tools: 300s TTL
+        WEB_TOOLS = {"search_web", "fetch_url"}
+        if tool_name in WEB_TOOLS and (time.monotonic() - ts) > 300:
+            del self._cache[key]
+            return None, False
+
+        # File tools: invalidate on mtime change
+        FILE_TOOLS = {"read_text_file", "read_file", "get_file_info"}
+        if tool_name in FILE_TOOLS:
+            fpath = self._file_path_from_input(tool_input)
+            if fpath:
+                try:
+                    current_mtime = os.path.getmtime(fpath)
+                    cached_mtime = self._mtimes.get(key)
+                    if cached_mtime is None or current_mtime != cached_mtime:
+                        del self._cache[key]
+                        return None, False
+                except OSError:
+                    del self._cache[key]
+                    return None, False
+
+        # LRU access order
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+        return result, True
+
+    def set(self, tool_name: str, tool_input: Dict[str, Any], result: Any) -> None:
+        key = self._key(tool_name, tool_input)
+
+        # Evict LRU if at capacity
+        if len(self._cache) >= self._max_size and key not in self._cache:
+            if self._access_order:
+                lru_key = self._access_order.pop(0)
+                self._cache.pop(lru_key, None)
+                self._mtimes.pop(lru_key, None)
+
+        self._cache[key] = (result, time.monotonic())
+
+        # Record mtime for file tools
+        fpath = self._file_path_from_input(tool_input)
+        if fpath:
+            try:
+                self._mtimes[key] = os.path.getmtime(fpath)
+            except OSError:
+                pass
+
+        if key in self._access_order:
+            self._access_order.remove(key)
+        self._access_order.append(key)
+
+    def invalidate(self, tool_name: str, tool_input: Dict[str, Any]) -> None:
+        key = self._key(tool_name, tool_input)
+        self._cache.pop(key, None)
+        self._mtimes.pop(key, None)
+        if key in self._access_order:
+            self._access_order.remove(key)
+
+
 class AgentLoop:
     """
     Deterministic agent loop with budget controls.
@@ -174,6 +263,8 @@ class AgentLoop:
         self.permission_mode = permission_mode
         self.config = config
         self.state = AgentState()
+        # Phase 4.5: Tool result cache
+        self._tool_cache = _ToolResultCache()
 
         # Hook registry — use provided registry or fall back to global singleton
         if hook_registry is not None:
@@ -403,9 +494,18 @@ class AgentLoop:
                     # Allow tools again only if no tool results yet (turn 1) or if previous turn errored.
                     last_role = self.state.messages[-1].get("role", "") if self.state.messages else ""
                     on_synthesis_turn = (last_role == "tool" or last_role == "user") and self.state.total_tool_calls > 0
+                    # Phase 4.3: proxy mode — expose single mcp_proxy schema
+                    _use_mcp_proxy = (
+                        self.config is not None
+                        and getattr(getattr(self.config, "mcp", None), "use_proxy", False)
+                    )
                     available_tools = (
                         None if on_synthesis_turn
-                        else (tool_registry.to_openai_format() if self.enable_tool_use else None)
+                        else (
+                            [mcp_orchestrator.get_proxy_tool_schema()]
+                            if (self.enable_tool_use and _use_mcp_proxy)
+                            else (tool_registry.to_openai_format() if self.enable_tool_use else None)
+                        )
                     )
 
                     # Use streaming for tool-free turns when enabled (final answer quality)
@@ -737,13 +837,38 @@ class AgentLoop:
                                 validated_input = _hook_input  # may have been modified
                             # ─────────────────────────────────────────────────────
 
-                            result = await mcp_orchestrator.execute_tool(
-                                server_name=routed_server,
-                                tool_name=routed_tool_name,
-                                tool_input=validated_input,
-                                timeout_seconds=self.tool_timeout_seconds,
-                                max_retries=self.max_tool_call_retries,
-                            )
+                            # Phase 4.3: mcp_proxy dispatch
+                            if routed_tool_name == "mcp_proxy":
+                                result = await mcp_orchestrator.execute_proxy_call(
+                                    proxy_input=validated_input,
+                                    timeout_seconds=self.tool_timeout_seconds,
+                                    max_retries=self.max_tool_call_retries,
+                                )
+                            else:
+                                # Phase 4.5: tool result cache
+                                _CACHEABLE_TOOLS = {
+                                    "read_text_file", "read_file", "get_file_info",
+                                    "search_web", "fetch_url", "grep_codebase",
+                                }
+                                _cache_hit = False
+                                if routed_tool_name in _CACHEABLE_TOOLS:
+                                    _cached, _cache_hit = self._tool_cache.get(routed_tool_name, validated_input)
+                                    if _cache_hit:
+                                        result = _cached
+                                        await self._emit_event(
+                                            event_callback,
+                                            {"type": "tool_cache_hit", "tool_name": routed_tool_name},
+                                        )
+                                if not _cache_hit:
+                                    result = await mcp_orchestrator.execute_tool(
+                                        server_name=routed_server,
+                                        tool_name=routed_tool_name,
+                                        tool_input=validated_input,
+                                        timeout_seconds=self.tool_timeout_seconds,
+                                        max_retries=self.max_tool_call_retries,
+                                    )
+                                    if routed_tool_name in _CACHEABLE_TOOLS:
+                                        self._tool_cache.set(routed_tool_name, validated_input, result)
 
                             # ── Phase 1.4: after-hook result modification ─────────
                             result = await self._hook_registry.run_after(
