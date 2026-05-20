@@ -86,6 +86,8 @@ class MCPOrchestrator:
 
     def __init__(self):
         self._servers: Dict[str, Any] = {}  # server_name -> client
+        # Phase 4.4: External MCP servers (URL-based, HTTP transport)
+        self._external_servers: Dict[str, Dict[str, str]] = {}  # name -> {url, api_key}
         self._server_configs: Dict[str, MCPServerConfig] = {}
         # Phase 5: Resilience tracking
         self._server_failures: Dict[str, int] = {}  # server_name -> failure count
@@ -537,6 +539,20 @@ class MCPOrchestrator:
             TimeoutError: If tool execution exceeds timeout
             ValueError: If server or tool not found
         """
+        # Phase 4.4: Route to external HTTP MCP server if registered
+        if server_name in self._external_servers:
+            ext = self._external_servers[server_name]
+            logger.info("Routing %s.%s to external MCP server %s", server_name, tool_name, ext["url"])
+            result = await self._call_external_mcp(
+                server_url=ext["url"],
+                tool_name=tool_name,
+                tool_input=tool_input,
+                api_key=ext.get("api_key", ""),
+            )
+            if isinstance(result, (dict, list)):
+                return json.dumps(result, ensure_ascii=False)
+            return str(result)
+
         if server_name not in self._servers:
             raise MCPServerNotInitializedError(f"Server {server_name} not initialized")
 
@@ -867,6 +883,117 @@ class MCPOrchestrator:
             }
             for server_name, server_info in self._servers.items()
         }
+
+    # ── Phase 4.3: MCP Proxy Mode ─────────────────────────────────────────────
+
+    def get_proxy_tool_schema(self) -> Dict[str, Any]:
+        """Return a single catch-all mcp_proxy tool schema for proxy mode."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "mcp_proxy",
+                "description": "Execute any MCP tool. Use this to call filesystem, search, or shell tools.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": {
+                            "type": "string",
+                            "description": "MCP server name (e.g. 'local-mcp')",
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Tool name to call",
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "Tool arguments as key-value pairs",
+                        },
+                    },
+                    "required": ["tool", "args"],
+                },
+            },
+        }
+
+    async def execute_proxy_call(
+        self,
+        proxy_input: Dict[str, Any],
+        timeout_seconds: int = 10,
+        max_retries: int = 2,
+    ) -> Any:
+        """Dispatch an mcp_proxy tool call to the appropriate server."""
+        server = proxy_input.get("server", "local-mcp")
+        tool = proxy_input.get("tool", "")
+        args = proxy_input.get("args", {})
+        return await self.execute_tool(
+            server_name=server,
+            tool_name=tool,
+            tool_input=args,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
+
+    # ── Phase 4.4: External MCP Servers ──────────────────────────────────────
+
+    def register_external_server(self, name: str, url: str, api_key: str = "") -> None:
+        """Register an external HTTP-based MCP server."""
+        self._external_servers[name] = {"url": url.rstrip("/"), "api_key": api_key}
+        logger.info("Registered external MCP server: %s -> %s", name, url)
+
+    def register_external_servers_from_config(self, server_urls: list[str]) -> None:
+        """
+        Parse and register external MCP servers from a list of URL strings.
+
+        Each URL may include query params for auth:
+          http://host:port?api_key=KEY  or  http://host:port?bearer=TOKEN
+        """
+        from urllib.parse import urlparse, parse_qs, urlunparse
+
+        for raw_url in server_urls:
+            try:
+                parsed = urlparse(raw_url)
+                params = parse_qs(parsed.query)
+                api_key = ""
+                if "api_key" in params:
+                    api_key = params["api_key"][0]
+                elif "bearer" in params:
+                    api_key = params["bearer"][0]
+                # Strip auth query params from the base URL
+                clean = urlunparse(parsed._replace(query=""))
+                # Derive a server name from the netloc
+                server_name = parsed.netloc.replace(":", "_").replace(".", "-")
+                self.register_external_server(server_name, clean, api_key)
+            except Exception as exc:
+                logger.warning("Failed to register external MCP server %s: %s", raw_url, exc)
+
+    async def _call_external_mcp(
+        self,
+        server_url: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        api_key: str = "",
+    ) -> Any:
+        """Call an external MCP server via HTTP POST /tools/{tool_name}."""
+        try:
+            import aiohttp  # type: ignore[import]
+        except ImportError:
+            logger.warning(
+                "aiohttp is not installed — cannot call external MCP server %s. "
+                "Install with: pip install aiohttp",
+                server_url,
+            )
+            return {"error": "aiohttp not available"}
+
+        headers: Dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{server_url}/tools/{tool_name}",
+                json=tool_input,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                return await resp.json()
 
     def __repr__(self) -> str:
         return f"MCPOrchestrator({len(self._servers)} servers)"

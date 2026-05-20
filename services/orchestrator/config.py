@@ -106,6 +106,17 @@ class MCPConfig(BaseModel):
         ge=0,
         description="Tool discovery cache TTL in seconds; 0 disables cache"
     )
+    use_proxy: bool = Field(
+        default=False,
+        description="Expose a single mcp_proxy tool instead of individual tool schemas"
+    )
+    external_servers: List[str] = Field(
+        default=[],
+        description=(
+            "Comma-separated external MCP server URLs. "
+            "Each entry may include auth: http://host:port?api_key=KEY or ?bearer=TOKEN"
+        ),
+    )
 
     class Config:
         env_prefix = "MCP_"
@@ -327,6 +338,12 @@ class OrchestratorConfig(BaseModel):
                 startup_initial_backoff_seconds=float(os.getenv("MCP_STARTUP_INITIAL_BACKOFF_SECONDS", "1.0")),
                 startup_max_backoff_seconds=float(os.getenv("MCP_STARTUP_MAX_BACKOFF_SECONDS", "8.0")),
                 discovery_cache_ttl_seconds=int(os.getenv("MCP_DISCOVERY_CACHE_TTL_SECONDS", "30")),
+                use_proxy=os.getenv("MCP_USE_PROXY", "false").lower() == "true",
+                external_servers=[
+                    s.strip()
+                    for s in os.getenv("MCP_EXTERNAL_SERVERS", "").split(",")
+                    if s.strip()
+                ],
             ),
             agent_loop=AgentLoopConfig(
                 max_turns=int(os.getenv("AGENT_MAX_TURNS", "10")),
