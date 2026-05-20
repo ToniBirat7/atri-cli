@@ -72,6 +72,15 @@ try:
 except ImportError:
     from compaction import should_compact, compact_messages
 
+try:
+    from .session_tree import SessionTree, new_entry as new_session_entry
+except ImportError:
+    try:
+        from session_tree import SessionTree, new_entry as new_session_entry
+    except ImportError:
+        SessionTree = None  # type: ignore[assignment,misc]
+        new_session_entry = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,15 +212,33 @@ class AgentLoop:
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]],
         payload: Dict[str, Any],
     ) -> None:
-        if event_callback is None:
-            return
-        try:
-            maybe = event_callback(payload)
-            if asyncio.iscoroutine(maybe):
-                await maybe
-        except Exception:
-            # Keep loop progress resilient even if telemetry/event sink fails.
-            return
+        if event_callback is not None:
+            try:
+                maybe = event_callback(payload)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                # Keep loop progress resilient even if telemetry/event sink fails.
+                pass
+
+        # Checkpoint key events to the session tree when one is provided (set by run()).
+        _CHECKPOINT_EVENT_TYPES = {"turn_start", "tool_call_start", "tool_call_result", "turn_final_response"}
+        session_tree = getattr(self, "_active_session_tree", None)
+        if session_tree is not None and new_session_entry is not None and payload.get("type") in _CHECKPOINT_EVENT_TYPES:
+            try:
+                session_id = getattr(session_tree, "session_id", "unknown")
+                leaves = session_tree.leaf_ids()
+                parent_id = leaves[-1] if leaves else None
+                entry = new_session_entry(
+                    session_id=session_id,
+                    role="event",
+                    content=payload,
+                    parent_id=parent_id,
+                    metadata={"event_type": payload.get("type")},
+                )
+                session_tree.append(entry)
+            except Exception:
+                pass  # Never let tree writes break the agent loop
 
     # Gemma 4 frequently produces these shortened field names instead of the canonical
     # MCP tool field names.  We rename them before schema validation so the tool call
@@ -293,6 +320,7 @@ class AgentLoop:
         system_prompt: Optional[str] = None,
         prior_messages: Optional[List[Dict[str, str]]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
+        session_tree: Optional[Any] = None,  # SessionTree | None — for event checkpointing
     ) -> Tuple[str, AgentState]:
         """
         Run the agent loop.
@@ -309,6 +337,8 @@ class AgentLoop:
         # Ensure each /chat request starts from a clean state.
         self.state = AgentState()
         self.state.status = "running"
+        # Store session_tree for access inside _emit_event (single-coroutine-per-request safe).
+        self._active_session_tree = session_tree
         selected_system_prompt = system_prompt or self._build_system_prompt()
         historical_messages = prior_messages or []
         self.state.messages = [
