@@ -458,6 +458,7 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
             fallback_text=config.prompt_policy.fallback_text,
             disclaimer_text=config.prompt_policy.disclaimer_text,
             legal_help_line=config.prompt_policy.legal_help_line,
+            enable_hashline_editing=getattr(config, "enable_hashline_editing", False),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
