@@ -208,7 +208,8 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
     cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
-        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
+        CUDA_ARCH_NUM="${COMPUTE_CAP//./}"  # "8.6" → "86" (cmake requires numeric, no dot)
+        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$CUDA_ARCH_NUM -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
         # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
         SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
         if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
@@ -316,7 +317,9 @@ ok "atri launcher → $ATRI_BIN_DIR/atri"
 SENTINEL="# >>> atri-code installer added >>>"
 if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [ -f "$RC" ] && ! grep -qF "$SENTINEL" "$RC" 2>/dev/null; then
+        if [ -f "$RC" ] \
+            && ! grep -qF "$SENTINEL" "$RC" 2>/dev/null \
+            && ! grep -qF "$ATRI_BIN_DIR" "$RC" 2>/dev/null; then
             {
                 echo ""
                 echo "$SENTINEL"

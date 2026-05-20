@@ -10,9 +10,9 @@ Issues discovered during development and E2E testing. Each entry has a status an
 
 **Symptom:** Orchestrator fails to connect to LLM; `/ready` returns `llm_connected: false`.
 
-**Root cause:** The codebase default for `LLM_BASE_URL` is `http://127.0.0.1:8000/v1` (in `config.py` and README). The actual llama-server runs on **port 8080** per the user's launch command.
+**Root cause:** The codebase default for `LLM_BASE_URL` is `http://127.0.0.1:8000/v1` (in `config.py`, `CLAUDE.md`, and the Makefile). If llama-server was started manually on a different port, the orchestrator cannot reach it.
 
-**Fix:** Set `LLM_BASE_URL=http://127.0.0.1:8080/v1` in `services/orchestrator/.env`.
+**Fix:** Ensure llama-server is started on port **8000** (the canonical port). If you started it on a different port, either restart it on 8000 or set `LLM_BASE_URL=http://127.0.0.1:<your-port>/v1` in `services/orchestrator/.env`.
 
 ---
 

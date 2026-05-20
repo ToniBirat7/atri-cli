@@ -14,6 +14,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,9 @@ class HookManager:
         for callback in self._callbacks.get(event_name, []):
             try:
                 callback(payload)
-            except Exception:
+            except Exception as e:
                 # Hooks must never block main execution.
+                logger.warning("HookManager callback %s raised: %s", getattr(callback, "__name__", callback), e, exc_info=True)
                 continue
 
     def recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
@@ -171,17 +173,23 @@ def register_builtin_hooks(registry: HookRegistry, permission_mode: str = "defau
                 )
                 return tool_input
 
-        BLOCKED_PATTERNS = [
-            r"(^|[\\/])\.git[\\/]",
-            r"(^|[\\/])\.env",
-            r"(^|[\\/])\.ssh[\\/]",
-            r"(^|[\\/])id_rsa",
-            r"(^|[\\/])id_ed25519",
-        ]
-        for pat in BLOCKED_PATTERNS:
-            if re.search(pat, str(path)):
-                logger.warning(
-                    "Hook blocked write to sensitive path: %s (tool: %s)", path, tool_name
-                )
-                return BLOCK
+        p = Path(abs_path)
+        # Block if any path component is exactly ".git" or ".ssh"
+        if ".git" in p.parts or ".ssh" in p.parts:
+            logger.warning(
+                "Hook blocked write to sensitive path: %s (tool: %s)", path, tool_name
+            )
+            return BLOCK
+        # Block .env* files anywhere in the path
+        if p.name.startswith(".env"):
+            logger.warning(
+                "Hook blocked write to sensitive path: %s (tool: %s)", path, tool_name
+            )
+            return BLOCK
+        # Block private key files (id_rsa, id_ed25519, etc.)
+        if p.name in ("id_rsa", "id_ed25519") or p.name.startswith("id_rsa") or p.name.startswith("id_ed25519"):
+            logger.warning(
+                "Hook blocked write to sensitive path: %s (tool: %s)", path, tool_name
+            )
+            return BLOCK
         return tool_input

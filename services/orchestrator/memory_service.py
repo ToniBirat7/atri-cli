@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -133,7 +135,9 @@ Rules:
             f"extracted_at: {datetime.now(timezone.utc).isoformat()}\n"
             f"---\n\n{body}\n"
         )
-        skill_md.write_text(fm, encoding="utf-8")
+        tmp_path = skill_md.with_suffix(".tmp")
+        tmp_path.write_text(fm, encoding="utf-8")
+        os.rename(tmp_path, skill_md)
         created.append(name)
         logger.info("Memory mining: created skill '%s' at %s", name, skill_md)
 
