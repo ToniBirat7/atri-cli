@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 try:
     from ..mcp.diff_engine import DiffEngine
-except (ImportError, ValueError):
+except ImportError:
     import sys
     import os
     # Add repo root to sys.path to allow absolute imports of services.mcp
@@ -331,9 +331,9 @@ class AgentLoop:
                 maybe = event_callback(payload)
                 if asyncio.iscoroutine(maybe):
                     await maybe
-            except Exception:
+            except Exception as e:
                 # Keep loop progress resilient even if telemetry/event sink fails.
-                pass
+                logger.warning("_emit_event callback raised: %s", e, exc_info=True)
 
         # Checkpoint key events to the session tree when one is provided (set by run()).
         _CHECKPOINT_EVENT_TYPES = {"turn_start", "tool_call_start", "tool_call_result", "turn_final_response"}
@@ -351,8 +351,8 @@ class AgentLoop:
                     metadata={"event_type": payload.get("type")},
                 )
                 session_tree.append(entry)
-            except Exception:
-                pass  # Never let tree writes break the agent loop
+            except Exception as e:
+                logger.warning("session_tree append raised: %s", e, exc_info=True)  # Never let tree writes break the agent loop
 
     # Gemma 4 frequently produces these shortened field names instead of the canonical
     # MCP tool field names.  We rename them before schema validation so the tool call
@@ -800,7 +800,22 @@ class AgentLoop:
                                     
                                     after_content = None
                                     if routed_tool_name == "edit_diff":
-                                        after_content = DiffEngine.get_preview(file_path, validated_input.get("diff", ""))
+                                        # Parse unified diff to compute preview without mutating the file
+                                        import difflib as _difflib
+                                        diff_text = validated_input.get("diff", "")
+                                        try:
+                                            lines = before_content.splitlines(keepends=True)
+                                            patched: list[str] = []
+                                            for patch_line in diff_text.splitlines(keepends=True):
+                                                if patch_line.startswith("+") and not patch_line.startswith("+++"):
+                                                    patched.append(patch_line[1:])
+                                                elif patch_line.startswith("-") and not patch_line.startswith("---"):
+                                                    pass  # removed line
+                                                elif not patch_line.startswith(("@@", "---", "+++")):
+                                                    patched.append(patch_line[1:] if patch_line.startswith(" ") else patch_line)
+                                            after_content = "".join(patched) if patched else None
+                                        except Exception:
+                                            after_content = None
                                     elif routed_tool_name == "edit_file":
                                         # Simple text replacement for preview
                                         old_text = validated_input.get("exact_text_to_replace")

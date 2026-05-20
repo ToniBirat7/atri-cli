@@ -18,7 +18,8 @@ pydantic-settings>=2.7.0,<3.0.0
 # Environment variable loading
 python-dotenv>=1.0.0
 
-# Async support
+# Async support — uvloop replaces default asyncio event loop (~30% throughput improvement)
+uvloop>=0.21.0
 asyncio-contextmanager>=1.0.0
 redis>=5.0.0
 psycopg[binary]>=3.1.0

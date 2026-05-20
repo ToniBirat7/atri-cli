@@ -7,12 +7,15 @@ Sessions stored as append-only JSONL: .atri/sessions/<session_id>.jsonl
 """
 from __future__ import annotations
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 SESSIONS_DIR = Path.home() / ".atri" / "sessions"
@@ -58,7 +61,8 @@ class SessionTree:
                     data = json.loads(line)
                     entry = SessionEntry(**data)
                     self._index(entry)
-                except Exception:
+                except Exception as e:
+                    logger.warning("session_tree _load failed to parse line: %s", e, exc_info=True)
                     continue
 
     def _index(self, entry: SessionEntry) -> None:
