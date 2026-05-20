@@ -272,11 +272,21 @@ def compute_launch_config(
     elif vendor == "apple":
         flash_attn = True  # Metal supports it
 
-    # KV cache quantization to save VRAM
-    kv_cache_type = "q8_0" if gpu_detected else "f16"
+    # KV cache quantization: q4_0 K-cache halves VRAM vs q8_0 on Ampere+; V stays q8_0 for quality
+    is_ampere_plus = False
+    if vendor == "nvidia":
+        compute_cap = gpu.get("compute_capability", "")
+        try:
+            major = int(compute_cap.split(".")[0]) if "." in compute_cap else 0
+            is_ampere_plus = major >= 8
+        except (ValueError, IndexError):
+            pass
+    kv_cache_type_k = "q4_0" if is_ampere_plus else ("q8_0" if gpu_detected else "f16")
+    kv_cache_type_v = "q8_0" if gpu_detected else "f16"
 
-    # Threads
-    threads = cpu.get("recommended_threads", 4)
+    # Threads: fewer threads reduces CPU contention on GPU-primary inference
+    raw_threads = cpu.get("recommended_threads", 4)
+    threads = min(6, raw_threads) if gpu_detected else raw_threads
 
     config = {
         "gpu_detected": gpu_detected,
@@ -292,9 +302,10 @@ def compute_launch_config(
         "recommended_ubatch_size": ubatch_size,
         "recommended_threads": threads,
         "flash_attn": flash_attn,
-        "kv_cache_type_k": kv_cache_type,
-        "kv_cache_type_v": kv_cache_type,
-        "mlock": False,  # disabled by default; requires ulimit -l unlimited or root
+        "kv_cache_type_k": kv_cache_type_k,
+        "kv_cache_type_v": kv_cache_type_v,
+        "mlock": gpu_detected,  # lock model pages into RAM when GPU is active
+        "n_cpu_moe": 0,  # set >0 for MoE models to route experts to CPU
         "enable_thinking": True,
     }
 

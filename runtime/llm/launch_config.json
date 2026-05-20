@@ -10,10 +10,11 @@
   "recommended_ctx_size": 16384,
   "recommended_batch_size": 2048,
   "recommended_ubatch_size": 512,
-  "recommended_threads": 10,
+  "recommended_threads": 6,
   "flash_attn": true,
-  "kv_cache_type_k": "q8_0",
+  "kv_cache_type_k": "q4_0",
   "kv_cache_type_v": "q8_0",
-  "mlock": false,
+  "mlock": true,
+  "n_cpu_moe": 118,
   "enable_thinking": true
 }
