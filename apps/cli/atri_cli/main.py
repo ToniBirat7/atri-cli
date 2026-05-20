@@ -116,6 +116,8 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/cost": "Show session token usage",
     "/clear": "Clear terminal screen",
     "/timeline": "Show or set timeline verbosity",
+    "/tree": "Print the session conversation tree",
+    "/fork": "Fork the current session from the latest entry",
     "/exit": "Exit interactive mode",
     "/quit": "Exit interactive mode",
 }
@@ -185,6 +187,8 @@ def _interactive_help_text() -> str:
         "  /clear              Clear terminal screen\n"
         "  /timeline           Show timeline verbosity\n"
         "  /timeline <level>   Set timeline verbosity (minimal/normal/debug)\n"
+        "  /tree               Print the session conversation tree\n"
+        "  /fork               Fork the current session from the latest entry\n"
         "  /exit | /quit       Exit interactive mode\n"
         "\nKeyboard:\n"
         "  Tab                 Slash command autocomplete\n"
@@ -560,7 +564,11 @@ def _prompt_write_target(tool_name: str, target_path: str) -> bool:
     return answer in {"y", "yes"}
 
 
-def _handle_interactive_local_command(user_input: str, permission_state: PermissionState) -> bool:
+def _handle_interactive_local_command(
+    user_input: str,
+    permission_state: PermissionState,
+    conversation_id: Optional[str] = None,
+) -> bool:
     if user_input in {"/help", "/?"}:
         help_text = _interactive_help_text()
         if help_text:
@@ -633,6 +641,64 @@ def _handle_interactive_local_command(user_input: str, permission_state: Permiss
             return True
         _TUI.set_timeline_verbosity(requested)
         _RICH.render_success(f"Timeline verbosity set to {requested}")
+        return True
+
+    if user_input == "/tree":
+        if not conversation_id:
+            _RICH.render_warning("No active conversation yet. Start a chat first.")
+            return True
+        try:
+            import sys as _sys
+            import importlib as _importlib
+            _pkg = "services.orchestrator.session_tree"
+            try:
+                _st_mod = _importlib.import_module(_pkg)
+            except ModuleNotFoundError:
+                # running from the repo root without package install
+                _st_path = str(Path(__file__).resolve().parents[3] / "services" / "orchestrator")
+                if _st_path not in _sys.path:
+                    _sys.path.insert(0, _st_path)
+                _st_mod = _importlib.import_module("session_tree")
+            _SessionTree = _st_mod.SessionTree
+            tree = _SessionTree(conversation_id)
+            rendered = tree.render_tree()
+            if rendered.strip():
+                print(rendered)
+            else:
+                _RICH.render_info(f"Session tree for {conversation_id} is empty (no JSONL entries yet).")
+        except Exception as _exc:
+            _RICH.render_warning(f"Could not load session tree: {_exc}")
+        return True
+
+    if user_input == "/fork":
+        if not conversation_id:
+            _RICH.render_warning("No active conversation yet. Start a chat first.")
+            return True
+        try:
+            import sys as _sys
+            import importlib as _importlib
+            try:
+                _st_mod = _importlib.import_module("services.orchestrator.session_tree")
+            except ModuleNotFoundError:
+                _st_path = str(Path(__file__).resolve().parents[3] / "services" / "orchestrator")
+                if _st_path not in _sys.path:
+                    _sys.path.insert(0, _st_path)
+                _st_mod = _importlib.import_module("session_tree")
+            _SessionTree = _st_mod.SessionTree
+            tree = _SessionTree(conversation_id)
+            leaves = tree.leaf_ids()
+            if not leaves:
+                _RICH.render_warning("Cannot fork: session tree has no entries yet.")
+                return True
+            latest_leaf = max(
+                leaves,
+                key=lambda lid: tree.get(lid).timestamp if tree.get(lid) else "",
+            )
+            new_session_id = tree.fork(latest_leaf)
+            _RICH.render_success(f"Session forked. New session ID: {new_session_id}")
+            _print_info(f"Resume with: atri resume {new_session_id}")
+        except Exception as _exc:
+            _RICH.render_warning(f"Fork failed: {_exc}")
         return True
 
     if user_input.startswith("/"):
@@ -1072,7 +1138,7 @@ def _run_interactive(
         if user_input in {"/exit", "/quit"}:
             _print_success("Goodbye.")
             return
-        if _handle_interactive_local_command(user_input, permission_state):
+        if _handle_interactive_local_command(user_input, permission_state, conversation_id=active_conversation_id):
             if fullscreen_mode:
                 _render_interactive_dashboard(
                     conversation_id=active_conversation_id,

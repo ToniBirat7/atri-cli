@@ -26,6 +26,7 @@ import asyncio
 try:
     from .config import OrchestratorConfig
     from .database import OrchestratorDatabase
+    from .session_tree import SessionTree, new_entry as new_session_entry
     from .auth import AuthContext, JwtAuth, RequestAuthenticator
     from .redis_rate_limit import DistributedRateLimiter
     from .tracing import instrument_fastapi, setup_tracing
@@ -49,6 +50,7 @@ except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
     from database import OrchestratorDatabase
+    from session_tree import SessionTree, new_entry as new_session_entry
     from auth import AuthContext, JwtAuth, RequestAuthenticator
     from redis_rate_limit import DistributedRateLimiter
     from tracing import instrument_fastapi, setup_tracing
@@ -659,6 +661,39 @@ async def _run_agent_request(
                 turn_history=_serialize_turn_history(state),
                 tool_events=tool_events,
             )
+
+        # Append-only JSONL session tree (additive — does not affect SQLite).
+        try:
+            tree = SessionTree(conversation_id)
+            # Determine the latest leaf to chain parent pointers correctly.
+            leaves = tree.leaf_ids()
+            parent_id = leaves[-1] if leaves else None
+
+            user_entry = new_session_entry(
+                session_id=conversation_id,
+                role="user",
+                content=request.message,
+                parent_id=parent_id,
+                metadata={"request_id": request_id},
+            )
+            tree.append(user_entry)
+
+            assistant_entry = new_session_entry(
+                session_id=conversation_id,
+                role="assistant",
+                content=response,
+                parent_id=user_entry.id,
+                metadata={
+                    "request_id": request_id,
+                    "turn": state.turn,
+                    "total_tool_calls": state.total_tool_calls,
+                    "status": state.status,
+                },
+            )
+            tree.append(assistant_entry)
+        except Exception as _tree_exc:
+            # TODO: surface via metrics/logging if tree writes fail repeatedly
+            logger.warning(json.dumps({"event": "session_tree.write_failed", "error": str(_tree_exc)}, ensure_ascii=True))
 
         _log_event(
             "chat.request.completed",
