@@ -53,6 +53,31 @@ except ImportError:
         search_web_results = module.search_web_results
 
 try:
+    from .hashline import encode_file as _encode_file, apply_hashline_edits as _apply_hashline_edits, HashMismatchError as _HashMismatchError
+except ImportError:
+    try:
+        from hashline import encode_file as _encode_file, apply_hashline_edits as _apply_hashline_edits, HashMismatchError as _HashMismatchError  # type: ignore[no-redef]
+    except ImportError:
+        import importlib.util as _ilu
+        _hl_path = Path(__file__).parent.parent / "orchestrator" / "hashline.py"
+        if _hl_path.exists():
+            _hl_spec = _ilu.spec_from_file_location("hashline", str(_hl_path))
+            if _hl_spec and _hl_spec.loader:
+                _hl_mod = _ilu.module_from_spec(_hl_spec)
+                _hl_spec.loader.exec_module(_hl_mod)
+                _encode_file = _hl_mod.encode_file
+                _apply_hashline_edits = _hl_mod.apply_hashline_edits
+                _HashMismatchError = _hl_mod.HashMismatchError
+            else:
+                _encode_file = None  # type: ignore[assignment]
+                _apply_hashline_edits = None  # type: ignore[assignment]
+                _HashMismatchError = None  # type: ignore[assignment]
+        else:
+            _encode_file = None  # type: ignore[assignment]
+            _apply_hashline_edits = None  # type: ignore[assignment]
+            _HashMismatchError = None  # type: ignore[assignment]
+
+try:
     from .diff_engine import DiffEngine
 except (ImportError, ValueError):
     try:
@@ -352,7 +377,12 @@ def directory_tree(target_path: str = ".", max_depth: int = 4) -> dict[str, Any]
 
 
 @mcp.tool
-def read_text_file(target_file_path: str, head: int | None = None, tail: int | None = None) -> dict[str, Any]:
+def read_text_file(
+    target_file_path: str,
+    head: int | None = None,
+    tail: int | None = None,
+    hashline: bool = False,
+) -> dict[str, Any]:
     """
     Read UTF-8 text content from a file.
     REQUIRED: 'target_file_path' is the path to the file.
@@ -360,6 +390,10 @@ def read_text_file(target_file_path: str, head: int | None = None, tail: int | N
     Optional slicing:
     - head: first N lines
     - tail: last N lines
+
+    Optional hash-anchoring:
+    - hashline: if True, return content annotated with line-hash anchors
+      (format: 'LINENUM#HASH|TEXT') suitable for use with edit_file_hashline.
     """
     if head is not None and tail is not None:
         raise ValueError("Specify only one of head or tail")
@@ -381,6 +415,24 @@ def read_text_file(target_file_path: str, head: int | None = None, tail: int | N
         lines = lines[-tail:] if tail > 0 else []
 
     final = "\n".join(lines)
+
+    if hashline:
+        if _encode_file is None:
+            return {
+                "path": _to_relative_display(file_path),
+                "content": final,
+                "line_count": len(lines),
+                "hashline": False,
+                "error": "hashline module not available",
+            }
+        final = _encode_file(final)
+        return {
+            "path": _to_relative_display(file_path),
+            "content": final,
+            "line_count": len(lines),
+            "hashline": True,
+        }
+
     return {
         "path": _to_relative_display(file_path),
         "content": final,
@@ -804,6 +856,77 @@ def edit_diff(target_file_path: str, diff: str) -> str:
             )
     except Exception as e:
         return f"Error applying diff: {e}"
+
+
+@mcp.tool
+def edit_file_hashline(path: str, edits: str) -> dict[str, Any]:
+    """
+    Edit a file using hash-anchored DSL. Atomic: ALL hashes are validated
+    before any bytes are written. If any hash mismatches the actual file
+    content, the entire operation is rejected with an error — the file is
+    left completely unchanged.
+
+    Use read_text_file with hashline=True to get anchor values for a file,
+    then construct the edit DSL from those anchors.
+
+    edits DSL format (blocks separated by ---):
+
+      = START#HASH..END#HASH    replace the line range with the following lines
+      + ANCHOR#HASH             insert the following lines after the anchor line
+      < ANCHOR#HASH             insert the following lines before the anchor line
+      - START#HASH..END#HASH    delete the line range (no following content)
+
+    Example:
+      = 3#a1b2..5#c3d4
+      new line replacing lines 3-5
+      ---
+      + 7#d4e5
+      line inserted after line 7
+      ---
+      - 10#f6g7..12#h8i9
+    """
+    if _encode_file is None or _apply_hashline_edits is None:
+        return {"ok": False, "error": "hashline module not available in this environment"}
+
+    try:
+        full_path = _resolve_user_path(path)
+    except (PermissionError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if not full_path.exists() or not full_path.is_file():
+        return {"ok": False, "error": f"File not found: {path}"}
+
+    original = _read_text(full_path)
+
+    try:
+        updated = _apply_hashline_edits(original, edits)
+    except _HashMismatchError as exc:
+        return {
+            "ok": False,
+            "error": f"Hash mismatch — no changes written: {exc}",
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": f"DSL parse error: {exc}",
+        }
+
+    encoded = updated.encode("utf-8")
+    if len(encoded) > MAX_WRITE_BYTES:
+        return {
+            "ok": False,
+            "error": f"Resulting file too large ({len(encoded)} bytes, limit {MAX_WRITE_BYTES})",
+        }
+
+    temp = full_path.with_suffix(full_path.suffix + ".hl.tmp")
+    temp.write_text(updated, encoding="utf-8")
+    temp.replace(full_path)
+
+    return {
+        "ok": True,
+        "path": _to_relative_display(full_path),
+        "bytes_written": len(encoded),
+    }
 
 
 @mcp.tool

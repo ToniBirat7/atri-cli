@@ -5,7 +5,7 @@ Defines pydantic models for LLM settings, MCP client settings, and agent loop pa
 Loads from environment variables and config files.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
 from typing import Optional, List
 import os
 import json
@@ -110,6 +110,12 @@ class MCPConfig(BaseModel):
         default=False,
         description="Expose a single mcp_proxy tool instead of individual tool schemas"
     )
+    # C.4: Previously hardcoded magic number in agent_loop.py
+    max_tools_before_deferred: int = Field(
+        default=50,
+        ge=1,
+        description="Maximum number of tools to expose inline before switching to deferred/proxy mode"
+    )
     external_servers: List[str] = Field(
         default=[],
         description=(
@@ -151,6 +157,30 @@ class AgentLoopConfig(BaseModel):
     stream_responses: bool = Field(
         default=False,
         description="Stream LLM responses (Phase 3+)"
+    )
+    # C.4: Previously hardcoded magic numbers in agent_loop.py
+    context_trim_threshold: int = Field(
+        default=40,
+        ge=1,
+        description="Number of recent messages to keep when trimming context (agent_loop keep-last N)"
+    )
+    compaction_threshold_pct: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of context window used before triggering auto-compaction"
+    )
+    temperature_min: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=2.0,
+        description="Minimum temperature clamp applied during tool-call turns"
+    )
+    temperature_max: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=2.0,
+        description="Maximum temperature clamp applied during tool-call turns"
     )
 
     class Config:
@@ -282,6 +312,23 @@ class ManagedSettingsConfig(BaseModel):
     managed_path: Optional[str] = Field(default=None)
 
 
+class MemoryConfig(BaseModel):
+    """Auto-memory and session mining configuration (C.4)."""
+
+    min_turns_for_mining: int = Field(
+        default=10,
+        ge=1,
+        description="Minimum user turns in a session before memory mining is attempted"
+    )
+    skills_dir: str = Field(
+        default="~/.atri/skills",
+        description="Directory where auto-mined skills are stored"
+    )
+
+    class Config:
+        env_prefix = "MEMORY_"
+
+
 class OrchestratorConfig(BaseModel):
     """Root orchestrator configuration."""
 
@@ -296,6 +343,7 @@ class OrchestratorConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     hooks: HookConfig = Field(default_factory=HookConfig)
     managed_settings: ManagedSettingsConfig = Field(default_factory=ManagedSettingsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR)"
@@ -303,6 +351,16 @@ class OrchestratorConfig(BaseModel):
     enable_observability: bool = Field(
         default=True,
         description="Enable structured logging and metrics (Phase 7)"
+    )
+    enable_hashline_editing: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ENABLE_HASHLINE_EDITING", "enable_hashline_editing"),
+        description=(
+            "Enable hash-anchored editing (experimental). "
+            "When true, the system prompt includes hashline DSL instructions "
+            "and the LLM can use edit_file_hashline / read_text_file(hashline=True) "
+            "to edit files with ~61%% fewer output tokens."
+        ),
     )
 
     class Config:
@@ -339,6 +397,7 @@ class OrchestratorConfig(BaseModel):
                 startup_max_backoff_seconds=float(os.getenv("MCP_STARTUP_MAX_BACKOFF_SECONDS", "8.0")),
                 discovery_cache_ttl_seconds=int(os.getenv("MCP_DISCOVERY_CACHE_TTL_SECONDS", "30")),
                 use_proxy=os.getenv("MCP_USE_PROXY", "false").lower() == "true",
+                max_tools_before_deferred=int(os.getenv("MCP_MAX_TOOLS_BEFORE_DEFERRED", "50")),
                 external_servers=[
                     s.strip()
                     for s in os.getenv("MCP_EXTERNAL_SERVERS", "").split(",")
@@ -351,6 +410,10 @@ class OrchestratorConfig(BaseModel):
                 enable_tool_use=os.getenv("AGENT_ENABLE_TOOL_USE", "true").lower() == "true",
                 thinking_mode=os.getenv("AGENT_THINKING_MODE", "tool_calls_off"),
                 stream_responses=os.getenv("AGENT_STREAM_RESPONSES", "false").lower() == "true",
+                context_trim_threshold=int(os.getenv("AGENT_CONTEXT_TRIM_THRESHOLD", "40")),
+                compaction_threshold_pct=float(os.getenv("AGENT_COMPACTION_THRESHOLD_PCT", "0.80")),
+                temperature_min=float(os.getenv("AGENT_TEMPERATURE_MIN", "0.3")),
+                temperature_max=float(os.getenv("AGENT_TEMPERATURE_MAX", "0.6")),
             ),
             prompt_policy=PromptPolicyConfig(
                 default_profile=os.getenv("PROMPT_POLICY_DEFAULT_PROFILE", "general-purpose"),
@@ -392,8 +455,13 @@ class OrchestratorConfig(BaseModel):
                 local_path=os.getenv("ORCHESTRATOR_SETTINGS_LOCAL_PATH"),
                 managed_path=os.getenv("ORCHESTRATOR_MANAGED_SETTINGS_PATH"),
             ),
+            memory=MemoryConfig(
+                min_turns_for_mining=int(os.getenv("MEMORY_MIN_TURNS_FOR_MINING", "10")),
+                skills_dir=os.getenv("MEMORY_SKILLS_DIR", "~/.atri/skills"),
+            ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             enable_observability=os.getenv("ENABLE_OBSERVABILITY", "true").lower() == "true",
+            enable_hashline_editing=os.getenv("ENABLE_HASHLINE_EDITING", "false").lower() == "true",
         )
 
         try:

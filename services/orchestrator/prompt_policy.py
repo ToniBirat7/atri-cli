@@ -34,6 +34,30 @@ NEVER use absolute paths starting with /.
 """.strip()
 
 
+_HASHLINE_DSL_SECTION = """
+Hash-anchored editing (hashline DSL):
+When editing files, prefer the hashline workflow for large files — it sends fewer tokens:
+1. Call read_text_file(target_file_path=PATH, hashline=True) to get the file with line anchors.
+   Each line is formatted as: LINENUM#HASH|TEXT
+2. Build an edit DSL and call edit_file_hashline(path=PATH, edits=DSL).
+   DSL format (blocks separated by ---):
+     = START#HASH..END#HASH    replace the line range
+     + ANCHOR#HASH             insert after the anchor line
+     < ANCHOR#HASH             insert before the anchor line
+     - START#HASH..END#HASH    delete the line range
+   Example:
+     = 3#a1b2..5#c3d4
+     replacement line
+     ---
+     + 7#d4e5
+     new line after 7
+     ---
+     - 10#f6g7..12#h8i9
+   IMPORTANT: all hashes are validated before any write — if any hash is wrong the
+   entire operation is rejected. Use the exact LINENUM#HASH values from the read step.
+""".strip()
+
+
 def build_system_prompt(
     profile_name: str,
     *,
@@ -44,6 +68,7 @@ def build_system_prompt(
     fallback_text: str,
     disclaimer_text: str,
     legal_help_line: str,
+    enable_hashline_editing: bool = False,
 ) -> str:
     """Build a profile-specific system prompt."""
     profile = normalize_prompt_profile(profile_name)
@@ -204,6 +229,10 @@ def build_system_prompt(
         ).strip()
 
     _ = enable_thinking  # template owns this; do not inject <|think|> here
+
+    # Append hashline DSL instructions when the feature is enabled
+    if enable_hashline_editing:
+        prompt = prompt + "\n\n" + _HASHLINE_DSL_SECTION
 
     # Append skills snippet (descriptions only — keeps token usage flat)
     try:
