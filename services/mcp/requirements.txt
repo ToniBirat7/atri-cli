@@ -1,10 +1,14 @@
 # MCP Service Dependencies
+# Pin minor for stability; run 'pip-compile' to regenerate lock
 
 # FastMCP framework
-fastmcp>=2.0.0
+fastmcp>=2.0.0,<3.0.0
+
+# HTTP client
+httpx>=0.25.0
 
 # File watch / monitor (watchdog → inotify on Linux, kqueue on macOS, polling fallback)
-watchdog>=4.0.0
+watchdog>=3.0.0
 
 # Code intelligence — tree-sitter core
 tree-sitter>=0.23.0
@@ -15,3 +19,6 @@ tree-sitter-javascript>=0.23.0
 tree-sitter-typescript>=0.23.0
 tree-sitter-go>=0.23.0
 tree-sitter-rust>=0.23.0
+
+# Environment variable loading
+python-dotenv>=1.0.0

@@ -5,6 +5,9 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ToniBirat7/Agentic_AI/master/install.sh | bash
 #
+# Flags:
+#   --skip-model-fetch   Skip model GGUF download entirely
+#
 # What it does:
 #   1. Detects OS / architecture / GPU accelerator (CUDA / ROCm / Metal / CPU)
 #   2. Downloads the matching llama-server prebuilt binary (NVIDIA/macOS/CPU)
@@ -17,6 +20,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ─── Flags ───────────────────────────────────────────────────────────────────
+SKIP_MODEL_FETCH=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --skip-model-fetch) SKIP_MODEL_FETCH=true ;;
+    esac
+done
+
 # ─── Tunables ────────────────────────────────────────────────────────────────
 ATRI_VERSION="${ATRI_VERSION:-latest}"
 ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
@@ -25,6 +36,9 @@ ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-
 LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
 BRANCH="${ATRI_BRANCH:-master}"
+
+# ─── Model checksum (set to actual SHA256 when known) ────────────────────────
+EXPECTED_SHA256="__FILL_ME__"
 
 # Directories inside ATRI_INSTALL_ROOT
 LLAMA_DIR="$ATRI_INSTALL_ROOT/runtime/llama"
@@ -51,11 +65,16 @@ echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 E2B + llama.cpp    │${RESET}"
 echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 
-# ─── Cleanup trap (only fires on error) ────────────────────────────────────
+# ─── Cleanup trap (fires on error and EXIT) ────────────────────────────────
 STAGING_DIR=""
+MODEL_PART_FILE=""
 _cleanup() {
     if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
         rm -rf "$STAGING_DIR"
+    fi
+    # Remove partial model download if interrupted
+    if [ -n "$MODEL_PART_FILE" ] && [ -f "$MODEL_PART_FILE" ]; then
+        rm -f "$MODEL_PART_FILE"
     fi
 }
 trap '_cleanup' ERR EXIT
@@ -103,17 +122,67 @@ elif command -v nvidia-smi &>/dev/null; then
 fi
 
 if [ "$ACCEL" = "cpu" ]; then
-    # Check for ROCm runtime — more reliable than lspci (which also matches iGPUs)
-    if command -v rocm-smi &>/dev/null && rocm-smi --showproductname &>/dev/null 2>&1; then
+    # D.3: Require BOTH rocm-smi (runtime) AND hipcc (compiler) for a valid ROCm toolchain.
+    # lspci alone is too loose — it matches iGPUs that don't support ROCm compute.
+    _rocm_smi_ok=false
+    _hipcc_ok=false
+    command -v rocm-smi &>/dev/null && rocm-smi --showproductname &>/dev/null 2>&1 && _rocm_smi_ok=true
+    command -v hipcc &>/dev/null && _hipcc_ok=true
+
+    if [ "$_rocm_smi_ok" = "true" ] && [ "$_hipcc_ok" = "true" ]; then
         ACCEL="rocm"
-        ok "AMD GPU detected (rocm-smi) → ROCm"
-    elif [ -d /opt/rocm ] && lspci 2>/dev/null | grep -qi 'VGA.*AMD\|3D.*AMD\|Display.*AMD'; then
-        ACCEL="rocm"
-        ok "AMD GPU detected (/opt/rocm + lspci) → ROCm"
+        ok "AMD GPU detected (rocm-smi + hipcc) → ROCm"
+    elif [ "$_rocm_smi_ok" = "true" ] && [ "$_hipcc_ok" = "false" ]; then
+        warn "rocm-smi found but hipcc is missing — ROCm toolchain incomplete; falling back to CPU mode"
+        warn "Install ROCm dev tools: sudo pacman -S rocm-hip-sdk  OR  apt install rocm-dev"
+    elif [ "$_rocm_smi_ok" = "false" ] && [ "$_hipcc_ok" = "true" ]; then
+        warn "hipcc found but rocm-smi is missing — cannot verify AMD GPU; falling back to CPU mode"
     fi
 fi
 
 [ "$ACCEL" = "cpu" ] && info "No GPU detected → CPU-only mode"
+
+# ─── D.4: Binary validation function ─────────────────────────────────────
+validate_binary() {
+    local bin_path="$1"
+    local fallback_trigger="${2:-false}"  # if "true", sets LLAMA_NEEDS_COMPILE=true on failure
+
+    if [ ! -f "$bin_path" ]; then
+        warn "Binary not found: $bin_path"
+        [ "$fallback_trigger" = "true" ] && LLAMA_NEEDS_COMPILE=true
+        return 1
+    fi
+
+    # Check ELF/Mach-O magic
+    local file_out
+    file_out=$(file "$bin_path" 2>/dev/null || true)
+    if ! echo "$file_out" | grep -qE 'ELF|Mach-O'; then
+        warn "Binary '$bin_path' does not appear to be a valid ELF/Mach-O executable (got: $file_out)"
+        [ "$fallback_trigger" = "true" ] && LLAMA_NEEDS_COMPILE=true
+        return 1
+    fi
+
+    # Run with --version (5s timeout)
+    local ver_out
+    if command -v timeout &>/dev/null; then
+        ver_out=$(timeout 5s "$bin_path" --version 2>&1 || true)
+    else
+        ver_out=$("$bin_path" --version 2>&1 &
+            _vpid=$!
+            sleep 5 && kill "$_vpid" 2>/dev/null &
+            wait "$_vpid" 2>/dev/null || true)
+    fi
+
+    if echo "$ver_out" | grep -qiE 'version|llama|build'; then
+        ok "Binary validated: $(echo "$ver_out" | head -1)"
+        return 0
+    else
+        warn "llama-server --version returned unexpected output; binary may be corrupt"
+        warn "Output: $(echo "$ver_out" | head -3)"
+        [ "$fallback_trigger" = "true" ] && LLAMA_NEEDS_COMPILE=true
+        return 1
+    fi
+}
 
 # ─── Pick llama-server prebuilt asset ────────────────────────────────────
 header "Selecting llama-server binary"
@@ -192,7 +261,12 @@ if [ "$LLAMA_NEEDS_COMPILE" = "false" ] && [ -n "$LLAMA_ASSET_GREP" ]; then
                 -o -name "libmtmd*.so*" -o -name "*.dylib" \) \
                 -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
             chmod +x "$LLAMA_DIR/llama-server"
-            ok "llama-server installed from prebuilt"
+            # D.4: Validate binary before declaring success
+            if ! validate_binary "$LLAMA_DIR/llama-server" "true"; then
+                warn "Prebuilt binary validation failed — falling back to source build"
+            else
+                ok "llama-server installed from prebuilt"
+            fi
         fi
         rm -rf "$STAGING_DIR/llama_bin.tar.gz" "$STAGING_DIR/llama_extracted"
     fi
@@ -237,11 +311,16 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
     find "$LLAMA_SRC/build" \( -name "libggml*.so*" -o -name "libllama*.so*" -o -name "libmtmd*.so*" \) \
         -exec cp {} "$LLAMA_DIR/" \; 2>/dev/null || true
     chmod +x "$LLAMA_DIR/llama-server"
+    # D.4: Validate the freshly compiled binary
+    validate_binary "$LLAMA_DIR/llama-server" "false" \
+        || die "Source-built llama-server failed validation — check build output above"
     ok "llama-server built from source"
 fi
 
-# Verify llama-server exists
+# D.4: Final existence + validation guard
 [ -f "$LLAMA_DIR/llama-server" ] || die "llama-server binary not found after install"
+validate_binary "$LLAMA_DIR/llama-server" "false" \
+    || die "llama-server binary failed final validation check"
 
 # ─── Install chat template ─────────────────────────────────────────────────
 header "Installing Gemma 4 chat template"
@@ -332,11 +411,62 @@ if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     export PATH="$ATRI_BIN_DIR:$PATH"
 fi
 
-# ─── Lazy model fetch on first run ────────────────────────────────────────
-# Model is NOT downloaded here to keep installer fast.
-# atri service_manager downloads it on first `atri` invocation.
+# ─── Model download (D.2) ─────────────────────────────────────────────────
 FIRST_RUN_MARKER="$MODEL_DIR/.fetch_on_first_run"
-if [ ! -f "$MODEL_DIR/gemma-4-E2B-it-Q4_K_M.gguf" ]; then
+MODEL_FILE="$MODEL_DIR/gemma-4-E2B-it-Q4_K_M.gguf"
+MODEL_PART_FILE="$MODEL_FILE.part"
+
+_validate_model_checksum() {
+    local file="$1"
+    if [ "$EXPECTED_SHA256" = "__FILL_ME__" ]; then
+        warn "Model checksum not configured (EXPECTED_SHA256=__FILL_ME__) — skipping validation"
+        return 0
+    fi
+    local actual
+    if command -v sha256sum &>/dev/null; then
+        actual=$(sha256sum "$file" | awk '{print $1}')
+    elif command -v shasum &>/dev/null; then
+        actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    else
+        warn "No sha256sum/shasum found — skipping checksum validation"
+        return 0
+    fi
+    if [ "$actual" = "$EXPECTED_SHA256" ]; then
+        ok "Model SHA256 verified"
+    else
+        warn "Model checksum MISMATCH"
+        warn "  Expected: $EXPECTED_SHA256"
+        warn "  Actual:   $actual"
+        warn "The model may be corrupt. Delete it and re-run the installer to re-download."
+    fi
+}
+
+if [ "$SKIP_MODEL_FETCH" = "true" ]; then
+    info "Skipping model download (--skip-model-fetch)"
+elif [ -f "$MODEL_FILE" ]; then
+    ok "Model already present: $MODEL_FILE"
+    _validate_model_checksum "$MODEL_FILE"
+else
+    header "Downloading Gemma 4 E2B model (~3.1 GB)"
+    info "Downloading to: $MODEL_PART_FILE"
+    # Remove any leftover partial file before starting
+    [ -f "$MODEL_PART_FILE" ] && rm -f "$MODEL_PART_FILE"
+    if curl -fL --progress-bar -o "$MODEL_PART_FILE" "$ATRI_MODEL_URL"; then
+        mv "$MODEL_PART_FILE" "$MODEL_FILE"
+        MODEL_PART_FILE=""  # prevent trap cleanup of now-renamed file
+        ok "Model downloaded: $MODEL_FILE"
+        _validate_model_checksum "$MODEL_FILE"
+    else
+        warn "Model download failed — removing partial file"
+        [ -f "$MODEL_PART_FILE" ] && rm -f "$MODEL_PART_FILE"
+        MODEL_PART_FILE=""
+        echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
+        info "Model will be retried on first 'atri' run"
+    fi
+fi
+
+# Fallback: write first-run marker if model still missing
+if [ ! -f "$MODEL_FILE" ] && [ ! -f "$FIRST_RUN_MARKER" ]; then
     echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
     info "Model will be downloaded (~3.1 GB) on first 'atri' run"
 fi
