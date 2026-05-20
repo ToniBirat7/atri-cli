@@ -11,11 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Phase 5.3: Governance File Protection — per-session allowed-path whitelist ─
+_ALLOWED_WRITE_PATHS: set[str] = set()
+
+
+def add_allowed_write_path(path: str) -> None:
+    """Register a path prefix that bypasses governance protection."""
+    _ALLOWED_WRITE_PATHS.add(os.path.abspath(path))
+# ──────────────────────────────────────────────────────────────────────────────
 
 HookCallback = Callable[[Dict[str, Any]], None]
 
@@ -141,6 +151,25 @@ def register_builtin_hooks(registry: HookRegistry, permission_mode: str = "defau
         )
         if not path:
             return tool_input
+
+        # Phase 5.3: skip blocking if path is within an allowed-path prefix
+        abs_path = os.path.abspath(str(path))
+        for allowed in _ALLOWED_WRITE_PATHS:
+            if abs_path.startswith(allowed):
+                return tool_input
+
+        # Phase 5.3: warn-only patterns — log but do not block
+        WARN_PATTERNS = [
+            r"(^|[\\/])\.gitignore$",
+            r"\.lock$",
+            r"(^|[\\/])Makefile$",
+        ]
+        for pat in WARN_PATTERNS:
+            if re.search(pat, str(path)):
+                logger.warning(
+                    "Hook warning: write to semi-sensitive path: %s (tool: %s)", path, tool_name
+                )
+                return tool_input
 
         BLOCKED_PATTERNS = [
             r"(^|[\\/])\.git[\\/]",

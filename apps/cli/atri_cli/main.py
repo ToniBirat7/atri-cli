@@ -114,7 +114,7 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/help": "Show interactive command help",
     "/mode": "Show or set permission mode",
     "/compact": "Toggle compact output mode",
-    "/model": "Show model and hardware info",
+    "/model": "List available models or set active model (/model <name>)",
     "/cost": "Show session token usage",
     "/clear": "Clear terminal screen",
     "/timeline": "Show or set timeline verbosity",
@@ -123,7 +123,7 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/plan": "Enter PLAN mode (read-only exploration, no writes)",
     "/implement": "Exit PLAN mode and resume normal execution",
     "/mcp": "Show MCP server status and connected tools",
-    "/skills": "List loaded skills (Phase 5 placeholder)",
+    "/skills": "List loaded skills from ~/.atri/skills/ and .atri/skills/",
     "/exit": "Exit interactive mode",
     "/quit": "Exit interactive mode",
 }
@@ -188,7 +188,8 @@ def _interactive_help_text() -> str:
         "  /mode               Show current permission mode\n"
         "  /mode <name>        Set permission mode\n"
         "  /compact            Toggle compact output mode\n"
-        "  /model              Show model and hardware info\n"
+        "  /model              List available models + hardware info\n"
+        "  /model <name>       Set active model override for next message\n"
         "  /cost               Show session token usage\n"
         "  /clear              Clear terminal screen\n"
         "  /timeline           Show timeline verbosity\n"
@@ -532,6 +533,7 @@ def _build_payload(
     conversation_id: Optional[str],
     allowed_directory: Optional[str],
     plan_mode: bool = False,
+    model_override: Optional[str] = None,
 ) -> dict:
     payload = {"message": message}
     if conversation_id:
@@ -540,6 +542,8 @@ def _build_payload(
         payload["allowed_directory"] = allowed_directory
     if plan_mode:
         payload["plan_mode"] = True
+    if model_override:
+        payload["model_override"] = model_override
     return payload
 
 
@@ -618,13 +622,41 @@ def _handle_interactive_local_command(
         _RICH.render_info(f"Compact mode {'enabled' if is_compact else 'disabled'}")
         return True
 
-    if user_input == "/model":
+    if user_input == "/model" or user_input.startswith("/model "):
+        parts = user_input.split(None, 1)
+        model_arg = parts[1].strip() if len(parts) > 1 else None
+
+        if model_arg:
+            # /model <name> — store the override for the next request
+            # We stash it on the client object as a lightweight session attribute
+            try:
+                client._model_override = model_arg  # type: ignore[attr-defined]
+                _RICH.render_success(f"Model override set to '{model_arg}'. Takes effect on next message.")
+            except Exception:
+                _RICH.render_warning("Could not set model override.")
+            return True
+
+        # /model with no args — list models from orchestrator and show hardware info
+        if client is not None:
+            try:
+                resp = client.request_json("GET", "/models")
+                models = resp.get("models", [])
+                if models:
+                    _RICH.render_info(f"Available models ({len(models)}):")
+                    for m in models:
+                        active_marker = " [active]" if m.get("is_active") else ""
+                        default_marker = " [default]" if m.get("is_default") else ""
+                        print(f"  • {m['name']}{active_marker}{default_marker}  ({m.get('size_mb', '?')} MB)")
+                else:
+                    _RICH.render_warning("No models discovered. Place .gguf files in the models/ directory.")
+            except Exception:
+                pass
+
         info = {
             "Model": "Gemma 4 E2B Instruct (Q4_K_M)",
             "Runtime": "llama.cpp",
             "Reasoning": "enabled",
         }
-        # Try to load hardware config
         try:
             repo_root = Path(__file__).resolve().parents[3]
             config_path = repo_root / "runtime" / "llm" / "launch_config.json"
@@ -769,10 +801,31 @@ def _handle_interactive_local_command(
         return True
 
     if user_input == "/skills":
-        _RICH.render_info(
-            "No skills loaded. Place SKILL.md files in ~/.atri/skills/ to add skills. "
-            "(Skills support is planned for Phase 5.)"
-        )
+        try:
+            import importlib.util as _ilu
+            _sl_candidates = [
+                Path(__file__).parent.parent.parent / "services" / "orchestrator" / "skills_loader.py",
+            ]
+            _sl_mod = None
+            for _p in _sl_candidates:
+                if _p.exists():
+                    _spec = _ilu.spec_from_file_location("skills_loader", str(_p))
+                    if _spec and _spec.loader:
+                        _sl_mod = _ilu.module_from_spec(_spec)
+                        _spec.loader.exec_module(_sl_mod)
+                        break
+            if _sl_mod:
+                skills = _sl_mod.discover_skills()
+                if skills:
+                    _RICH.render_info(f"{len(skills)} skill(s) found:")
+                    for s in skills.values():
+                        print(f"    * {s.name}: {s.description}")
+                else:
+                    _RICH.render_info("No skills found. Place SKILL.md files in ~/.atri/skills/<name>/")
+            else:
+                _RICH.render_warning("Skills loader not available.")
+        except Exception as _e:
+            _RICH.render_warning(f"Error loading skills: {_e}")
         return True
 
     if user_input.startswith("/"):
@@ -1239,7 +1292,17 @@ def _run_interactive(
 
         turn_number += 1
         turn_start = time.time()
-        payload = _build_payload(user_input, active_conversation_id, allowed_directory, plan_mode=plan_mode_ref[0])
+        _pending_model_override = getattr(client, "_model_override", None)
+        payload = _build_payload(
+            user_input,
+            active_conversation_id,
+            allowed_directory,
+            plan_mode=plan_mode_ref[0],
+            model_override=_pending_model_override,
+        )
+        # Clear model override after injecting into payload (one-shot)
+        if _pending_model_override:
+            client._model_override = None  # type: ignore[attr-defined]
         input_tokens = _estimate_tokens(user_input)
         output_chars = 0
         tool_calls = 0
@@ -1951,6 +2014,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional filesystem scope root",
     )
     parser.add_argument(
+        "--allowed-dir",
+        action="append",
+        default=[],
+        dest="allowed_dirs",
+        help="Register a path prefix that bypasses governance file protection (repeatable)",
+    )
+    parser.add_argument(
         "--permission-mode",
         default=_env_first("ATRI_PERMISSION_MODE", "TARBAR_PERMISSION_MODE", default="default"),
         choices=sorted(PERMISSION_MODES),
@@ -2109,6 +2179,22 @@ def main() -> None:
     # Resolve allowed_directory to absolute path if provided
     if args.allowed_directory:
         args.allowed_directory = os.path.abspath(os.path.expanduser(args.allowed_directory))
+
+    # Phase 5.3: register --allowed-dir paths with governance hook whitelist
+    if getattr(args, "allowed_dirs", None):
+        try:
+            try:
+                from services.orchestrator.hooks import add_allowed_write_path
+            except ImportError:
+                import sys as _sys
+                _orch_path = str(Path(__file__).resolve().parents[3] / "services" / "orchestrator")
+                if _orch_path not in _sys.path:
+                    _sys.path.insert(0, _orch_path)
+                from hooks import add_allowed_write_path
+            for _adir in args.allowed_dirs:
+                add_allowed_write_path(os.path.abspath(os.path.expanduser(_adir)))
+        except Exception:
+            pass
 
     client = OrchestratorClient(base_url=args.api_url, api_key=args.api_key)
     permission_state = PermissionState(

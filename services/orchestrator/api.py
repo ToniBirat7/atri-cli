@@ -46,6 +46,7 @@ try:
         stream_event_session_started,
     )
     from .hooks import HookManager
+    from .model_router import ModelRouter
 except ImportError:
     # Fallback for `uvicorn api:app` when running from services/orchestrator.
     from config import OrchestratorConfig
@@ -70,6 +71,12 @@ except ImportError:
         stream_event_session_started,
     )
     from hooks import HookManager
+    from model_router import ModelRouter
+
+try:
+    from .memory_service import maybe_mine_session
+except ImportError:
+    from memory_service import maybe_mine_session
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +125,7 @@ class ChatRequest(BaseModel):
     )
     permission_mode: str = Field("default", description="Permission mode for the agent session")
     plan_mode: bool = Field(False, description="When True, restrict to read-only tools and use plan-mode profile")
+    model_override: Optional[str] = Field(None, description="Override the active model by name (Phase 5.2)")
 
 
 class ChatResponse(BaseModel):
@@ -332,6 +340,7 @@ conversation_store: Optional[OrchestratorDatabase] = None
 request_authenticator: Optional[RequestAuthenticator] = None
 rate_limiter: Optional[DistributedRateLimiter] = None
 hook_manager = HookManager(enabled=True)
+model_router: Optional[ModelRouter] = None
 service_started_at = time.monotonic()
 chat_requests_total = 0
 chat_requests_succeeded = 0
@@ -621,6 +630,7 @@ async def _run_agent_request(
 
     original_max_turns = agent_loop.max_turns
     original_permission_mode = agent_loop.permission_mode
+    _model_override_applied = False
     try:
         _log_event(
             "chat.request.received",
@@ -632,8 +642,14 @@ async def _run_agent_request(
 
         if request.max_turns:
             agent_loop.max_turns = request.max_turns
-        
+
         agent_loop.permission_mode = request.permission_mode
+
+        # Phase 5.2: apply model override if requested
+        if request.model_override and model_router is not None:
+            _model_override_applied = model_router.set_override(request.model_override)
+            if not _model_override_applied:
+                logger.warning("ModelRouter: unknown model override '%s' — ignored", request.model_override)
 
         prior_messages: list[dict[str, str]] = []
         if conversation_store is not None and request.conversation_id:
@@ -762,6 +778,19 @@ async def _run_agent_request(
             # TODO: surface via metrics/logging if tree writes fail repeatedly
             logger.warning(json.dumps({"event": "session_tree.write_failed", "error": str(_tree_exc)}, ensure_ascii=True))
 
+        # Phase 5.4: Auto memory mining — fire-and-forget after long sessions
+        try:
+            _all_messages: list[dict] = list(prior_messages) + [
+                {"role": "user", "content": request.message},
+                {"role": "assistant", "content": response},
+            ]
+            if len(_all_messages) > 20 and llm_adapter is not None:
+                asyncio.create_task(
+                    maybe_mine_session(_all_messages, llm_adapter, session_id=conversation_id)
+                )
+        except Exception:
+            pass  # never let mining break the response
+
         _log_event(
             "chat.request.completed",
             conversation_id=conversation_id,
@@ -809,12 +838,15 @@ async def _run_agent_request(
     finally:
         agent_loop.max_turns = original_max_turns
         agent_loop.permission_mode = original_permission_mode
+        # Phase 5.2: clear model override after request completes
+        if _model_override_applied and model_router is not None:
+            model_router.clear_override()
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize orchestrator on server startup."""
-    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter, hook_manager
+    global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter, hook_manager, model_router
     
     _log_event("orchestrator.startup.begin")
     
@@ -864,7 +896,18 @@ async def startup():
         config=config,
     )
     agent_loop.stream_responses = config.agent_loop.stream_responses
-    
+
+    # Phase 5.2: instantiate ModelRouter for multi-model support
+    _model_dirs = []
+    _repo_root = Path(__file__).resolve().parents[2]
+    _models_dir = _repo_root / "models"
+    if _models_dir.exists():
+        _model_dirs.append(str(_models_dir))
+    model_router = ModelRouter(
+        model_dirs=_model_dirs or None,
+        default_model=config.llm.model,
+    )
+
     # Initialize MCP servers (single default or configured multi-server set).
     mcp_init_errors: List[Dict[str, str]] = []
     try:
@@ -1186,6 +1229,17 @@ async def list_tools(http_request: Request) -> ToolsResponse:
         ],
         total=len(tools),
     )
+
+
+@app.get("/models")
+async def list_models(http_request: Request) -> dict:
+    """List available GGUF models discovered by ModelRouter (Phase 5.2)."""
+    await _enforce_rate_limit(http_request)
+    _authenticate_request(http_request)
+    if model_router is None:
+        return {"models": [], "total": 0}
+    models = model_router.list_models()
+    return {"models": models, "total": len(models)}
 
 
 @app.post("/tools/refresh", response_model=ToolRefreshResponse)
