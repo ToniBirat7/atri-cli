@@ -41,15 +41,8 @@ ENV/
 # Jupyter
 .ipynb_checkpoints/
 
-# llama.cpp build outputs (keep source tracked)
-runtime/llm/llama.cpp/build/
-runtime/llm/llama.cpp/bin/
-runtime/llm/llama.cpp/CMakeCache.txt
-runtime/llm/llama.cpp/CMakeFiles/
-runtime/llm/llama.cpp/cmake_install.cmake
-runtime/llm/llama.cpp/CTestTestfile.cmake
-runtime/llm/llama.cpp/compile_commands.json
-runtime/llm/llama.cpp/models/*.gguf.out
+# llama.cpp — cloned + built by install.sh on user's machine, never committed
+runtime/llm/llama.cpp/
 
 # Models and large binary assets
 *.gguf
