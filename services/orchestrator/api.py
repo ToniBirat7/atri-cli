@@ -89,6 +89,20 @@ def _log_event(event: str, **fields: Any) -> None:
     logger.info(json.dumps(payload, ensure_ascii=True))
 
 
+PLAN_MODE_ALLOWED_TOOLS: set[str] = {
+    "read_text_file",
+    "read_file",
+    "grep_codebase",
+    "list_directory",
+    "directory_tree",
+    "search_web",
+    "fetch_url",
+    "get_file_info",
+    "search_symbols",
+    "get_repo_map",
+}
+
+
 class ChatRequest(BaseModel):
     """Request to execute agent loop."""
     message: str = Field(..., description="User message")
@@ -103,6 +117,7 @@ class ChatRequest(BaseModel):
         description="Prompt profile to use for this request; requires admin authentication",
     )
     permission_mode: str = Field("default", description="Permission mode for the agent session")
+    plan_mode: bool = Field(False, description="When True, restrict to read-only tools and use plan-mode profile")
 
 
 class ChatResponse(BaseModel):
@@ -411,11 +426,15 @@ def _build_request_system_prompt(request: ChatRequest, is_admin: bool) -> tuple[
     if config is None:
         raise HTTPException(status_code=500, detail="Orchestrator not initialized")
 
-    selected_profile = config.prompt_policy.default_profile
-    if request.prompt_profile:
-        if not is_admin:
-            raise HTTPException(status_code=403, detail="Prompt profile override requires admin authentication")
-        selected_profile = request.prompt_profile
+    # plan_mode overrides everything — force the plan-mode profile
+    if request.plan_mode:
+        selected_profile = "plan-mode"
+    else:
+        selected_profile = config.prompt_policy.default_profile
+        if request.prompt_profile:
+            if not is_admin:
+                raise HTTPException(status_code=403, detail="Prompt profile override requires admin authentication")
+            selected_profile = request.prompt_profile
 
     try:
         normalized_profile = normalize_prompt_profile(selected_profile)
@@ -534,6 +553,48 @@ def _enforce_runtime_ready_for_chat() -> None:
         raise HTTPException(status_code=503, detail=_build_not_ready_detail(issues))
 
 
+class _PlanModeToolRegistryProxy:
+    """Thin proxy around ToolRegistry that filters out non-read-only tools in plan mode."""
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+
+    def _is_allowed(self, tool_name: str) -> bool:
+        # Strip server prefix if present (e.g. "local-mcp.edit_file" → "edit_file")
+        bare = tool_name.split(".")[-1] if "." in tool_name else tool_name
+        return bare in PLAN_MODE_ALLOWED_TOOLS
+
+    def list_all_tools(self):
+        return [t for t in self._registry.list_all_tools() if self._is_allowed(getattr(t, "name", ""))]
+
+    def get_tool(self, name: str):
+        if not self._is_allowed(name):
+            return None
+        return self._registry.get_tool(name)
+
+    def to_openai_format(self):
+        all_tools = self._registry.to_openai_format() if hasattr(self._registry, "to_openai_format") else []
+        return [
+            t for t in all_tools
+            if self._is_allowed((t.get("function") or t).get("name", ""))
+        ]
+
+    def resolve_tool_call(self, tool_name: str):
+        if not self._is_allowed(tool_name):
+            raise ValueError(f"Tool '{tool_name}' is not available in plan mode")
+        return self._registry.resolve_tool_call(tool_name)
+
+    def register_tools_from_mcp_discovery(self, *args, **kwargs):
+        return self._registry.register_tools_from_mcp_discovery(*args, **kwargs)
+
+    def clear(self):
+        return self._registry.clear()
+
+    def __getattr__(self, name: str):
+        # Delegate any unrecognised attribute to the underlying registry
+        return getattr(self._registry, name)
+
+
 async def _run_agent_request(
     request: ChatRequest,
     request_id: str,
@@ -623,12 +684,18 @@ async def _run_agent_request(
         else:
             allowed_directory_requests_with_default += 1
 
+        # In plan_mode, wrap the registry with a read-only view so the agent loop
+        # only sees allowed tools. We use a lightweight proxy rather than mutating state.
+        active_tool_registry = tool_registry
+        if request.plan_mode:
+            active_tool_registry = _PlanModeToolRegistryProxy(tool_registry)
+
         try:
             response, state = await agent_loop.run(
                 user_message=request.message,
                 llm_adapter=llm_adapter,
                 mcp_orchestrator=mcp_orchestrator,
-                tool_registry=tool_registry,
+                tool_registry=active_tool_registry,
                 system_prompt=system_prompt,
                 prior_messages=prior_messages,
                 event_callback=event_callback,
@@ -639,7 +706,7 @@ async def _run_agent_request(
                 user_message=request.message,
                 llm_adapter=llm_adapter,
                 mcp_orchestrator=mcp_orchestrator,
-                tool_registry=tool_registry,
+                tool_registry=active_tool_registry,
                 system_prompt=system_prompt,
             )
 
