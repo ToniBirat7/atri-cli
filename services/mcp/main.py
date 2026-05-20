@@ -26,6 +26,8 @@ Built using the FastMCP framework for high-performance tool dispatch.
 """
 
 import os
+import pty
+import select
 import shutil
 import sys
 import threading
@@ -899,6 +901,176 @@ _BLOCKED_COMMAND_PATTERNS = [
 ]
 
 _MAX_OUTPUT_CHARS = 50_000
+_MAX_OUTPUT_LINES = 10_000
+
+
+def _run_subprocess_fallback(cmd: str, timeout: int = 30, env=None, cwd=None) -> dict:
+    """Fallback for systems without PTY support (e.g. Windows)."""
+    import subprocess
+    import time
+
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+        )
+        elapsed = time.monotonic() - t0
+        output = result.stdout + (("\n" + result.stderr) if result.stderr else "")
+        lines = output.splitlines()
+        truncated = len(lines) > _MAX_OUTPUT_LINES
+        if truncated:
+            omitted = len(lines) - _MAX_OUTPUT_LINES
+            lines = lines[:_MAX_OUTPUT_LINES]
+            lines.append(f"[... {omitted} lines truncated ...]")
+        return {
+            "stdout": "\n".join(lines),
+            "exit_code": result.returncode,
+            "signal": None,
+            "pid": None,
+            "truncated": truncated,
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - t0
+        return {
+            "stdout": "",
+            "exit_code": None,
+            "signal": None,
+            "pid": None,
+            "truncated": False,
+            "error": f"timeout after {timeout}s",
+            "elapsed_seconds": round(elapsed, 2),
+        }
+
+
+def _run_with_pty(cmd: str, timeout: int = 30, env=None, cwd=None) -> dict:
+    """Run cmd in a PTY. Returns dict with stdout, exit_code, pid, signal, elapsed_seconds."""
+    import subprocess
+    import time
+
+    try:
+        master_fd, slave_fd = pty.openpty()
+    except (OSError, AttributeError):
+        # PTY not available (Windows or restricted environment)
+        return _run_subprocess_fallback(cmd, timeout, env, cwd)
+
+    output_chunks: list[bytes] = []
+    line_count = 0
+    truncated = False
+    t0 = time.monotonic()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            env=env,
+            cwd=cwd,
+        )
+        os.close(slave_fd)  # close slave in parent after forking
+
+        deadline = t0 + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                break
+            try:
+                rlist, _, _ = select.select([master_fd], [], [], min(remaining, 0.1))
+            except (ValueError, OSError):
+                break
+            if rlist:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                    if not chunk:
+                        break
+                    new_lines = chunk.count(b"\n")
+                    if not truncated:
+                        output_chunks.append(chunk)
+                        line_count += new_lines
+                        if line_count > _MAX_OUTPUT_LINES:
+                            truncated = True
+                except OSError:
+                    break
+
+            if proc.poll() is not None:
+                # Drain any remaining output
+                try:
+                    while True:
+                        rlist2, _, _ = select.select([master_fd], [], [], 0.05)
+                        if not rlist2:
+                            break
+                        chunk = os.read(master_fd, 4096)
+                        if not chunk:
+                            break
+                        if not truncated:
+                            output_chunks.append(chunk)
+                            line_count += chunk.count(b"\n")
+                            if line_count > _MAX_OUTPUT_LINES:
+                                truncated = True
+                except OSError:
+                    pass
+                break
+
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+        elapsed = time.monotonic() - t0
+        exit_code = proc.returncode
+        signal_num = None
+        if exit_code is not None and exit_code < 0:
+            signal_num = -exit_code
+            exit_code = None
+
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+    raw = b"".join(output_chunks)
+
+    # Binary detection: if output is not valid UTF-8, report as binary
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return {
+            "type": "binary_output",
+            "size_bytes": len(raw),
+            "pid": proc.pid,
+            "exit_code": exit_code,
+            "signal": signal_num,
+            "message": f"binary output, {len(raw)} bytes",
+            "elapsed_seconds": round(elapsed, 2),
+        }
+
+    lines = text.splitlines()
+    if len(lines) > _MAX_OUTPUT_LINES:
+        omitted = len(lines) - _MAX_OUTPUT_LINES
+        lines = lines[:_MAX_OUTPUT_LINES]
+        lines.append(f"[... {omitted} lines truncated ...]")
+        truncated = True
+
+    return {
+        "stdout": "\n".join(lines),
+        "exit_code": exit_code,
+        "signal": signal_num,
+        "pid": proc.pid,
+        "truncated": truncated,
+        "elapsed_seconds": round(elapsed, 2),
+    }
 
 
 @mcp.tool
@@ -910,15 +1082,18 @@ def bash_exec(
     """
     Execute a shell command and return its output.
 
-    - Output is capped at 50 000 characters (stdout + stderr combined).
+    - Output is capped at 10 000 lines (PTY scrollback limit); excess lines are
+      replaced with a truncation notice.
     - Timeout default is 30 s; max is 120 s.
     - A small set of obviously destructive commands is unconditionally blocked.
     - The working directory defaults to the first allowed directory (or repo root).
+    - Uses a PTY on Linux/macOS for realistic terminal output; falls back to
+      subprocess.PIPE on systems where PTY is unavailable.
 
     Use for: running tests, git commands, build scripts, inspecting processes.
     Do NOT use for: interactive programs, long-running daemons (use & to background).
     """
-    import subprocess
+    import time
 
     # Safety: block obviously destructive patterns
     for pattern in _BLOCKED_COMMAND_PATTERNS:
@@ -935,43 +1110,46 @@ def bash_exec(
 
     timeout = min(int(timeout_seconds), 120)
 
-    import time
     t0 = time.monotonic()
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(work_dir),
-            capture_output=True,
-            text=True,
+        result = _run_with_pty(
+            cmd=command,
             timeout=timeout,
             env={**os.environ},
+            cwd=str(work_dir),
         )
-        elapsed = time.monotonic() - t0
-        combined = result.stdout + result.stderr
-        total_bytes = len(combined.encode("utf-8", errors="replace"))
-        truncated = total_bytes > _MAX_OUTPUT_CHARS
-        if truncated:
-            head = combined[:_MAX_OUTPUT_CHARS // 2]
-            tail = combined[-(min(_MAX_OUTPUT_CHARS // 10, 5000)):]
-            combined = (
-                head
-                + f"\n\n[...{total_bytes - len(head.encode()) - len(tail.encode())} bytes omitted...]\n\n"
-                + tail
-            )
-        header = f"[exit:{result.returncode} | elapsed:{elapsed:.1f}s | {total_bytes} bytes]\n"
-        return {
-            "ok": result.returncode == 0,
-            "exit_code": result.returncode,
-            "output": header + combined,
-            "truncated": truncated,
-            "elapsed_seconds": round(elapsed, 2),
-        }
-    except subprocess.TimeoutExpired:
-        elapsed = time.monotonic() - t0
-        return {"ok": False, "error": f"Command timed out after {timeout}s (elapsed: {elapsed:.1f}s)"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+    if "error" in result:
+        return {"ok": False, "error": result["error"]}
+
+    # Binary output path
+    if result.get("type") == "binary_output":
+        return {
+            "ok": False,
+            "error": result["message"],
+            "pid": result.get("pid"),
+            "exit_code": result.get("exit_code"),
+            "signal": result.get("signal"),
+            "elapsed_seconds": result.get("elapsed_seconds"),
+        }
+
+    exit_code = result.get("exit_code")
+    stdout = result.get("stdout", "")
+    elapsed = result.get("elapsed_seconds", round(time.monotonic() - t0, 2))
+    total_bytes = len(stdout.encode("utf-8", errors="replace"))
+    header = f"[exit:{exit_code} | elapsed:{elapsed:.1f}s | pid:{result.get('pid')} | {total_bytes} bytes]\n"
+
+    return {
+        "ok": exit_code == 0,
+        "exit_code": exit_code,
+        "signal": result.get("signal"),
+        "pid": result.get("pid"),
+        "output": header + stdout,
+        "truncated": result.get("truncated", False),
+        "elapsed_seconds": elapsed,
+    }
 
 
 # ─── Grep / codebase search ───────────────────────────────────────────────────

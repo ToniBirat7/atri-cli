@@ -29,6 +29,8 @@ from .telemetry import SessionTelemetry
 from .tui import DashboardFrame, TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
 from .rich_tui import RichTUI
 from .service_manager import ServiceManager
+from .renderer import DifferentialRenderer
+from .diff_renderer import render_diff_for_tool_result
 
 try:
     from prompt_toolkit import PromptSession
@@ -118,6 +120,10 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/timeline": "Show or set timeline verbosity",
     "/tree": "Print the session conversation tree",
     "/fork": "Fork the current session from the latest entry",
+    "/plan": "Enter PLAN mode (read-only exploration, no writes)",
+    "/implement": "Exit PLAN mode and resume normal execution",
+    "/mcp": "Show MCP server status and connected tools",
+    "/skills": "List loaded skills (Phase 5 placeholder)",
     "/exit": "Exit interactive mode",
     "/quit": "Exit interactive mode",
 }
@@ -359,9 +365,14 @@ def _build_prompt_toolkit_session() -> Optional[Any]:
     )
 
 
-def _prompt_toolkit_bottom_toolbar(permission_state: PermissionState, text: str) -> AnyFormattedText:
+def _prompt_toolkit_bottom_toolbar(
+    permission_state: PermissionState,
+    text: str,
+    plan_mode: bool = False,
+) -> AnyFormattedText:
     hint = _slash_hint_for_input(text)
-    left = f" mode={permission_state.mode} "
+    plan_badge = " [PLAN] " if plan_mode else ""
+    left = f" mode={permission_state.mode}{plan_badge}"
     if hint:
         return [
             ("class:toolbar", left),
@@ -374,19 +385,24 @@ def _prompt_toolkit_bottom_toolbar(permission_state: PermissionState, text: str)
 def _read_interactive_input(
     session: Optional[Any],
     permission_state: PermissionState,
+    plan_mode: bool = False,
 ) -> Optional[str]:
+    plan_badge = "[PLAN] " if plan_mode else ""
     if session is None:
         try:
-            return input(f"\n{_style(f'atri-cli[{permission_state.mode}]> ', color='cyan', bold=True)}").strip()
+            return input(
+                f"\n{_style(f'atri-cli[{permission_state.mode}] {plan_badge}> ', color='cyan', bold=True)}"
+            ).strip()
         except (KeyboardInterrupt, EOFError):
             return None
 
     try:
         user_input = session.prompt(
-            f"atri-cli[{permission_state.mode}]> ",
+            f"atri-cli[{permission_state.mode}] {plan_badge}> ",
             bottom_toolbar=lambda: _prompt_toolkit_bottom_toolbar(
                 permission_state,
                 session.default_buffer.document.text,
+                plan_mode=plan_mode,
             ),
             style=_PTK_STYLE,
         )
@@ -515,12 +531,15 @@ def _build_payload(
     message: str,
     conversation_id: Optional[str],
     allowed_directory: Optional[str],
+    plan_mode: bool = False,
 ) -> dict:
     payload = {"message": message}
     if conversation_id:
         payload["conversation_id"] = conversation_id
     if allowed_directory:
         payload["allowed_directory"] = allowed_directory
+    if plan_mode:
+        payload["plan_mode"] = True
     return payload
 
 
@@ -568,6 +587,8 @@ def _handle_interactive_local_command(
     user_input: str,
     permission_state: PermissionState,
     conversation_id: Optional[str] = None,
+    plan_mode_ref: Optional[list] = None,  # mutable single-element list [bool] for plan_mode state
+    client: Optional[Any] = None,
 ) -> bool:
     if user_input in {"/help", "/?"}:
         help_text = _interactive_help_text()
@@ -699,6 +720,59 @@ def _handle_interactive_local_command(
             _print_info(f"Resume with: atri resume {new_session_id}")
         except Exception as _exc:
             _RICH.render_warning(f"Fork failed: {_exc}")
+        return True
+
+    if user_input == "/plan":
+        if plan_mode_ref is not None:
+            plan_mode_ref[0] = True
+        _RICH.render_success("PLAN MODE enabled. The agent will explore and plan — no writes will be executed.")
+        _RICH.render_info("Use /implement to exit PLAN MODE and resume normal execution.")
+        return True
+
+    if user_input == "/implement":
+        if plan_mode_ref is not None:
+            plan_mode_ref[0] = False
+        _RICH.render_success("PLAN MODE disabled. Normal execution resumed.")
+        return True
+
+    if user_input == "/mcp":
+        if client is not None:
+            try:
+                response = client.request_json("GET", "/health")
+                mcp_servers = response.get("mcp_servers", {})
+                ready = response.get("ready", False)
+                status_label = "connected" if ready else "degraded"
+                _RICH.render_info(f"MCP status: {status_label}")
+                if mcp_servers:
+                    for srv, srv_info in mcp_servers.items():
+                        srv_status = srv_info.get("status", "unknown") if isinstance(srv_info, dict) else str(srv_info)
+                        print(f"  {srv}: {srv_status}")
+                else:
+                    _RICH.render_warning("No MCP servers reported.")
+                # Also list tools if available
+                try:
+                    tools_resp = client.request_json("GET", "/tools")
+                    tools = tools_resp.get("tools", [])
+                    if tools:
+                        _RICH.render_info(f"Available tools ({len(tools)}):")
+                        for t in tools[:20]:
+                            print(f"  • {t['name']} [{t.get('server', '?')}]")
+                        if len(tools) > 20:
+                            print(f"  ... and {len(tools) - 20} more")
+                except Exception:
+                    pass
+            except Exception as exc:
+                _RICH.render_warning(f"Could not reach orchestrator: {exc}")
+        else:
+            _RICH.render_info("MCP server: local-mcp (filesystem, search, diff)")
+            _RICH.render_info("Run 'atri mcp status' for full details.")
+        return True
+
+    if user_input == "/skills":
+        _RICH.render_info(
+            "No skills loaded. Place SKILL.md files in ~/.atri/skills/ to add skills. "
+            "(Skills support is planned for Phase 5.)"
+        )
         return True
 
     if user_input.startswith("/"):
@@ -1088,6 +1162,12 @@ def _run_interactive(
     conversation_log: list[str] = []
     tool_log: list[str] = []
     current_status: Optional[TurnStatus] = None
+    # Phase 3.2: PLAN mode state — mutable ref so slash command handler can toggle it
+    plan_mode_ref: list[bool] = [False]
+    # Phase 3.4: Diff viewer — cache file content read before an edit tool fires
+    _pending_edit_tool: Optional[str] = None  # tool_name during edit
+    _pending_edit_input: Optional[dict] = None  # tool_input during edit
+    _pending_before_content: Optional[str] = None  # file content before edit
 
     if fullscreen_mode:
         _render_interactive_dashboard(
@@ -1125,7 +1205,7 @@ def _run_interactive(
                 note="waiting for input",
                 reduced_motion=reduced_motion,
             )
-        user_input = _read_interactive_input(prompt_session, permission_state)
+        user_input = _read_interactive_input(prompt_session, permission_state, plan_mode=plan_mode_ref[0])
         if user_input is None:
             print("\nExiting.")
             return
@@ -1138,7 +1218,13 @@ def _run_interactive(
         if user_input in {"/exit", "/quit"}:
             _print_success("Goodbye.")
             return
-        if _handle_interactive_local_command(user_input, permission_state, conversation_id=active_conversation_id):
+        if _handle_interactive_local_command(
+            user_input,
+            permission_state,
+            conversation_id=active_conversation_id,
+            plan_mode_ref=plan_mode_ref,
+            client=client,
+        ):
             if fullscreen_mode:
                 _render_interactive_dashboard(
                     conversation_id=active_conversation_id,
@@ -1153,7 +1239,7 @@ def _run_interactive(
 
         turn_number += 1
         turn_start = time.time()
-        payload = _build_payload(user_input, active_conversation_id, allowed_directory)
+        payload = _build_payload(user_input, active_conversation_id, allowed_directory, plan_mode=plan_mode_ref[0])
         input_tokens = _estimate_tokens(user_input)
         output_chars = 0
         tool_calls = 0
@@ -1260,6 +1346,50 @@ def _run_interactive(
                                 "tool",
                                 output_tokens_exact=exact_output_tokens if has_exact_usage else None,
                             )
+                        # Phase 3.4: Diff viewer — capture file content before edit tools execute
+                        if tool_name in ("edit_file", "edit_diff") and not fullscreen_mode:
+                            _tool_input_ev = event["event"].get("tool_input", {})
+                            _file_path_ev = _tool_input_ev.get(
+                                "target_file_path",
+                                _tool_input_ev.get("path", ""),
+                            )
+                            try:
+                                if _file_path_ev and os.path.isfile(_file_path_ev):
+                                    with open(_file_path_ev, "r", encoding="utf-8", errors="replace") as _fh:
+                                        _pending_before_content = _fh.read()
+                                    _pending_edit_tool = tool_name
+                                    _pending_edit_input = _tool_input_ev
+                                else:
+                                    _pending_before_content = None
+                                    _pending_edit_tool = None
+                                    _pending_edit_input = None
+                            except Exception:
+                                _pending_before_content = None
+                                _pending_edit_tool = None
+                                _pending_edit_input = None
+                    elif event_type == "tool_call_result":
+                        # Phase 3.4: Render inline diff after an edit tool completes
+                        if (
+                            not fullscreen_mode
+                            and _pending_edit_tool is not None
+                            and _pending_before_content is not None
+                            and _pending_edit_input is not None
+                        ):
+                            try:
+                                _diff_output = render_diff_for_tool_result(
+                                    _pending_edit_tool,
+                                    _pending_edit_input,
+                                    _pending_before_content,
+                                )
+                                if _diff_output:
+                                    print()
+                                    print(_diff_output)
+                            except Exception:
+                                pass
+                            finally:
+                                _pending_edit_tool = None
+                                _pending_edit_input = None
+                                _pending_before_content = None
                     elif event_type == "turn_complete":
                         if not content_started and not fullscreen_mode:
                             _update_live_status(

@@ -12,7 +12,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Final
 
-VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid", "agent-v3", "agent-v3-26b"}
+VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid", "agent-v3", "agent-v3-26b", "plan-mode"}
 
 _TOOL_RULES = """
 Tool-calling rules (CRITICAL):
@@ -43,7 +43,37 @@ def build_system_prompt(
     """Build a profile-specific system prompt."""
     profile = normalize_prompt_profile(profile_name)
 
-    if profile == "legal-strict":
+    if profile == "plan-mode":
+        prompt = dedent(
+            f"""
+            You are {assistant_name}, a local coding assistant operating in PLAN MODE. Today is {current_date}.
+
+            In PLAN MODE you may ONLY explore and analyze — you must NOT make any changes.
+
+            ALLOWED actions:
+            - Read files (read_text_file, read_file)
+            - Search code (grep_codebase, search_symbols)
+            - List directories (list_directory, directory_tree)
+            - Get file information (get_file_info)
+            - Search the web (search_web, fetch_url)
+
+            FORBIDDEN actions:
+            - Do NOT call write_file, edit_file, edit_diff, bash_exec, create_file, delete_file,
+              rename_file, move_file, create_directory, or any other tool that modifies state.
+            - If asked to implement or execute, refuse and explain you are in PLAN MODE.
+
+            Your job: explore the codebase, gather information, and output a structured plan.
+
+            Output format — always end your response with a numbered plan:
+            ## Plan
+            1. <Step one>
+            2. <Step two>
+            ...
+
+            Do NOT execute any step. Present the plan for user approval only.
+            """
+        ).strip()
+    elif profile == "legal-strict":
         prompt = dedent(
             f"""
             You are {assistant_name}, a legal information assistant for user-facing support.
