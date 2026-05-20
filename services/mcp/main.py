@@ -31,7 +31,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 try:
     from .search_adapter import fetch_web_content, search_web_results
@@ -513,38 +513,54 @@ def edit_file(
     exact_text_to_replace: str,
     new_text_content: str,
     dry_run: bool = False,
+    # Alias params: Gemma 4 sometimes sends these instead of the canonical names above.
+    # They are silently accepted here for resilience; prefer the canonical names.
+    old_text: Optional[str] = None,
+    new_text: Optional[str] = None,
+    path: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Replace text in a file.
-    
-    REQUIRED: 'target_file_path' is the path to the file.
-    REQUIRED: 'exact_text_to_replace' is the EXACT block of text to find.
-    REQUIRED: 'new_text_content' is the replacement text.
-    """
-    # Map to internal logic
-    path = target_file_path
-    old_text = exact_text_to_replace
-    new_text = new_text_content
 
-    if not path:
+    REQUIRED: 'target_file_path' is the path to the file.
+    REQUIRED: 'exact_text_to_replace' is the EXACT block of text to find and replace.
+              NOTE: use 'exact_text_to_replace', NOT 'old_text' or 'old_content'.
+    REQUIRED: 'new_text_content' is the replacement text.
+              NOTE: use 'new_text_content', NOT 'new_text'.
+    """
+    # Resolve field aliases produced by Gemma 4 so the tool works even when the model
+    # sends shortened names.  Canonical names take priority over aliases.
+    if not target_file_path and path:
+        target_file_path = path
+    if not exact_text_to_replace and old_text:
+        exact_text_to_replace = old_text
+    if not new_text_content and new_text:
+        new_text_content = new_text
+
+    # Map to internal logic
+    _path = target_file_path
+    _old_text = exact_text_to_replace
+    _new_text = new_text_content
+
+    if not _path:
         raise ValueError(
             "Missing required argument: 'target_file_path'. "
             "Also check: use 'exact_text_to_replace', not 'old_text' or 'old_content'."
         )
 
-    if old_text == "":
-        raise ValueError("old_text cannot be empty")
+    if _old_text == "":
+        raise ValueError("exact_text_to_replace cannot be empty")
 
-    target = _resolve_user_path(path)
+    target = _resolve_user_path(_path)
     if not target.exists() or not target.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(f"File not found: {_path}")
 
     original = _read_text(target)
-    count = original.count(old_text)
+    count = original.count(_old_text)
     if count == 0:
-        raise ValueError("old_text not found in file")
+        raise ValueError("exact_text_to_replace not found in file")
 
-    updated = original.replace(old_text, new_text)
+    updated = original.replace(_old_text, _new_text)
     delta = len(updated.encode("utf-8")) - len(original.encode("utf-8"))
 
     if dry_run:
@@ -556,7 +572,7 @@ def edit_file(
             "applied": False,
         }
 
-    write_file(target_file_path=path, content=updated, overwrite=True)
+    write_file(target_file_path=_path, content=updated, overwrite=True)
     return {
         "ok": True,
         "path": _to_relative_display(target),
