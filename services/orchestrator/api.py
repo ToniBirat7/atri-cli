@@ -759,6 +759,7 @@ async def startup():
         thinking_mode=config.agent_loop.thinking_mode,
         tool_timeout_seconds=config.mcp.tool_timeout_seconds,
         max_tool_call_retries=config.mcp.max_tool_call_retries,
+        config=config,
     )
     agent_loop.stream_responses = config.agent_loop.stream_responses
     

@@ -62,6 +62,16 @@ try:
 except ImportError:
     from logging_context import get_request_id, set_turn_id, get_turn_id
 
+try:
+    from .hooks import HookRegistry, hook_registry as _default_hook_registry, register_builtin_hooks, BLOCK as _HOOK_BLOCK
+except ImportError:
+    from hooks import HookRegistry, hook_registry as _default_hook_registry, register_builtin_hooks, BLOCK as _HOOK_BLOCK
+
+try:
+    from .compaction import should_compact, compact_messages
+except ImportError:
+    from compaction import should_compact, compact_messages
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +147,10 @@ class AgentLoop:
         permission_mode: str = "default",
         # Legacy alias kept so existing callers don't break during the transition
         enable_thinking: bool = False,
+        # Optional orchestrator config (required for temperature clamping + compaction)
+        config: Optional[Any] = None,
+        # Optional hook registry; falls back to global singleton with built-in hooks
+        hook_registry: Optional["HookRegistry"] = None,  # type: ignore[name-defined]
     ):
         self.max_turns = max_turns
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
@@ -149,7 +163,15 @@ class AgentLoop:
         self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_call_retries = max_tool_call_retries
         self.permission_mode = permission_mode
+        self.config = config
         self.state = AgentState()
+
+        # Hook registry — use provided registry or fall back to global singleton
+        if hook_registry is not None:
+            self._hook_registry = hook_registry
+        else:
+            self._hook_registry = _default_hook_registry
+            register_builtin_hooks(self._hook_registry, permission_mode=permission_mode)
 
     async def _stream_final_answer(
         self,
@@ -191,6 +213,35 @@ class AgentLoop:
             # Keep loop progress resilient even if telemetry/event sink fails.
             return
 
+    # Gemma 4 frequently produces these shortened field names instead of the canonical
+    # MCP tool field names.  We rename them before schema validation so the tool call
+    # succeeds instead of failing with an "unexpected field" error.
+    _FIELD_ALIASES: Dict[str, List[str]] = {
+        "path": ["target_path", "target_file_path", "target_directory_path", "source_path"],
+        "file": ["target_file_path"],
+        "directory": ["target_path", "target_directory_path"],
+        "dir": ["target_path", "target_directory_path"],
+        "content": ["new_text_content"],
+        "old_text": ["exact_text_to_replace"],
+        "new_text": ["new_text_content"],
+    }
+
+    def _normalize_field_aliases(self, tool_input: Dict[str, Any], properties: Dict[str, Any]) -> Dict[str, Any]:
+        """Rename aliased field names to their canonical equivalents when the canonical
+        name is absent from the input but present in the schema properties."""
+        normalized = dict(tool_input)
+        for alias, candidates in self._FIELD_ALIASES.items():
+            if alias not in normalized:
+                continue
+            if alias in properties:
+                # Canonical name matches the alias itself — no renaming needed.
+                continue
+            for canonical in candidates:
+                if canonical in properties and canonical not in normalized:
+                    normalized[canonical] = normalized.pop(alias)
+                    break
+        return normalized
+
     def _validate_tool_input(self, tool_name: str, tool_input: Any, tool_registry: "ToolRegistry") -> Dict[str, Any]:  # type: ignore
         if not isinstance(tool_input, dict):
             raise ValueError(f"Tool input must be an object for {tool_name}")
@@ -209,7 +260,12 @@ class AgentLoop:
         schema = tool.input_schema or {}
         properties = schema.get("properties", {})
         required = schema.get("required", [])
-        
+
+        # Normalize common field aliases before strict validation so that Gemma 4's
+        # shortened names (e.g. "path", "old_text") are silently mapped to the correct
+        # canonical field names defined in the MCP tool schema.
+        tool_input = self._normalize_field_aliases(tool_input, properties)
+
         # Strict validation: No unknown fields allowed
         additional_props = schema.get("additionalProperties", False)
         if not additional_props:
@@ -271,6 +327,20 @@ class AgentLoop:
 
         try:
             while self.state.turn < self.max_turns:
+                # Warn when exactly one turn remains so callers can surface the budget warning
+                # before the final turn executes (not after it has been spent).
+                if self.state.turn == self.max_turns - 1:
+                    await self._emit_event(
+                        event_callback,
+                        {
+                            "type": "budget_warning",
+                            "turn": self.state.turn,
+                            "max_turns": self.max_turns,
+                            "turns_remaining": 1,
+                            "message": f"Approaching turn limit: 1 of {self.max_turns} turns remaining.",
+                        },
+                    )
+
                 self.state.turn += 1
                 set_turn_id(self.state.turn)
                 turn = Turn(turn_number=self.state.turn, user_input=user_message)
@@ -399,6 +469,27 @@ class AgentLoop:
                                 "total_tokens": total_tokens,
                             },
                         )
+
+                        # ── Phase 1.1: Auto-compaction ────────────────────────
+                        _ctx_size = int(
+                            getattr(getattr(self.config, "llm", None), "max_tokens", 0)
+                            or 0
+                        ) or 16384
+                        if should_compact(prompt_tokens, _ctx_size):
+                            logger.info(
+                                "Turn %s: triggering context compaction "
+                                "(prompt_tokens=%d, ctx_size=%d)",
+                                self.state.turn,
+                                prompt_tokens,
+                                _ctx_size,
+                            )
+                            self.state.messages = await compact_messages(
+                                self.state.messages,
+                                llm_adapter,
+                                _ctx_size,
+                                event_callback,
+                            )
+                        # ─────────────────────────────────────────────────────
 
                     tool_calls = await llm_adapter.extract_tool_calls(completion)
                     turn.tool_calls_requested = len(tool_calls)
@@ -585,6 +676,37 @@ class AgentLoop:
                                         self.state.turns_history.append(turn)
                                         return self.state.final_response, self.state
 
+                            # ── Phase 1.4: before-hook interception ──────────────
+                            _hook_input, _hook_err = await self._hook_registry.run_before(
+                                routed_tool_name, validated_input
+                            )
+                            if _hook_input is _HOOK_BLOCK or _hook_input == _HOOK_BLOCK:
+                                _block_msg = _hook_err or "Tool call blocked by hook"
+                                logger.info(
+                                    "Hook blocked tool call: %s — %s", routed_tool_name, _block_msg
+                                )
+                                self.state.messages.append(
+                                    llm_adapter.format_tool_result(
+                                        tool_call.tool_name,
+                                        f"Error: {_block_msg}",
+                                        tool_call.id,
+                                    )
+                                )
+                                await self._emit_event(
+                                    event_callback,
+                                    {
+                                        "type": "tool_call_result",
+                                        "turn": self.state.turn,
+                                        "tool_name": tool_call.tool_name,
+                                        "status": "blocked",
+                                        "error": _block_msg,
+                                    },
+                                )
+                                continue  # skip this tool call, move to next
+                            else:
+                                validated_input = _hook_input  # may have been modified
+                            # ─────────────────────────────────────────────────────
+
                             result = await mcp_orchestrator.execute_tool(
                                 server_name=routed_server,
                                 tool_name=routed_tool_name,
@@ -592,6 +714,12 @@ class AgentLoop:
                                 timeout_seconds=self.tool_timeout_seconds,
                                 max_retries=self.max_tool_call_retries,
                             )
+
+                            # ── Phase 1.4: after-hook result modification ─────────
+                            result = await self._hook_registry.run_after(
+                                routed_tool_name, validated_input, result
+                            )
+                            # ─────────────────────────────────────────────────────
 
                             turn.metadata.setdefault("tool_events", []).append(
                                 {

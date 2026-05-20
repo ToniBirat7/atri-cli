@@ -20,6 +20,12 @@
 | [auth.md](auth.md) | Auth modes (JWT / API key / hybrid), admin key, permission modes |
 | [prompt-policy.md](prompt-policy.md) | Prompt profiles, thinking mode, per-request overrides |
 
+## Roadmap & Research
+
+| Page | Summary |
+|------|---------|
+| [roadmap.md](roadmap.md) | v3 feature roadmap — 5-phase plan derived from Pi + Gemini CLI research |
+
 ## Testing & Operations
 
 | Page | Summary |
@@ -29,4 +35,4 @@
 
 ---
 
-*Updated: 2026-05-20 | Sources ingested: README, config.py, agent_loop.py, mcp/main.py, api.py, live E2E session*
+*Updated: 2026-05-20 | Sources ingested: README, config.py, agent_loop.py, mcp/main.py, api.py, live E2E session, Pi repo research, Gemini CLI research*
