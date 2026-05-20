@@ -41,6 +41,7 @@ import re
 import os
 import hashlib
 import time
+from pathlib import Path
 try:
     from ..mcp.diff_engine import DiffEngine
 except (ImportError, ValueError):
@@ -84,6 +85,11 @@ except ImportError:
         new_session_entry = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+# ── Phase 5.5: Context Distillation ───────────────────────────────────────────
+TOOL_RESULT_MAX_INLINE = 2048  # 2KB threshold
+_TOOL_RESULTS_DIR = Path.home() / ".atri" / "tool_results"
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _log_event(event: str, **fields: Any) -> None:
@@ -297,6 +303,23 @@ class AgentLoop:
         if self.thinking_mode == "tool_calls_off":
             return not has_tools  # think on final answer, not during tool loop
         return False  # "off"
+
+    def _maybe_distill_result(self, result: str, turn_id: str) -> str:
+        """If result > 2KB, write to disk and return truncated preview."""
+        if len(result) <= TOOL_RESULT_MAX_INLINE:
+            return result
+
+        try:
+            results_dir = Path.home() / ".atri" / "tool_results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            result_file = results_dir / f"{turn_id}.txt"
+            result_file.write_text(result, encoding="utf-8")
+            disk_path = str(result_file)
+        except Exception:
+            disk_path = "(unavailable)"
+
+        preview = result[:TOOL_RESULT_MAX_INLINE]
+        return f"{preview}\n\n[truncated, {len(result)} chars total. Full result at: {disk_path}]"
 
     async def _emit_event(
         self,
@@ -874,6 +897,16 @@ class AgentLoop:
                             result = await self._hook_registry.run_after(
                                 routed_tool_name, validated_input, result
                             )
+                            # ─────────────────────────────────────────────────────
+
+                            # ── Phase 5.5: Context distillation ───────────────────
+                            _distill_turn_id = f"{self.state.turn}_{tool_call.tool_name}"
+                            if isinstance(result, str):
+                                result = self._maybe_distill_result(result, _distill_turn_id)
+                            elif isinstance(result, dict):
+                                _result_str = json.dumps(result, ensure_ascii=False)
+                                _distilled = self._maybe_distill_result(_result_str, _distill_turn_id)
+                                result = _distilled
                             # ─────────────────────────────────────────────────────
 
                             turn.metadata.setdefault("tool_events", []).append(

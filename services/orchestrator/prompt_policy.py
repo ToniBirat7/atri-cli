@@ -12,6 +12,11 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import Final
 
+try:
+    from .skills_loader import discover_skills, build_skills_prompt_snippet
+except ImportError:
+    from skills_loader import discover_skills, build_skills_prompt_snippet
+
 VALID_PROMPT_PROFILES: Final[set[str]] = {"general-purpose", "legal-strict", "hybrid", "agent-v3", "agent-v3-26b", "plan-mode"}
 
 _TOOL_RULES = """
@@ -199,6 +204,16 @@ def build_system_prompt(
         ).strip()
 
     _ = enable_thinking  # template owns this; do not inject <|think|> here
+
+    # Append skills snippet (descriptions only — keeps token usage flat)
+    try:
+        _skills = discover_skills()
+        _skills_snippet = build_skills_prompt_snippet(_skills)
+        if _skills_snippet:
+            prompt = prompt + "\n\n" + _skills_snippet
+    except Exception:
+        pass  # never let skill discovery break prompt building
+
     return prompt
 
 

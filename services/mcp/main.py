@@ -1696,5 +1696,58 @@ def stop_watch_file(watch_id: str) -> dict[str, Any]:
     return {"ok": stopped, "watch_id": watch_id, "remaining_watches": list_watches()}
 
 
+@mcp.tool()
+def invoke_skill(name: str) -> dict[str, Any]:
+    """
+    Invoke a named skill to load its full instructions.
+    Skills are defined in SKILL.md files under ~/.atri/skills/ or .atri/skills/.
+    """
+    try:
+        from .skills_loader import discover_skills, get_skill_body
+    except ImportError:
+        try:
+            from skills_loader import discover_skills, get_skill_body
+        except ImportError:
+            # Path-based import: orchestrator and mcp are sibling directories
+            import importlib.util as _ilu
+            _sl_path = Path(__file__).parent.parent / "orchestrator" / "skills_loader.py"
+            if _sl_path.exists():
+                _spec = _ilu.spec_from_file_location("skills_loader", str(_sl_path))
+                if _spec and _spec.loader:
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    discover_skills = _mod.discover_skills
+                    get_skill_body = _mod.get_skill_body
+                else:
+                    return {"ok": False, "error": "skills_loader not available"}
+            else:
+                return {"ok": False, "error": "skills_loader not available"}
+
+    skills = discover_skills()
+    body = get_skill_body(name, skills)
+    if body is None:
+        available = list(skills.keys())
+        return {"ok": False, "error": f"Skill '{name}' not found", "available_skills": available}
+
+    return {"ok": True, "name": name, "instructions": body}
+
+
+@mcp.tool()
+def read_tool_result(turn_id: str) -> dict[str, Any]:
+    """
+    Read the full content of a distilled tool result that was truncated.
+    The turn_id is shown in the truncation notice (e.g. '3_read_text_file').
+    """
+    results_dir = Path.home() / ".atri" / "tool_results"
+    result_file = results_dir / f"{turn_id}.txt"
+    if not result_file.exists():
+        return {"ok": False, "error": f"No result found for turn_id: {turn_id}"}
+    try:
+        content = result_file.read_text(encoding="utf-8")
+        return {"ok": True, "turn_id": turn_id, "content": content, "size": len(content)}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+
 if __name__ == "__main__":
     mcp.run()
