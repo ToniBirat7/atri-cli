@@ -342,11 +342,12 @@ class ServiceManager:
 
         n_gpu = str(config.get("recommended_n_gpu_layers", 99))
         ctx = str(config.get("recommended_ctx_size", 32768))
-        threads = str(config.get("recommended_threads", max(2, (os.cpu_count() or 4) - 2)))
+        raw_threads = config.get("recommended_threads", max(2, (os.cpu_count() or 4) - 2))
+        threads = str(min(6, int(raw_threads)) if config.get("gpu_detected") else int(raw_threads))
         batch = str(config.get("recommended_batch_size", 2048))
         ubatch = str(config.get("recommended_ubatch_size", 512))
         flash = config.get("flash_attn", True)
-        kv_k = config.get("kv_cache_type_k", "q8_0")
+        kv_k = config.get("kv_cache_type_k", "q4_0")
         kv_v = config.get("kv_cache_type_v", "q8_0")
 
         # Gemma 4 chat template — try install-root first, then repo fallback
@@ -368,15 +369,19 @@ class ServiceManager:
             "--ubatch-size", ubatch,
             "--cache-type-k", kv_k,
             "--cache-type-v", kv_v,
-            "--parallel", "2",
+            "--parallel", "1",
+            "--no-mmap",
             "--api-key", "secret",
         ]
         if template_file.exists():
             cmd.extend(["--chat-template-file", str(template_file)])
         if flash:
             cmd.extend(["--flash-attn", "on"])
-        if config.get("mlock", False):
+        if config.get("mlock", True):
             cmd.append("--mlock")
+        n_cpu_moe = config.get("n_cpu_moe", 0)
+        if n_cpu_moe > 0:
+            cmd.extend(["--n-cpu-moe", str(n_cpu_moe)])
 
         log_path = self.repo_root / "llama.log"
         log_fp = open(log_path, "ab")
@@ -386,6 +391,7 @@ class ServiceManager:
         env = os.environ.copy()
         existing_ld = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld}" if existing_ld else lib_dir
+        env["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
 
         proc = subprocess.Popen(
             cmd,
