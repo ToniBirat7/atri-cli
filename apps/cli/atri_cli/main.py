@@ -1358,6 +1358,32 @@ def _run_interactive(
                     _render_timeline_event(event["event"], effective_output_format, quiet=fullscreen_mode)
                     event_type = str(event["event"].get("type") or "")
                     
+                    if event_type == "tool_confirmation_requested":
+                        # E.5: Confirmation bus — render prompt and POST response to /confirm/{session_id}
+                        ev = event["event"]
+                        tool_name = ev.get("tool_name", "unknown")
+                        tool_input = ev.get("tool_input", {})
+                        request_id = ev.get("request_id", "")
+                        _RICH.render_warning(
+                            f"Tool confirmation required: [bold]{tool_name}[/bold]\n"
+                            + "\n".join(f"  {k}: {v}" for k, v in tool_input.items())
+                        )
+                        try:
+                            choice = input("Allow? [y/N]: ").strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            choice = "n"
+                        approved = choice in ("y", "yes")
+                        if active_conversation_id:
+                            try:
+                                import httpx as _httpx
+                                _httpx.post(
+                                    f"{client.base_url}/confirm/{active_conversation_id}",
+                                    json={"request_id": request_id, "approved": approved},
+                                    timeout=5,
+                                )
+                            except Exception:
+                                pass
+
                     if event_type == "turn_review_requested":
                         review_result, final_content = _handle_diff_review(event["event"])
                         if review_result == "EDIT_APPROVED":

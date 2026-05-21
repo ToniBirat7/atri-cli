@@ -23,6 +23,19 @@ def should_compact(prompt_tokens: int, ctx_size: int) -> bool:
     return ctx_size > 0 and (prompt_tokens / ctx_size) >= COMPACTION_THRESHOLD
 
 
+def should_idle_compact(prompt_tokens: int, ctx_size: int, turn_count: int) -> bool:
+    """Return True if idle compaction should trigger at turn boundary.
+
+    Uses a lower threshold (70%) than the hard compaction trigger (80%) so the
+    agent proactively compacts between turns rather than mid-turn on overflow.
+    Skips tiny sessions (< 3 turns) where compaction adds more noise than value.
+    """
+    if ctx_size <= 0 or turn_count < 3:
+        return False
+    ratio = prompt_tokens / ctx_size
+    return ratio >= 0.70
+
+
 def extract_recent_file_reads(messages: list[dict]) -> list[str]:
     """
     Scan tool result messages for file read content. Returns up to MAX_FILE_REATTACH

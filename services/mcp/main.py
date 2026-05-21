@@ -27,10 +27,12 @@ Built using the FastMCP framework for high-performance tool dispatch.
 
 import os
 import pty
+import re
 import select
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -1902,6 +1904,49 @@ def read_tool_result(turn_id: str) -> dict[str, Any]:
         return {"ok": True, "turn_id": turn_id, "content": content, "size": len(content)}
     except OSError as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── E.4: Persistent retain/recall memory tools ────────────────────────────────
+_MEMORY_DIR = Path.home() / ".atri" / "memory"
+
+
+@mcp.tool()
+def retain(key: str, value: str) -> str:
+    """Store a persistent key-value memory that survives session compaction and restarts."""
+    _MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    safe_key = re.sub(r"[^\w\-]", "_", key)[:64]
+    (_MEMORY_DIR / f"{safe_key}.json").write_text(
+        json.dumps({"key": key, "value": value, "timestamp": time.time()})
+    )
+    return f"Retained: {key}"
+
+
+@mcp.tool()
+def recall(key: str) -> str:
+    """Retrieve a previously retained memory by key. Returns the stored value or a not-found message."""
+    safe_key = re.sub(r"[^\w\-]", "_", key)[:64]
+    path = _MEMORY_DIR / f"{safe_key}.json"
+    if not path.exists():
+        return f"No memory found for key: {key}"
+    try:
+        return json.loads(path.read_text())["value"]
+    except Exception:
+        return f"Error reading memory for key: {key}"
+
+
+@mcp.tool()
+def list_memories() -> str:
+    """List all retained memory keys."""
+    if not _MEMORY_DIR.exists():
+        return "No memories stored."
+    keys = []
+    for p in sorted(_MEMORY_DIR.glob("*.json")):
+        try:
+            keys.append(json.loads(p.read_text()).get("key", p.stem))
+        except Exception:
+            keys.append(p.stem)
+    return "\n".join(keys) if keys else "No memories stored."
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
