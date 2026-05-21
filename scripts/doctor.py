@@ -21,8 +21,8 @@ REQUIRED_PACKAGES = [
     "watchdog",
 ]
 
-MODEL_FILENAME = "gemma-4-e2b-it-Q4_K_M.gguf"
-MODEL_MIN_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
+MODEL_FILENAME = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+MODEL_MIN_BYTES = 8 * 1024 * 1024 * 1024  # 8 GB (26B MoE minimum)
 
 
 def print_status(component, status, detail=""):
@@ -62,7 +62,7 @@ def check_gpu_vram():
                 print_status(
                     "GPU VRAM",
                     "WARN",
-                    f"{vram_gb:.1f} GB detected — < 4 GB may cause OOM with Gemma 4 E2B",
+                    f"{vram_gb:.1f} GB detected — < 4 GB may cause OOM with Gemma 4 27B MoE",
                 )
             else:
                 print_status("GPU VRAM", "OK", f"{vram_gb:.1f} GB")
