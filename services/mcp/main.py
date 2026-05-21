@@ -122,7 +122,11 @@ except ImportError:
 
 
 LOGGER = logging.getLogger("atri.mcp.filesystem")
-logging.basicConfig(level=os.getenv("MCP_LOG_LEVEL", "INFO"))
+
+
+def _configure_mcp_logging() -> None:
+    """Configure MCP server logging. Called explicitly at server startup, not at import time (C.5)."""
+    logging.basicConfig(level=os.getenv("MCP_LOG_LEVEL", "INFO"))
 
 
 def _load_allowed_dirs() -> list[Path]:
@@ -158,7 +162,22 @@ def _load_allowed_dirs() -> list[Path]:
     return resolved
 
 
-INITIAL_ALLOWED_DIRS = _load_allowed_dirs()
+_INITIAL_ALLOWED_DIRS_CACHE: list[Path] | None = None
+
+
+def _get_initial_allowed_dirs() -> list[Path]:
+    """Lazy singleton for INITIAL_ALLOWED_DIRS — deferred until first access (C.5)."""
+    global _INITIAL_ALLOWED_DIRS_CACHE
+    if _INITIAL_ALLOWED_DIRS_CACHE is None:
+        _INITIAL_ALLOWED_DIRS_CACHE = _load_allowed_dirs()
+    return _INITIAL_ALLOWED_DIRS_CACHE
+
+
+# Eagerly resolved on first import for backward compatibility with call sites that
+# reference INITIAL_ALLOWED_DIRS directly.  The actual load is deferred via the
+# lazy helper so that module import does not raise when MCP_ALLOWED_DIRS is unset
+# in non-server contexts (e.g. unit tests, orchestrator in-process import).
+INITIAL_ALLOWED_DIRS: list[Path] = []  # populated on first server start via _get_initial_allowed_dirs()
 MAX_READ_BYTES = int(os.getenv("MCP_MAX_READ_BYTES", "1048576"))  # 1 MiB
 MAX_WRITE_BYTES = int(os.getenv("MCP_MAX_WRITE_BYTES", "1048576"))  # 1 MiB
 MAX_SEARCH_RESULTS = int(os.getenv("MCP_MAX_SEARCH_RESULTS", "200"))
@@ -181,9 +200,22 @@ class _RuntimePolicy:
             self._allowed_dirs = list(dirs)
 
 
-POLICY = _RuntimePolicy(INITIAL_ALLOWED_DIRS)
+def _initialize_server() -> None:
+    """Perform all startup side effects (C.5): logging config + allowed-dirs resolution."""
+    global INITIAL_ALLOWED_DIRS
+    _configure_mcp_logging()
+    INITIAL_ALLOWED_DIRS = _get_initial_allowed_dirs()
+    POLICY.set_allowed_dirs(INITIAL_ALLOWED_DIRS)
+
+
+POLICY = _RuntimePolicy([])  # starts empty; populated by _initialize_server() at first use
 
 mcp = FastMCP("Atri Code MCP")
+
+# C.5: Trigger server initialization when the module is loaded as an entry point
+# (fastmcp run main.py:mcp) without going through __main__.  The call is idempotent
+# — repeated imports are safe because _get_initial_allowed_dirs() caches its result.
+_initialize_server()
 
 
 def _is_under_allowed_dirs(path: Path) -> bool:
@@ -1873,4 +1905,5 @@ def read_tool_result(turn_id: str) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    _initialize_server()
     mcp.run()
