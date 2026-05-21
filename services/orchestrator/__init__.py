@@ -7,4 +7,4 @@ Implements deterministic agent loop with tool-calling budget controls.
 Phase 1: Core modules for LLM adapter, MCP client management, tool registry, and agent loop.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

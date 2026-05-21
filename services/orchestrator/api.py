@@ -801,9 +801,13 @@ async def _run_agent_request(
                 {"role": "assistant", "content": response},
             ]
             if len(_all_messages) > 20 and llm_adapter is not None:
-                asyncio.create_task(
+                def _log_mining_error(task: asyncio.Task) -> None:
+                    if not task.cancelled() and task.exception():
+                        logger.error("session memory mining failed", exc_info=task.exception())
+                _mining_task = asyncio.create_task(
                     maybe_mine_session(_all_messages, llm_adapter, session_id=conversation_id)
                 )
+                _mining_task.add_done_callback(_log_mining_error)
         except Exception:
             pass  # never let mining break the response
 
@@ -1175,7 +1179,7 @@ async def health() -> HealthResponse:
     if llm_adapter:
         try:
             # Quick test of LLM connection
-            await llm_adapter.client.get("/models")
+            await llm_adapter.client.get("/models", timeout=5.0)
             llm_connected = True
         except Exception as e:
             logger.warning(f"LLM health check failed: {e}")
