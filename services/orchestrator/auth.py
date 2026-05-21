@@ -112,9 +112,21 @@ class RequestAuthenticator:
 
         return None
 
+    def _is_auth_configured(self) -> bool:
+        has_api_key = bool(self.api_key or self.admin_api_key)
+        has_jwt = bool(self.jwt_auth.secret)
+        return has_api_key or has_jwt
+
     def authenticate(self, request: Request) -> Optional[AuthContext]:
         token = self._extract_token(request)
         if not token:
+            if not self._is_auth_configured():
+                return AuthContext(
+                    subject="anonymous",
+                    issuer="local",
+                    audience="orchestrator",
+                    scopes=["chat:read", "chat:write"],
+                )
             raise HTTPException(status_code=401, detail="Unauthorized")
 
         if self.mode in {"api-key", "hybrid"} and self.api_key and token in {self.api_key, self.admin_api_key}:

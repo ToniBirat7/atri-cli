@@ -389,7 +389,7 @@ class OrchestratorConfig(BaseModel):
     def from_env(cls) -> "OrchestratorConfig":
         """Load configuration from environment variables."""
         env_path = Path(__file__).resolve().parent / ".env"
-        load_dotenv(dotenv_path=env_path, override=False)
+        load_dotenv(dotenv_path=env_path, override=True)
 
         mcp_servers = _safe_parse_json_array(os.getenv("MCP_SERVERS_JSON", "[]"))
 
@@ -402,7 +402,7 @@ class OrchestratorConfig(BaseModel):
                 top_p=float(os.getenv("LLM_TOP_P", "0.95")),
                 top_k=int(os.getenv("LLM_TOP_K", "64")),
                 max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
-                timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+                timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "300")),
                 parallel_tool_calls=os.getenv("LLM_PARALLEL_TOOL_CALLS", "true").lower() == "true",
             ),
             mcp=MCPConfig(

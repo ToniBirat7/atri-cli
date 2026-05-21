@@ -428,13 +428,24 @@ class MCPOrchestrator:
             
             # 1. Try to use native FastMCP/MCP object if available
             mcp_obj = getattr(module, "mcp", None)
-            if mcp_obj and hasattr(mcp_obj, "list_tools"):
+            if mcp_obj and (hasattr(mcp_obj, "list_tools") or hasattr(mcp_obj, "get_tools")):
                 try:
-                    # Handle both sync and async list_tools
-                    mcp_tools = mcp_obj.list_tools()
-                    if inspect.isawaitable(mcp_tools):
-                        mcp_tools = await mcp_tools
-                    
+                    # FastMCP >= 2.x uses get_tools() (async, returns dict {name: Tool})
+                    # FastMCP < 2.x uses list_tools() (sync/async, returns list)
+                    if hasattr(mcp_obj, "get_tools"):
+                        raw = mcp_obj.get_tools()
+                        if inspect.isawaitable(raw):
+                            raw = await raw
+                        # get_tools returns dict {name: Tool} — convert to list
+                        if isinstance(raw, dict):
+                            mcp_tools = list(raw.values())
+                        else:
+                            mcp_tools = list(raw)
+                    else:
+                        mcp_tools = mcp_obj.list_tools()
+                        if inspect.isawaitable(mcp_tools):
+                            mcp_tools = await mcp_tools
+
                     for t in mcp_tools:
                         # Convert to dict if it's a model
                         t_dict = t.model_dump() if hasattr(t, "model_dump") else (t if isinstance(t, dict) else vars(t))

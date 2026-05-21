@@ -282,7 +282,7 @@ class ServiceManager:
                 "LLM_MODEL=local-model",
                 "LLM_TEMPERATURE=0.6",
                 "LLM_MAX_TOKENS=4096",
-                "LLM_TIMEOUT_SECONDS=120",
+                "LLM_TIMEOUT_SECONDS=300",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=15",
                 "MCP_ALLOW_HIDDEN=true",
@@ -293,9 +293,13 @@ class ServiceManager:
                 "AGENT_STREAM_RESPONSES=false",
                 f"ORCHESTRATOR_DATABASE_URL=sqlite:///{db_state}/orchestrator.db",
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
+                "ORCHESTRATOR_AUTH_MODE=hybrid",
+                "ORCHESTRATOR_JWT_SECRET=",
+                "ORCHESTRATOR_API_KEY=",
+                "ORCHESTRATOR_ADMIN_API_KEY=",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
-                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
+                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3-26b",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -468,14 +472,14 @@ class ServiceManager:
         if not llama_was_running:
             llama_ok = _wait_for_health(
                 self.llama_health_url,
-                timeout_sec=120,
+                timeout_sec=360,
                 label="llama-server",
             )
             if not llama_ok:
                 if tui:
                     tui.stop_thinking()
                     tui.render_error(
-                        "llama-server failed to start within 120s.\n"
+                        "llama-server failed to start within 360s.\n"
                         "Check llama.log for details."
                     )
                 return False
