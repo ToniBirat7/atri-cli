@@ -20,6 +20,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# C.4: Module-level defaults — can be overridden at runtime via config parameter
 SKILLS_DIR = Path.home() / ".atri" / "skills"
 MIN_TURNS_FOR_MINING = 10
 
@@ -28,21 +29,33 @@ async def maybe_mine_session(
     messages: list[dict],
     llm_adapter: Any,
     session_id: str = "",
+    config: Any = None,
 ) -> list[str]:
     """
     If the session has enough turns, mine it for reusable patterns.
     Returns list of skill names created (may be empty).
     Non-blocking: catches all exceptions internally.
     """
+    # C.4: Use config values when provided, fall back to module-level defaults
+    _min_turns = MIN_TURNS_FOR_MINING
+    _skills_dir = SKILLS_DIR
+    if config is not None:
+        _mem_cfg = getattr(config, "memory", None)
+        if _mem_cfg is not None:
+            _min_turns = getattr(_mem_cfg, "min_turns_for_mining", _min_turns)
+            _raw_dir = getattr(_mem_cfg, "skills_dir", None)
+            if _raw_dir:
+                _skills_dir = Path(_raw_dir).expanduser()
+
     # Count meaningful turns (user + assistant pairs)
     turns = sum(1 for m in messages if m.get("role") == "user")
-    if turns < MIN_TURNS_FOR_MINING:
+    if turns < _min_turns:
         return []
 
     logger.info("Memory mining: session has %d turns, extracting patterns...", turns)
 
     try:
-        return await _extract_skills(messages, llm_adapter, session_id)
+        return await _extract_skills(messages, llm_adapter, session_id, skills_dir=_skills_dir)
     except Exception as e:
         logger.warning("Memory mining failed: %s", e)
         return []
@@ -52,6 +65,7 @@ async def _extract_skills(
     messages: list[dict],
     llm_adapter: Any,
     session_id: str,
+    skills_dir: Path | None = None,
 ) -> list[str]:
     """Use LLM to identify reusable patterns from the session."""
     # Build a compact session summary for the LLM to analyze
@@ -110,6 +124,8 @@ Rules:
     if not skills_data:
         return []
 
+    _active_skills_dir = skills_dir if skills_dir is not None else SKILLS_DIR
+
     created: list[str] = []
     for item in skills_data[:3]:  # max 3
         name = re.sub(r"[^a-z0-9\-]", "", str(item.get("name", "")).lower().replace(" ", "-"))
@@ -118,8 +134,8 @@ Rules:
         description = str(item.get("description", ""))
         body = str(item.get("body", ""))
 
-        # Write to ~/.atri/skills/<name>/SKILL.md
-        skill_dir = SKILLS_DIR / name
+        # Write to <skills_dir>/<name>/SKILL.md
+        skill_dir = _active_skills_dir / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_md = skill_dir / "SKILL.md"
 

@@ -6,7 +6,7 @@ Issues discovered during development and E2E testing. Each entry has a status an
 
 ## 1. Port mismatch: llama-server default vs. launch command
 
-**Status:** Fixed (one-time .env patch)
+**Status:** RESOLVED — canonical port is 8000 everywhere (Makefile, config.py, .env.example, CLAUDE.md)
 
 **Symptom:** Orchestrator fails to connect to LLM; `/ready` returns `llm_connected: false`.
 
@@ -44,7 +44,7 @@ Issues discovered during development and E2E testing. Each entry has a status an
 
 ## 4. `/permissions/evaluate` wrong request schema
 
-**Status:** Fixed (plan corrected)
+**Status:** RESOLVED — schema corrected to `{"tool_call": "<string>", "mode": "default"}`
 
 **Symptom:** 422 Unprocessable Entity when sending `{"tool":"bash_exec","args":{}}`.
 
@@ -95,6 +95,20 @@ Issues discovered during development and E2E testing. Each entry has a status an
 **Workaround:** Set `AGENT_MAX_TURNS=2` in `.env` and restart orchestrator before testing turn-limited scenarios. Not viable for per-request control.
 
 **Fix target:** `services/orchestrator/agent_loop.py` — locate where `max_turns` is read and ensure the per-request value takes precedence over config default.
+
+---
+
+---
+
+## A.1 New messages bug (TUI rendering)
+
+**Status:** RESOLVED — fixed in Phase 3 TUI rewrite (differential rendering).
+
+---
+
+## A.2 DiffEngine.get_preview() not callable
+
+**Status:** RESOLVED — method renamed and refactored in `services/mcp/diff_engine.py`.
 
 ---
 

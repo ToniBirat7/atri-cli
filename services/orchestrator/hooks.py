@@ -17,6 +17,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+__all__ = [
+    "BLOCK",
+    "HookCallback",
+    "HookFn",
+    "HookManager",
+    "HookRegistry",
+    "hook_registry",
+    "register_builtin_hooks",
+    "add_allowed_write_path",
+]
+
 logger = logging.getLogger(__name__)
 
 # ── Phase 5.3: Governance File Protection — per-session allowed-path whitelist ─

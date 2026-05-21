@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+__all__ = [
+    "SessionEntry",
+    "SessionTree",
+    "new_entry",
+    "SESSIONS_DIR",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +77,7 @@ class SessionTree:
         parent = entry.parent_id or "__root__"
         self._children.setdefault(parent, []).append(entry.id)
 
-    def append(self, entry: SessionEntry) -> None:
+    def append(self, entry: SessionEntry) -> None:  # C.7
         """Append a new entry to the JSONL log and index it."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as f:
@@ -79,10 +86,10 @@ class SessionTree:
 
     # ── Query ──────────────────────────────────────────────────────────────────
 
-    def get(self, entry_id: str) -> Optional[SessionEntry]:
+    def get(self, entry_id: str) -> Optional[SessionEntry]:  # C.7
         return self._entries.get(entry_id)
 
-    def root_ids(self) -> list[str]:
+    def root_ids(self) -> list[str]:  # C.7
         return self._children.get("__root__", [])
 
     def children_of(self, entry_id: str) -> list[str]:
@@ -149,7 +156,7 @@ class SessionTree:
 
     # ── Fork ───────────────────────────────────────────────────────────────────
 
-    def fork(self, from_entry_id: str) -> str:
+    def fork(self, from_entry_id: str) -> str:  # C.7
         """
         Create a fork point at the given entry. Returns a new session_id.
         The new session's JSONL will be initialized with all entries up to from_entry_id.

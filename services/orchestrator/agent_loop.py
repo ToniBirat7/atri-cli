@@ -499,16 +499,21 @@ class AgentLoop:
 
                 try:
                     # Context Trimming: Prevent context saturation for smaller models while preserving mission-critical history.
-                    # We keep the system prompt [0], the original user prompt [1], and the last 40 messages.
-                    if len(self.state.messages) > 50:
+                    # We keep the system prompt [0], the original user prompt [1], and the last N messages (config.agent_loop.context_trim_threshold).
+                    _trim_threshold = (
+                        getattr(getattr(self.config, "agent_loop", None), "context_trim_threshold", None)
+                        or 40
+                    )
+                    _trim_window = _trim_threshold + 10  # trigger at threshold+10 to avoid thrashing
+                    if len(self.state.messages) > _trim_window:
                         system_msg = self.state.messages[0]
                         user_prompt = self.state.messages[1] if len(self.state.messages) > 1 else None
-                        
-                        trimmed = self.state.messages[-40:]
+
+                        trimmed = self.state.messages[-_trim_threshold:]
                         new_messages = [system_msg]
                         if user_prompt and user_prompt["role"] == "user":
                              new_messages.append(user_prompt)
-                        
+
                         self.state.messages = new_messages + trimmed
                         logger.info(f"Turn {self.state.turn}: Trimmed context history (History length: {len(self.state.messages)})")
 
@@ -564,7 +569,13 @@ class AgentLoop:
                                 tools=available_tools,
                                 # Clamp tool-call temperature: 0.3 min for deterministic JSON,
                                 # but respect config (26B handles 0.3–0.6 well; E2B needed 0.1).
-                                temperature=max(0.3, min(self.config.llm.temperature, 0.6)) if available_tools else None,
+                                temperature=max(
+                                    getattr(getattr(self.config, "agent_loop", None), "temperature_min", None) or 0.3,
+                                    min(
+                                        self.config.llm.temperature,
+                                        getattr(getattr(self.config, "agent_loop", None), "temperature_max", None) or 0.6,
+                                    ),
+                                ) if available_tools else None,
                                 enable_thinking=self._thinking_for_turn(has_tools=bool(available_tools)),
                             )
                     except Exception as e:

@@ -542,6 +542,27 @@ def _clean_system_caches(repo_dir: Path) -> None:
     _run(["npm", "cache", "clean", "--force"], check=False)
 
 
+def _download_gemma4_template(dest: Path) -> None:
+    """Download the official Gemma 4 E2B jinja chat template. Fails silently."""
+    GEMMA4_TEMPLATE_URL = (
+        "https://huggingface.co/google/gemma-4-e2b-it/raw/main/tokenizer_config.json"
+    )
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        req = urllib.request.Request(GEMMA4_TEMPLATE_URL, headers={"User-Agent": "atri-code/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+        template = data.get("chat_template")
+        if template:
+            dest.write_text(template, encoding="utf-8")
+            print(f"[local-up] Gemma 4 chat template saved: {dest}")
+        else:
+            print("[local-up] Gemma 4 tokenizer_config.json has no chat_template field; using built-in jinja.")
+    except Exception as exc:
+        print(f"[local-up] Warning: Gemma 4 template download failed ({exc}); using built-in jinja.")
+
+
 def _spawn(cmd: list[str], cwd: Path, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fp = open(log_path, "ab")
@@ -601,10 +622,16 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
     kv_k = launch.get("kv_cache_type_k", "q8_0" if use_gpu else "f16")
     kv_v = launch.get("kv_cache_type_v", "q8_0" if use_gpu else "f16")
 
+    # B.4: Use official Gemma 4 jinja template file if available
+    template_file = repo_dir / "runtime" / "llm" / "templates" / "gemma4-e2b.jinja"
+    if not template_file.exists():
+        _download_gemma4_template(template_file)
+
     llama_cmd = [
         str(llama_bin),
         "-m", str(model_path),
         "--jinja",
+        *(["--chat-template-file", str(template_file)] if template_file.exists() else []),
         "--host", "127.0.0.1",
         "--port", "8000",
         "--threads", threads,

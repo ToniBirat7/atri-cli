@@ -80,8 +80,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+
+def _configure_logging(level: str = "INFO") -> None:
+    """Configure root logging. Called explicitly from startup, not at module import time (C.5)."""
+    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO))
 
 _resolved_api_path = Path(__file__).resolve()
 DEFAULT_ALLOWED_DIRECTORY = str(_resolved_api_path.parents[2] if len(_resolved_api_path.parents) > 2 else _resolved_api_path.parent)
@@ -850,8 +852,9 @@ async def startup():
     global config, llm_adapter, mcp_orchestrator, tool_registry, agent_loop, conversation_store, request_authenticator, rate_limiter, hook_manager, model_router
     
     _log_event("orchestrator.startup.begin")
-    
+
     config = OrchestratorConfig.from_env()
+    _configure_logging(getattr(config, "log_level", "INFO"))
     hook_manager = HookManager(enabled=getattr(getattr(config, "hooks", None), "enabled", True))
     conversation_store = OrchestratorDatabase(
         config.database.url,
