@@ -2029,6 +2029,7 @@ def _doctor(client: OrchestratorClient, output_format: str) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Atri Code CLI")
+    parser.add_argument("--version", action="version", version="atri 1.0.0")
     parser.add_argument("--prompt", help="Prompt for print/interactive mode")
     parser.add_argument("-p", "--print", action="store_true", dest="print_mode", help="Run one-shot mode and exit")
     parser.add_argument("-r", "--resume", help="Resume a conversation id")
