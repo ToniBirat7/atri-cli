@@ -217,7 +217,6 @@ class ServiceManager:
                 return gguf
 
         return None
-            raise
 
     # ── PID file helpers ─────────────────────────────────────────────────────
 
