@@ -173,10 +173,36 @@ class ServiceManager:
         return None
 
     def _find_model(self) -> Optional[Path]:
-        """Find the GGUF model file.
+        """Find the main GGUF model file."""
+        # Honour explicit path set by installer launcher
+        explicit = os.environ.get("ATRI_MODEL_PATH", "")
+        if explicit and Path(explicit).exists():
+            return Path(explicit)
 
-        Also handles lazy first-run download when .fetch_on_first_run marker exists.
-        """
+        install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+        model_dirs = [
+            Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
+            self.repo_root / "models",
+        ]
+
+        preferred = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+        for mdir in model_dirs:
+            p = mdir / preferred
+            if p.exists():
+                return p
+            # Fall back to any gguf that isn't the vision projector
+            for gguf in sorted(mdir.glob("*.gguf")):
+                if "mmproj" not in gguf.name.lower():
+                    return gguf
+
+        return None
+
+    def _find_mmproj(self) -> Optional[Path]:
+        """Find the multimodal projector (mmproj) file."""
+        explicit = os.environ.get("ATRI_MMPROJ_PATH", "")
+        if explicit and Path(explicit).exists():
+            return Path(explicit)
+
         install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
         model_dirs = [
             Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
@@ -184,54 +210,13 @@ class ServiceManager:
         ]
 
         for mdir in model_dirs:
-            for name in ["gemma-4-e2b-it-Q4_K_M.gguf", "gemma-4-E2B-it-Q4_K_M.gguf"]:
-                p = mdir / name
-                if p.exists():
-                    return p
-            for gguf in mdir.glob("*.gguf"):
+            p = mdir / "mmproj-BF16.gguf"
+            if p.exists():
+                return p
+            for gguf in mdir.glob("mmproj*.gguf"):
                 return gguf
 
-        # Check for lazy-fetch marker written by installer
-        for mdir in model_dirs:
-            marker = mdir / ".fetch_on_first_run"
-            if marker.exists():
-                self._fetch_model_lazy(mdir, marker)
-                for gguf in mdir.glob("*.gguf"):
-                    return gguf
-
         return None
-
-    def _fetch_model_lazy(self, model_dir: Path, marker: Path) -> None:
-        """Download the model on first run using the URL stored in the marker file."""
-        import urllib.request
-
-        try:
-            lines = marker.read_text().strip().splitlines()
-            url = next((l.split("=", 1)[1] for l in lines if l.startswith("MODEL_URL=")), None)
-        except Exception:
-            url = None
-
-        if not url:
-            return
-
-        dest = model_dir / "gemma-4-E2B-it-Q4_K_M.gguf"
-        print(f"\n  Downloading Gemma 4 E2B model (~3.1 GB) on first run…")
-        print(f"  This happens once. Subsequent starts will be instant.\n")
-
-        def _progress(block_count, block_size, total_size):
-            done = block_count * block_size
-            pct = min(100, int(done * 100 / total_size)) if total_size > 0 else 0
-            bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-            print(f"\r  [{bar}] {pct}%  {done // 1_000_000} MB / {total_size // 1_000_000} MB", end="", flush=True)
-
-        try:
-            urllib.request.urlretrieve(url, dest, reporthook=_progress)
-            print()
-            marker.unlink(missing_ok=True)
-        except Exception as exc:
-            print(f"\n  Model download failed: {exc}")
-            if dest.exists():
-                dest.unlink()
             raise
 
     # ── PID file helpers ─────────────────────────────────────────────────────
@@ -334,13 +319,16 @@ class ServiceManager:
         if not model:
             if tui:
                 tui.render_error(
-                    "No model file found in models/. Expected gemma-4-E2B-it-Q4_K_M.gguf"
+                    "No model file found. Run the installer and provide the path to\n"
+                    "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf, or set ATRI_MODEL_PATH."
                 )
             return False
 
+        mmproj = self._find_mmproj()
+
         config = self._get_launch_config()
 
-        n_gpu = str(config.get("recommended_n_gpu_layers", 99))
+        n_gpu = str(config.get("recommended_n_gpu_layers", 999))
         ctx = str(config.get("recommended_ctx_size", 32768))
         raw_threads = config.get("recommended_threads", max(2, (os.cpu_count() or 4) - 2))
         threads = str(min(6, int(raw_threads)) if config.get("gpu_detected") else int(raw_threads))
@@ -359,6 +347,10 @@ class ServiceManager:
         cmd = [
             str(llama_bin),
             "-m", str(model),
+        ]
+        if mmproj:
+            cmd.extend(["--mmproj", str(mmproj)])
+        cmd.extend([
             "--jinja",
             "--host", "127.0.0.1",
             "--port", str(self.llama_port),
@@ -372,7 +364,7 @@ class ServiceManager:
             "--parallel", "1",
             "--no-mmap",
             "--api-key", "secret",
-        ]
+        ])
         if template_file.exists():
             cmd.extend(["--chat-template-file", str(template_file)])
         if flash:

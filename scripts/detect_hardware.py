@@ -330,6 +330,8 @@ def compute_cmake_args(gpu: dict, cpu: dict) -> list[str]:
         if cuda_arch:
             args.append(f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}")
         args.append("-DGGML_NATIVE=ON")
+        args.append("-DGGML_FLASH_ATTN=ON")
+        args.append("-DGGML_CUDA_FA_ALL_QUANTS=ON")
 
     elif vendor == "amd":
         args.append("-DGGML_HIP=ON")

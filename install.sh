@@ -17,12 +17,27 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ─── TTY for interactive prompts ─────────────────────────────────────────────
+# When invoked as `curl ... | bash`, bash's stdin IS the pipe — `read` gets EOF
+# immediately. Open /dev/tty directly so prompts always reach the terminal.
+if [ -t 0 ]; then
+    _TTY=0
+elif [ -e /dev/tty ]; then
+    exec 3</dev/tty
+    _TTY=3
+else
+    _TTY=""   # non-interactive (CI/scripts): fall through with defaults
+fi
+_read() { read -r "$@" <&${_TTY:-0} 2>/dev/tty || true; }
+
 # ─── Tunables ────────────────────────────────────────────────────────────────
 ATRI_VERSION="${ATRI_VERSION:-latest}"
 ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
 ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
-ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf}"
-ATRI_MODEL_FILENAME="gemma-4-E2B-it-Q4_K_M.gguf"
+ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-27B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf}"
+ATRI_MODEL_FILENAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+ATRI_MMPROJ_URL="${ATRI_MMPROJ_URL:-https://huggingface.co/google/gemma-4-27b-it/resolve/main/mmproj-BF16.gguf}"
+ATRI_MMPROJ_FILENAME="mmproj-BF16.gguf"
 LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
 BRANCH="${ATRI_BRANCH:-master}"
@@ -48,7 +63,7 @@ header()  { echo -e "\n${BOLD}${CYAN}── $* ──${RESET}"; }
 echo ""
 echo -e "${BOLD}${CYAN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${CYAN}  │  Atri Code — Local AI Coding Agent     │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 MoE + llama.cpp    │${RESET}"
+echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 27B MoE + llama.cpp │${RESET}"
 echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
 
@@ -58,28 +73,37 @@ echo ""
 header "Model setup"
 
 MODEL_PATH=""
+MMPROJ_PATH=""
 MODEL_DEST="$MODEL_DIR/$ATRI_MODEL_FILENAME"
+MMPROJ_DEST="$MODEL_DIR/$ATRI_MMPROJ_FILENAME"
 
-if [ -t 0 ]; then
-    read -r -p "  Do you already have the Gemma 4 MoE model (.gguf) downloaded? [y/N] " _has_model
+_prompt_existing_path() {
+    local label="$1" dest_var="$2"
+    while true; do
+        _read -e -p "  Path to $label: " _user_path
+        _user_path="${_user_path/#\~/$HOME}"
+        if [ -f "$_user_path" ]; then
+            eval "$dest_var='$_user_path'"
+            ok "Found: $(basename "$_user_path")"
+            return 0
+        else
+            warn "Not found: $_user_path — try again (Ctrl-C to abort)"
+        fi
+    done
+}
+
+if [ -n "$_TTY" ]; then
+    _read -p "  Do you already have the Gemma 4 27B MoE models downloaded? [y/N] " _has_model
 else
     _has_model="n"
 fi
 
 if [[ "$_has_model" =~ ^[Yy] ]]; then
-    while true; do
-        read -r -e -p "  Enter full path to your .gguf file: " _user_path
-        _user_path="${_user_path/#\~/$HOME}"
-        if [ -f "$_user_path" ]; then
-            MODEL_PATH="$_user_path"
-            ok "Will use local model: $MODEL_PATH"
-            break
-        else
-            warn "File not found: $_user_path — try again (Ctrl-C to abort)"
-        fi
-    done
+    info "Enter paths to your model files (Tab completion works):"
+    _prompt_existing_path "main model  (gemma-4-26B-A4B-it-UD-Q4_K_M.gguf)" MODEL_PATH
+    _prompt_existing_path "vision proj (mmproj-BF16.gguf)" MMPROJ_PATH
 else
-    info "Model (~3.1 GB) will be downloaded during installation"
+    info "Main model (~15.8 GB) + vision proj (~1.1 GB) will be downloaded"
 fi
 
 # ─── Cleanup trap (only fires on error) ────────────────────────────────────
@@ -237,9 +261,9 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
 
     LLAMA_SRC="$STAGING_DIR/llama_src"
     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
-    cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON"
+    cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=OFF"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
-        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DGGML_CUDA_ARCHITECTURES=$COMPUTE_CAP -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
         # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
         SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
         if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
@@ -337,6 +361,7 @@ export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
 export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
 export ATRI_MODEL_DIR="$MODEL_DIR"
 export ATRI_MODEL_PATH="$MODEL_DEST"
+export ATRI_MMPROJ_PATH="$MMPROJ_DEST"
 export ATRI_SRC_DIR="$SRC_DIR"
 export LD_LIBRARY_PATH="$LLAMA_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "$VENV_DIR/bin/atri" "\$@"
@@ -362,18 +387,31 @@ if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
 fi
 
 # ─── Model install ────────────────────────────────────────────────────────────
-header "Installing model"
+header "Installing models"
 
+# Main model
 if [ -n "$MODEL_PATH" ]; then
     ln -sfn "$MODEL_PATH" "$MODEL_DEST"
     ok "Model linked: $(basename "$MODEL_DEST") → $MODEL_PATH"
 elif [ -f "$MODEL_DEST" ]; then
     ok "Model already present: $MODEL_DEST"
 else
-    info "Downloading Gemma 4 MoE model (~3.1 GB) ..."
+    info "Downloading Gemma 4 27B MoE model (~15.8 GB) ..."
     curl -fL --progress-bar -o "$MODEL_DEST" "$ATRI_MODEL_URL" \
         || { rm -f "$MODEL_DEST"; die "Model download failed. Check your connection and re-run installer."; }
     ok "Model downloaded: $MODEL_DEST"
+fi
+
+# Vision projector (mmproj)
+if [ -n "$MMPROJ_PATH" ]; then
+    ln -sfn "$MMPROJ_PATH" "$MMPROJ_DEST"
+    ok "mmproj linked: $(basename "$MMPROJ_DEST") → $MMPROJ_PATH"
+elif [ -f "$MMPROJ_DEST" ]; then
+    ok "mmproj already present: $MMPROJ_DEST"
+else
+    info "Downloading vision projector (~1.1 GB) ..."
+    curl -fL --progress-bar -o "$MMPROJ_DEST" "$ATRI_MMPROJ_URL" \
+        || { warn "mmproj download failed — vision features unavailable. Re-run installer to retry."; rm -f "$MMPROJ_DEST"; }
 fi
 
 # ─── Uninstall script ──────────────────────────────────────────────────────

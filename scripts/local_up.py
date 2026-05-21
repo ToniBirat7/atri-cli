@@ -24,10 +24,10 @@ from pathlib import Path
 DEFAULT_REPO_URL = "https://github.com/ToniBirat7/Agentic_AI.git"
 DEFAULT_REPO_DIR = "Agentic_AI"
 DEFAULT_BRANCH = "master"
-MODEL_REL_PATH = Path("models/gemma-4-E2B-it-Q4_K_M.gguf")
+MODEL_REL_PATH = Path("models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf")
 MODEL_DOWNLOAD_URL = (
-    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/"
-    "gemma-4-E2B-it-Q4_K_M.gguf?download=true"
+    "https://huggingface.co/unsloth/gemma-4-27B-it-GGUF/resolve/main/"
+    "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf?download=true"
 )
 
 PRIMARY_LAUNCHER = "atri"
@@ -342,7 +342,7 @@ def _build_llama(repo_dir: Path, use_gpu: bool, hw_config: dict | None = None) -
         ]
         if use_gpu:
             print("[local-up] GPU detected; using CUDA build")
-            cmake_args.append("-DGGML_CUDA=ON")
+            cmake_args.extend(["-DGGML_CUDA=ON", "-DGGML_FLASH_ATTN=ON", "-DGGML_CUDA_FA_ALL_QUANTS=ON"])
         else:
             print("[local-up] No GPU detected; using CPU-optimized build")
             cmake_args.extend(["-DGGML_CUDA=OFF", "-DGGML_OPENMP=ON"])
