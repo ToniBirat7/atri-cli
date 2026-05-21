@@ -253,6 +253,12 @@ def compute_launch_config(
         else:
             ctx_size = 4096
 
+    # With GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe, expert layers spill to
+    # CPU RAM so GPU VRAM is used mainly for attention + KV cache. On NVIDIA with
+    # 32 GB system RAM the model fits; allow 32K ctx even when VRAM looks tight.
+    if vendor == "nvidia" and gpu_detected and ctx_size < 32768:
+        ctx_size = 32768
+
     # GPU layers
     n_gpu_layers = 999 if gpu_detected else 0
 
@@ -305,7 +311,11 @@ def compute_launch_config(
         "kv_cache_type_k": kv_cache_type_k,
         "kv_cache_type_v": kv_cache_type_v,
         "mlock": gpu_detected,  # lock model pages into RAM when GPU is active
-        "n_cpu_moe": 0,  # set >0 for MoE models to route experts to CPU
+        # For MoE models: route expert computation to CPU threads when GPU is active.
+        # --n-cpu-moe N frees VRAM (expert layers spill to CPU RAM via unified memory)
+        # and unlocks the GPU for attention + KV cache, significantly increasing TPS.
+        # Use full cpu_count (not recommended_threads) — expert dispatch is I/O-bound.
+        "n_cpu_moe": cpu.get("cpu_count", 0) if gpu_detected else 0,
         "enable_thinking": True,
     }
 
@@ -356,7 +366,7 @@ def detect_all() -> dict:
     cpu_info = detect_cpu()
     ram_info = detect_ram()
     gpu_info = detect_gpu()
-    launch_config = compute_launch_config(gpu_info, cpu_info, ram_info)
+    launch_config = compute_launch_config(gpu_info, cpu_info, ram_info, model_size_mb=15800)
     cmake_args = compute_cmake_args(gpu_info, cpu_info)
 
     return {
