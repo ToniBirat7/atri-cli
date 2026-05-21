@@ -10,7 +10,7 @@
 #   2. Downloads the matching llama-server prebuilt binary (NVIDIA/macOS/CPU)
 #      or falls back to building from source for exotic targets
 #   3. Installs the orchestrator + CLI Python packages into a venv
-#   4. Lazy-fetches the Gemma 4 E2B Q4_K_M model on first run
+#   4. Downloads the Gemma 4 MoE Q4_K_M model (or symlinks an existing copy)
 #   5. Writes ~/.local/share/atri/ with a clean, minimal footprint
 #   6. Symlinks `atri` into ~/.local/bin/
 #   7. Generates an uninstall script
@@ -22,6 +22,7 @@ ATRI_VERSION="${ATRI_VERSION:-latest}"
 ATRI_INSTALL_ROOT="${ATRI_INSTALL_ROOT:-$HOME/.local/share/atri}"
 ATRI_BIN_DIR="${ATRI_BIN_DIR:-$HOME/.local/bin}"
 ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf}"
+ATRI_MODEL_FILENAME="gemma-4-E2B-it-Q4_K_M.gguf"
 LLAMA_CPP_RELEASE_BASE="https://github.com/ggml-org/llama.cpp/releases/latest/download"
 REPO_URL="https://github.com/ToniBirat7/Agentic_AI.git"
 BRANCH="${ATRI_BRANCH:-master}"
@@ -47,9 +48,39 @@ header()  { echo -e "\n${BOLD}${CYAN}── $* ──${RESET}"; }
 echo ""
 echo -e "${BOLD}${CYAN}  ╭────────────────────────────────────────╮${RESET}"
 echo -e "${BOLD}${CYAN}  │  Atri Code — Local AI Coding Agent     │${RESET}"
-echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 E2B + llama.cpp    │${RESET}"
+echo -e "${BOLD}${CYAN}  │  Powered by Gemma 4 MoE + llama.cpp    │${RESET}"
 echo -e "${BOLD}${CYAN}  ╰────────────────────────────────────────╯${RESET}"
 echo ""
+
+# ─── Upfront model prompt ────────────────────────────────────────────────────
+# Ask before anything long-running (build, clone, pip) so the user isn't
+# forced to wait 5-15 min before being asked about their model.
+header "Model setup"
+
+MODEL_PATH=""
+MODEL_DEST="$MODEL_DIR/$ATRI_MODEL_FILENAME"
+
+if [ -t 0 ]; then
+    read -r -p "  Do you already have the Gemma 4 MoE model (.gguf) downloaded? [y/N] " _has_model
+else
+    _has_model="n"
+fi
+
+if [[ "$_has_model" =~ ^[Yy] ]]; then
+    while true; do
+        read -r -e -p "  Enter full path to your .gguf file: " _user_path
+        _user_path="${_user_path/#\~/$HOME}"
+        if [ -f "$_user_path" ]; then
+            MODEL_PATH="$_user_path"
+            ok "Will use local model: $MODEL_PATH"
+            break
+        else
+            warn "File not found: $_user_path — try again (Ctrl-C to abort)"
+        fi
+    done
+else
+    info "Model (~3.1 GB) will be downloaded during installation"
+fi
 
 # ─── Cleanup trap (only fires on error) ────────────────────────────────────
 STAGING_DIR=""
@@ -305,6 +336,7 @@ export ATRI_INSTALL_ROOT="$ATRI_INSTALL_ROOT"
 export LLAMA_SERVER_BIN="$LLAMA_DIR/llama-server"
 export ATRI_TEMPLATE_DIR="$TEMPLATE_DIR"
 export ATRI_MODEL_DIR="$MODEL_DIR"
+export ATRI_MODEL_PATH="$MODEL_DEST"
 export ATRI_SRC_DIR="$SRC_DIR"
 export LD_LIBRARY_PATH="$LLAMA_DIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "$VENV_DIR/bin/atri" "\$@"
@@ -329,13 +361,19 @@ if [[ ":$PATH:" != *":$ATRI_BIN_DIR:"* ]]; then
     export PATH="$ATRI_BIN_DIR:$PATH"
 fi
 
-# ─── Lazy model fetch on first run ────────────────────────────────────────
-# Model is NOT downloaded here to keep installer fast.
-# atri service_manager downloads it on first `atri` invocation.
-FIRST_RUN_MARKER="$MODEL_DIR/.fetch_on_first_run"
-if [ ! -f "$MODEL_DIR/gemma-4-E2B-it-Q4_K_M.gguf" ]; then
-    echo "MODEL_URL=$ATRI_MODEL_URL" > "$FIRST_RUN_MARKER"
-    info "Model will be downloaded (~3.1 GB) on first 'atri' run"
+# ─── Model install ────────────────────────────────────────────────────────────
+header "Installing model"
+
+if [ -n "$MODEL_PATH" ]; then
+    ln -sfn "$MODEL_PATH" "$MODEL_DEST"
+    ok "Model linked: $(basename "$MODEL_DEST") → $MODEL_PATH"
+elif [ -f "$MODEL_DEST" ]; then
+    ok "Model already present: $MODEL_DEST"
+else
+    info "Downloading Gemma 4 MoE model (~3.1 GB) ..."
+    curl -fL --progress-bar -o "$MODEL_DEST" "$ATRI_MODEL_URL" \
+        || { rm -f "$MODEL_DEST"; die "Model download failed. Check your connection and re-run installer."; }
+    ok "Model downloaded: $MODEL_DEST"
 fi
 
 # ─── Uninstall script ──────────────────────────────────────────────────────
