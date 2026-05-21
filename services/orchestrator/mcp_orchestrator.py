@@ -112,6 +112,33 @@ class MCPOrchestrator:
         self.STARTUP_INITIAL_BACKOFF_SECONDS = 1.0
         self.STARTUP_MAX_BACKOFF_SECONDS = 8.0
         self.DISCOVERY_CACHE_TTL_SECONDS = 30
+        # E.3: Disk-backed tool cache path
+        self._tool_disk_cache_path = Path("runtime/state/mcp_tool_cache.json")
+        self._tool_disk_cache_ttl_seconds = 3600  # overridable via configure_runtime
+
+    def _load_disk_tool_cache(self, server_name: str) -> list | None:
+        """Load tool definitions from disk cache if present and not stale."""
+        try:
+            data = json.loads(self._tool_disk_cache_path.read_text())
+            if (
+                data.get("server_name") == server_name
+                and self._tool_disk_cache_ttl_seconds > 0
+                and time.time() - float(data.get("timestamp", 0)) < self._tool_disk_cache_ttl_seconds
+            ):
+                return data.get("tools", [])
+        except Exception:
+            pass
+        return None
+
+    def _save_disk_tool_cache(self, server_name: str, tools: list) -> None:
+        """Persist tool definitions to disk for fast startup fallback."""
+        try:
+            self._tool_disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._tool_disk_cache_path.write_text(
+                json.dumps({"server_name": server_name, "timestamp": time.time(), "tools": tools})
+            )
+        except Exception as exc:
+            logger.debug("Failed to write tool disk cache: %s", exc)
 
     def configure_runtime(
         self,
@@ -425,9 +452,20 @@ class MCPOrchestrator:
                         # Update schema lookup for coercion
                         for t in tools:
                              self._tool_schemas[(server_name, t["name"])] = t["inputSchema"]
-                        
+
                         self._tool_discovery_cache[server_name] = {"tools": tools, "cached_at": now}
+                        # E.3: persist to disk for next-startup fallback
+                        self._save_disk_tool_cache(server_name, tools)
                         return tools
+                except asyncio.TimeoutError:
+                    logger.warning("Tool discovery timed out for %s — falling back to disk cache", server_name)
+                    cached = self._load_disk_tool_cache(server_name)
+                    if cached:
+                        for t in cached:
+                            self._tool_schemas[(server_name, t["name"])] = t.get("inputSchema", {})
+                        self._tool_discovery_cache[server_name] = {"tools": cached, "cached_at": now}
+                        self._last_discovery_source[server_name] = "disk_cache"
+                        return cached
                 except Exception as exc:
                     logger.warning(f"Failed to use native MCP discovery: {exc}")
 
@@ -502,6 +540,9 @@ class MCPOrchestrator:
                 "cached_at": now,
             }
             self._last_discovery_source[server_name] = "fresh"
+            # E.3: persist to disk for next-startup fallback
+            if tools:
+                self._save_disk_tool_cache(server_name, tools)
             return tools
 
         # Placeholder for future MCP SDK mode

@@ -322,6 +322,13 @@ class ConversationsResponse(BaseModel):
     total: int
 
 
+# E.5: Confirmation bus models
+class ConfirmationResponse(BaseModel):
+    """Response from CLI/TUI to a tool_confirmation_requested event."""
+    request_id: str = Field(..., description="Matches the request_id from the SSE event")
+    approved: bool = Field(..., description="True to allow execution, False to deny")
+
+
 # Global state (Phase 1)
 # In production (Phase 9), move to database/session management
 app = FastAPI(
@@ -338,6 +345,8 @@ llm_adapter: Optional[LLMAdapter] = None
 mcp_orchestrator: Optional[MCPOrchestrator] = None
 tool_registry: Optional[ToolRegistry] = None
 agent_loop: Optional[AgentLoop] = None
+# E.5: Per-session confirmation queues for decoupled tool confirmation bus
+_active_confirmation_queues: Dict[str, asyncio.Queue] = {}
 conversation_store: Optional[OrchestratorDatabase] = None
 request_authenticator: Optional[RequestAuthenticator] = None
 rate_limiter: Optional[DistributedRateLimiter] = None
@@ -709,6 +718,8 @@ async def _run_agent_request(
         if request.plan_mode:
             active_tool_registry = _PlanModeToolRegistryProxy(tool_registry)
 
+        # E.5: Register confirmation queue so POST /confirm/{session_id} can reach this loop
+        _active_confirmation_queues[conversation_id] = agent_loop.confirmation_queue
         try:
             response, state = await agent_loop.run(
                 user_message=request.message,
@@ -728,6 +739,8 @@ async def _run_agent_request(
                 tool_registry=active_tool_registry,
                 system_prompt=system_prompt,
             )
+        finally:
+            _active_confirmation_queues.pop(conversation_id, None)
 
         if conversation_store is not None:
             tool_events: list[dict[str, Any]] = []
@@ -1629,6 +1642,21 @@ async def permissions_evaluate(
         )
 
     return PermissionsEvaluateResponse(action=decision.action, reason=decision.reason)
+
+
+# E.5: Confirmation bus endpoint
+@app.post("/confirm/{session_id}")
+async def confirm_tool(
+    session_id: str,
+    body: ConfirmationResponse,
+    http_request: Request,
+) -> Dict[str, Any]:
+    """Deliver a tool confirmation response to the waiting agent loop for a session."""
+    queue = _active_confirmation_queues.get(session_id)
+    if queue is None:
+        raise HTTPException(status_code=404, detail=f"No active confirmation for session: {session_id}")
+    await queue.put(body.dict())
+    return {"ok": True, "session_id": session_id, "request_id": body.request_id}
 
 
 @app.get("/")

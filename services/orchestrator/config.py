@@ -116,6 +116,12 @@ class MCPConfig(BaseModel):
         ge=1,
         description="Maximum number of tools to expose inline before switching to deferred/proxy mode"
     )
+    # E.3: Disk-backed tool definition cache
+    tool_cache_ttl_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description="TTL for disk-backed tool definition cache; 0 disables disk cache"
+    )
     external_servers: List[str] = Field(
         default=[],
         description=(
@@ -181,6 +187,18 @@ class AgentLoopConfig(BaseModel):
         ge=0.0,
         le=2.0,
         description="Maximum temperature clamp applied during tool-call turns"
+    )
+    # E.2: Idle compaction (proactive, at turn boundary)
+    idle_compact_threshold_pct: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of context used before idle (turn-boundary) compaction triggers"
+    )
+    idle_compact_min_turns: int = Field(
+        default=3,
+        ge=1,
+        description="Minimum completed turns before idle compaction is considered"
     )
 
     class Config:
@@ -398,6 +416,7 @@ class OrchestratorConfig(BaseModel):
                 discovery_cache_ttl_seconds=int(os.getenv("MCP_DISCOVERY_CACHE_TTL_SECONDS", "30")),
                 use_proxy=os.getenv("MCP_USE_PROXY", "false").lower() == "true",
                 max_tools_before_deferred=int(os.getenv("MCP_MAX_TOOLS_BEFORE_DEFERRED", "50")),
+                tool_cache_ttl_seconds=int(os.getenv("MCP_TOOL_CACHE_TTL_SECONDS", "3600")),
                 external_servers=[
                     s.strip()
                     for s in os.getenv("MCP_EXTERNAL_SERVERS", "").split(",")
@@ -414,6 +433,8 @@ class OrchestratorConfig(BaseModel):
                 compaction_threshold_pct=float(os.getenv("AGENT_COMPACTION_THRESHOLD_PCT", "0.80")),
                 temperature_min=float(os.getenv("AGENT_TEMPERATURE_MIN", "0.3")),
                 temperature_max=float(os.getenv("AGENT_TEMPERATURE_MAX", "0.6")),
+                idle_compact_threshold_pct=float(os.getenv("AGENT_IDLE_COMPACT_THRESHOLD_PCT", "0.70")),
+                idle_compact_min_turns=int(os.getenv("AGENT_IDLE_COMPACT_MIN_TURNS", "3")),
             ),
             prompt_policy=PromptPolicyConfig(
                 default_profile=os.getenv("PROMPT_POLICY_DEFAULT_PROFILE", "general-purpose"),

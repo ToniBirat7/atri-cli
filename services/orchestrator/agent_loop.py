@@ -71,9 +71,9 @@ except ImportError:
     from hooks import HookRegistry, hook_registry as _default_hook_registry, register_builtin_hooks, BLOCK as _HOOK_BLOCK
 
 try:
-    from .compaction import should_compact, compact_messages
+    from .compaction import should_compact, compact_messages, should_idle_compact
 except ImportError:
-    from compaction import should_compact, compact_messages
+    from compaction import should_compact, compact_messages, should_idle_compact
 
 try:
     from .session_tree import SessionTree, new_entry as new_session_entry
@@ -85,6 +85,24 @@ except ImportError:
         new_session_entry = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+async def _inject_retained_memories(messages: list) -> None:
+    """Append retained key-value memories to the system message after compaction."""
+    memory_dir = Path.home() / ".atri" / "memory"
+    if not memory_dir.exists() or not messages:
+        return
+    entries = []
+    for p in sorted(memory_dir.glob("*.json")):
+        try:
+            d = json.loads(p.read_text())
+            entries.append(f"- {d['key']}: {d['value']}")
+        except Exception:
+            pass
+    if entries and messages[0].get("role") == "system":
+        memories_block = "Retained memories:\n" + "\n".join(entries)
+        messages[0]["content"] = str(messages[0].get("content", "")) + f"\n\n{memories_block}"
+
 
 # ── Phase 5.5: Context Distillation ───────────────────────────────────────────
 TOOL_RESULT_MAX_INLINE = 2048  # 2KB threshold
@@ -271,6 +289,8 @@ class AgentLoop:
         self.state = AgentState()
         # Phase 4.5: Tool result cache
         self._tool_cache = _ToolResultCache()
+        # E.5: Confirmation bus queue — populated by POST /confirm/{session_id}
+        self.confirmation_queue: asyncio.Queue = asyncio.Queue()
 
         # Hook registry — use provided registry or fall back to global singleton
         if hook_registry is not None:
@@ -653,6 +673,7 @@ class AgentLoop:
                                 _ctx_size,
                                 event_callback,
                             )
+                            await _inject_retained_memories(self.state.messages)
                         # ─────────────────────────────────────────────────────
 
                     tool_calls = await llm_adapter.extract_tool_calls(completion)
@@ -1137,6 +1158,27 @@ class AgentLoop:
                         ensure_ascii=True,
                     )
                 )
+
+            # ── E.2: Idle compaction at turn boundary ─────────────────────────
+            _idle_ctx_size = int(
+                getattr(getattr(self.config, "llm", None), "max_tokens", 0) or 0
+            ) or 16384
+            _idle_prompt_tokens = sum(
+                len(str(m.get("content", ""))) // 4
+                for m in self.state.messages
+            )
+            if should_idle_compact(_idle_prompt_tokens, _idle_ctx_size, self.state.turn):
+                logger.info(
+                    "Turn %s: idle compaction triggered (tokens~%d, ctx=%d)",
+                    self.state.turn, _idle_prompt_tokens, _idle_ctx_size,
+                )
+                asyncio.create_task(compact_messages(
+                    self.state.messages, llm_adapter, _idle_ctx_size, event_callback,
+                ))
+                await self._emit_event(
+                    event_callback, {"type": "context_compacted", "source": "idle"}
+                )
+            # ──────────────────────────────────────────────────────────────────
 
             self.state.status = "completed"
             _log_event(
