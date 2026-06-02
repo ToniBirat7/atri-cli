@@ -706,11 +706,16 @@ def _handle_interactive_local_command(
             config_path = repo_root / "runtime" / "llm" / "launch_config.json"
             if config_path.exists():
                 hw = json.loads(config_path.read_text(encoding="utf-8"))
+                info["Architecture"] = "MoE (Mixture-of-Experts)" if hw.get("is_moe") else "dense"
                 info["GPU"] = hw.get("gpu_name", "unknown")
                 info["VRAM"] = f"{hw.get('gpu_vram_mb', 0)} MB"
+                info["GPU layers"] = str(hw.get("recommended_n_gpu_layers", "?"))
+                if hw.get("is_moe") and int(hw.get("n_cpu_moe", 0) or 0) > 0:
+                    info["Expert offload"] = f"experts on CPU (--n-cpu-moe {hw.get('n_cpu_moe')})"
                 info["Context"] = f"{hw.get('recommended_ctx_size', 0)} tokens"
                 info["Flash Attn"] = "✓" if hw.get("flash_attn") else "✗"
-                info["KV Cache"] = hw.get("kv_cache_type_k", "f16")
+                info["KV Cache"] = f"{hw.get('kv_cache_type_k', 'f16')}/{hw.get('kv_cache_type_v', 'f16')}"
+                info["mlock"] = "✓" if hw.get("mlock") else "✗"
                 info["Threads"] = str(hw.get("recommended_threads", "?"))
         except Exception:
             pass
