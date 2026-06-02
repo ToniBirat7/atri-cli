@@ -21,12 +21,14 @@ LLAMA_CTV ?= q8_0
 # --cram: host-RAM KV prefix cache (256MB → 93% TTFT reduction on repeated prompts)
 LLAMA_CRAM ?= 256
 
-# Colors for output
-BLUE := \033[0;34m
-GREEN := \033[0;32m
-YELLOW := \033[0;33m
-RED := \033[0;31m
-NC := \033[0m # No Color
+# Colors for output — use $(shell printf ...) so the value holds real ESC
+# bytes. Plain `echo` (make's /bin/sh) does not interpret backslash escapes,
+# which is why the literal \033[... codes were printing before.
+BLUE := $(shell printf '\033[0;34m')
+GREEN := $(shell printf '\033[0;32m')
+YELLOW := $(shell printf '\033[0;33m')
+RED := $(shell printf '\033[0;31m')
+NC := $(shell printf '\033[0m')
 
 # Service ports
 LLAMA_PORT := 8000
