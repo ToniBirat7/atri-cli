@@ -89,13 +89,18 @@ async def test_tool_calling():
     print("TEST 4: Chat with Tool Calling")
     print("="*80)
     
+    # Exercise tool calling WITHIN the MCP sandbox. The repo root is the
+    # orchestrator service's grandparent dir; /tmp would be out of bounds and
+    # always permission-denied, which never validated tool calling.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     payload = {
-        "message": "What files are in the /tmp directory?",
-        "system": "You are a helpful assistant. Use tools to help the user."
+        "message": "How many Python files are in the services/mcp directory? Use list_directory.",
+        "allowed_directory": repo_root,
+        "permission_mode": "bypassPermissions",
     }
-    
+
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             start = time.time()
             resp = await client.post(
                 "http://127.0.0.1:8001/chat",
@@ -106,7 +111,8 @@ async def test_tool_calling():
             if resp.status_code == 200:
                 data = resp.json()
                 response = data.get('response', '')
-                tools_used = data.get('tools_used', 0)
+                # ChatResponse exposes the count as 'tool_calls', not 'tools_used'.
+                tools_used = data.get('tool_calls', data.get('tools_used', 0))
                 print(f"  ok Chat completed in {elapsed:.2f}s")
                 print(f"  Response: {response[:100]}{'...' if len(response) > 100 else ''}")
                 print(f"  Tools used: {tools_used}")
