@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 # Rich imports — gracefully degrade if not available
 try:
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.spinner import Spinner
@@ -381,9 +381,11 @@ class RichTUI:
             print(token, end="", flush=True)
             return
 
-        self._stream_buffer += token
-        
         if is_first:
+            # Start fresh — drop any buffer left over from a previous turn whose
+            # Live was stopped early (e.g. by stop_thinking on a mid-stream
+            # confirmation), so stale text isn't prepended to this response.
+            self._stream_buffer = token
             self.console.print()
             self.console.print(Text("  atri ", style="bold black on bright_cyan"))
             self._live = Live(
@@ -393,8 +395,10 @@ class RichTUI:
                 transient=False, # We want to keep the final output
             )
             self._live.start()
-        elif self._live:
-            self._live.update(Markdown(self._stream_buffer))
+        else:
+            self._stream_buffer += token
+            if self._live:
+                self._live.update(Markdown(self._stream_buffer))
 
     def finish_streaming(self) -> None:
         """Finalize streaming output."""
@@ -407,8 +411,9 @@ class RichTUI:
             self._live.update(Markdown(self._stream_buffer))
             self._live.stop()
             self._live = None
-            self._stream_buffer = ""
             self.console.print() # Final spacing
+        # Always clear the buffer, even if _live was already stopped early.
+        self._stream_buffer = ""
 
     # ─── Status / summary ─────────────────────────────────────────────────
 

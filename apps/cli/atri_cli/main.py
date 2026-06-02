@@ -654,7 +654,7 @@ def _handle_interactive_local_command(
                     for m in models:
                         active_marker = " [active]" if m.get("is_active") else ""
                         default_marker = " [default]" if m.get("is_default") else ""
-                        print(f"  • {m['name']}{active_marker}{default_marker}  ({m.get('size_mb', '?')} MB)")
+                        print(f"  • {m.get('name', '?')}{active_marker}{default_marker}  ({m.get('size_mb', '?')} MB)")
                 else:
                     _RICH.render_warning("No models discovered. Place .gguf files in the models/ directory.")
             except Exception:
@@ -783,7 +783,7 @@ def _handle_interactive_local_command(
                 ready = response.get("ready", False)
                 status_label = "connected" if ready else "degraded"
                 _RICH.render_info(f"MCP status: {status_label}")
-                if mcp_servers:
+                if isinstance(mcp_servers, dict) and mcp_servers:
                     for srv, srv_info in mcp_servers.items():
                         srv_status = srv_info.get("status", "unknown") if isinstance(srv_info, dict) else str(srv_info)
                         print(f"  {srv}: {srv_status}")
@@ -796,7 +796,7 @@ def _handle_interactive_local_command(
                     if tools:
                         _RICH.render_info(f"Available tools ({len(tools)}):")
                         for t in tools[:20]:
-                            print(f"  • {t['name']} [{t.get('server', '?')}]")
+                            print(f"  • {t.get('name', '?')} [{t.get('server', '?')}]")
                         if len(tools) > 20:
                             print(f"  ... and {len(tools) - 20} more")
                 except Exception:
@@ -1165,16 +1165,20 @@ def _run_print_mode(
 
 def _handle_diff_review(event: dict[str, Any]) -> tuple[str, Optional[str]]:
     """Handles the side-by-side diff review in VS Code."""
-    review_data = event.get("review", {})
+    review_data = event.get("review", {}) if isinstance(event.get("review"), dict) else {}
     path = review_data.get("path")
     before = review_data.get("before", "")
     after = review_data.get("after", "")
-    
+
     _status_clear()
     _RICH.stop_thinking()
-    
+
+    if not path:
+        _RICH.render_warning("Review event missing a file path; skipping.")
+        return ("EDIT_REJECTED", None)
+
     _RICH.render_review_header(path)
-    
+
     file_basename = os.path.basename(path)
     
     # Create temp files for comparison
@@ -1356,6 +1360,8 @@ def _run_interactive(
         first_content_chunk = True
         chunks: list[str] = []
         while True: # Plan approval loop
+            event: dict = {}        # bound even if the stream yields nothing
+            rerun = False           # set only when a plan/review is approved
             for event in client.stream_chat(payload):
                 if event.get("done"):
                     break
@@ -1368,7 +1374,8 @@ def _run_interactive(
                     approved = _RICH.render_plan(goal, steps)
                     if approved:
                         payload["message"] = "Plan approved. Proceed with execution."
-                        break 
+                        rerun = True
+                        break
                     else:
                         _RICH.render_warning("Plan rejected. Returning to input.")
                         payload = None # Signal rejection
@@ -1418,12 +1425,13 @@ def _run_interactive(
                         review_result, final_content = _handle_diff_review(event["event"])
                         if review_result == "EDIT_APPROVED":
                             # Actually apply to the REAL file now!
-                            file_path = event["event"]["review"]["path"]
+                            file_path = (event.get("event", {}).get("review", {}) or {}).get("path")
                             try:
                                 with open(file_path, "w", encoding="utf-8") as f:
                                     f.write(final_content)
                                 _print_success(f"Changes applied to {file_path}")
                                 payload["message"] = f"Review approved and applied to {file_path}. Proceed."
+                                rerun = True
                                 break
                             except Exception as e:
                                 _print_error(f"Failed to write to {file_path}: {e}")
@@ -1584,13 +1592,13 @@ def _run_interactive(
                     chunks.append(text)
                     continue
             
-            # Check if we should re-run the stream due to plan approval
-            if payload is None:
-                break # Rejected
-            if event.get("done"):
-                break # Normal completion
-            # If we reached here, it means we hit a 'break' inside 'if approved', so we re-run with new payload
-            pass
+            # Re-run only when a plan/review was approved (payload re-pointed to a
+            # follow-up message). Any other exit — done, error, rejection, or an
+            # empty stream — ends the turn. Previously this fell through to a bare
+            # re-run and looped forever on server errors or empty streams.
+            if rerun and payload is not None:
+                continue
+            break
 
         response_text = "".join(chunks)
         _status_clear()
