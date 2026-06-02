@@ -1130,6 +1130,7 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
                 event_callback=_on_progress,
             )
 
+        run_task: Optional[asyncio.Task] = None
         try:
             yield encode_sse_data(stream_event_request_started(request_id))
             yield encode_sse_data(stream_event_session_started(conversation_id))
@@ -1160,6 +1161,12 @@ async def chat_stream(request: ChatRequest, http_request: Request) -> StreamingR
             yield "data: [DONE]\n\n"
         finally:
             set_request_id(None)
+            # If the client disconnected (or any error broke the stream) while the
+            # agent loop was still running, cancel it. Otherwise the detached task
+            # keeps holding llama-server's single (--parallel 1) slot and the next
+            # request blocks until the abandoned generation finishes.
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
 
     return StreamingResponse(
         event_stream(),
