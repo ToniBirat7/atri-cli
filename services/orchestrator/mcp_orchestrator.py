@@ -416,9 +416,13 @@ class MCPOrchestrator:
                 if age_seconds <= self.DISCOVERY_CACHE_TTL_SECONDS:
                     self._last_discovery_source[server_name] = "cache"
                     tools = list(cache_entry.get("tools", []))
-                    # Ensure schema lookup is populated even on cache hits
+                    # Ensure schema lookup is populated even on cache hits. Use
+                    # .get() — a tool from the disk-cache fallback may omit
+                    # inputSchema, and hard indexing would KeyError mid-request.
                     for t in tools:
-                        self._tool_schemas[(server_name, t["name"])] = t["inputSchema"]
+                        name = t.get("name")
+                        if name:
+                            self._tool_schemas[(server_name, name)] = t.get("inputSchema", {})
                     return tools
 
         server = self._servers[server_name]
