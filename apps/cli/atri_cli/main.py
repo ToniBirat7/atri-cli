@@ -555,6 +555,31 @@ def _build_payload(
     return payload
 
 
+def _resolve_model_display(client: Optional["OrchestratorClient"]) -> str:
+    """Best-effort name of the model actually being served, for display.
+
+    Queries the orchestrator's /models endpoint (active → default → first) so the
+    welcome panel and /model reflect reality instead of a hardcoded string.
+    Falls back to a generic label if services aren't reachable.
+    """
+    if client is None:
+        return "local model"
+    try:
+        models = client.request_json("GET", "/models").get("models", [])
+        if not models:
+            return "local model"
+        chosen = (
+            next((m for m in models if m.get("is_active")), None)
+            or next((m for m in models if m.get("is_default")), None)
+            or models[0]
+        )
+        name = chosen.get("name") or "local model"
+        size = chosen.get("size_mb")
+        return f"{name}  ({int(size)} MB)" if size else name
+    except Exception:
+        return "local model"
+
+
 def _extract_candidate_paths(tool_input: Any) -> list[str]:
     if not isinstance(tool_input, dict):
         return []
@@ -661,7 +686,7 @@ def _handle_interactive_local_command(
                 pass
 
         info = {
-            "Model": "Gemma 4 27B MoE (Q4_K_M)",
+            "Model": _resolve_model_display(client),
             "Runtime": "llama.cpp",
             "Reasoning": "enabled",
         }
@@ -1257,7 +1282,7 @@ def _run_interactive(
         _RICH.render_welcome(
             api_url=client.base_url,
             permission_mode=permission_state.mode,
-            model="Gemma 4 27B MoE (Q4_K_M)",
+            model=_resolve_model_display(client),
             reasoning=True,
         )
         if conversation_id:
