@@ -1,13 +1,10 @@
 """
 Shared pytest fixtures for the orchestrator test suite.
 """
-import asyncio
 import sys
-import os
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
 # Ensure orchestrator package is importable when running from repo root
 _ORCH_DIR = Path(__file__).resolve().parent.parent

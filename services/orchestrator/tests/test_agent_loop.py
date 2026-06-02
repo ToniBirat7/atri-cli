@@ -1,16 +1,13 @@
 """
 Tests for services/orchestrator/agent_loop.py
 """
-import asyncio
 import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, Optional
 
 import pytest
-import pytest_asyncio
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:
@@ -18,7 +15,7 @@ if str(_ORCH_DIR) not in sys.path:
 
 from agent_loop import AgentLoop, TurnOutcome
 from hooks import HookRegistry
-from config import OrchestratorConfig, LLMConfig, MCPConfig, AgentLoopConfig
+from config import OrchestratorConfig, LLMConfig, AgentLoopConfig
 
 
 # ── Minimal stubs ────────────────────────────────────────────────────────────────

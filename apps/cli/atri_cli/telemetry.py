@@ -118,8 +118,8 @@ class SessionTelemetry:
     def summary(self) -> str:
         """Human-readable summary of session telemetry."""
         lines = [
-            f"Session Summary",
-            f"================",
+            "Session Summary",
+            "================",
             f"Duration: {self.session_duration_seconds:.1f}s",
             f"Turns: {self.total_turns}",
             f"Tool calls: {self.total_tool_calls}",
@@ -129,9 +129,9 @@ class SessionTelemetry:
             f"Avg turn time: {self.avg_turn_duration:.1f}s",
         ]
         if self.exceeded_max_turns:
-            lines.append(f"⚠ Max turns limit exceeded")
+            lines.append("⚠ Max turns limit exceeded")
         if self.exceeded_budget:
-            lines.append(f"⚠ Budget limit exceeded")
+            lines.append("⚠ Budget limit exceeded")
         if self.errors:
             lines.append(f"Errors: {len(self.errors)}")
         return "\n".join(lines)

@@ -1,5 +1,4 @@
 import os
-import difflib
 import logging
 from typing import List, Optional
 

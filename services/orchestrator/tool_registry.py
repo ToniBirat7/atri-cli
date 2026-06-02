@@ -11,7 +11,6 @@ Phase 6: Tool access control and risk tiers.
 
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
-import json
 import logging
 
 logger = logging.getLogger(__name__)

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -23,16 +22,13 @@ try:
     from rich.console import Console, Group
     from rich.markdown import Markdown
     from rich.panel import Panel
-    from rich.spinner import Spinner
     from rich.live import Live
     from rich.syntax import Syntax
     from rich.table import Table
     from rich.text import Text
     from rich.theme import Theme
     from rich.rule import Rule
-    from rich.columns import Columns
-    from rich.box import ROUNDED, HEAVY, SIMPLE, DOUBLE
-    from rich import box
+    from rich.box import ROUNDED, HEAVY
 
     RICH_AVAILABLE = True
 except ImportError:
@@ -377,7 +373,7 @@ class RichTUI:
         """Stream response in real-time with markdown rendering."""
         if not RICH_AVAILABLE:
             if is_first:
-                print(f"\natri> ", end="", flush=True)
+                print("\natri> ", end="", flush=True)
             print(token, end="", flush=True)
             return
 
@@ -499,7 +495,7 @@ class RichTUI:
             return resp in {"y", "yes"}
 
         content = Text()
-        content.append(f"Goal: ", style="bold bright_white")
+        content.append("Goal: ", style="bold bright_white")
         content.append(f"{goal}\n\n", style="white")
         
         table = Table(show_header=False, box=None, padding=(0, 1))
@@ -632,7 +628,7 @@ class RichTUI:
         content.append(tool_name, style="bold bright_magenta")
         if description:
             content.append(f"\n  {description}", style="dim white")
-        content.append(f"\n\n  Risk tier: ", style="dim")
+        content.append("\n\n  Risk tier: ", style="dim")
         content.append(risk_tier.upper(), style=f"bold {color}")
         content.append("   Press ", style="dim")
         content.append("y", style="bold bright_green")

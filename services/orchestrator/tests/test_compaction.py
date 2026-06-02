@@ -4,7 +4,6 @@ Tests for services/orchestrator/compaction.py
 import sys
 from pathlib import Path
 import pytest
-import pytest_asyncio
 
 _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:

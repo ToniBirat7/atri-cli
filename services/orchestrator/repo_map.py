@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 class RepoMap:
     def __init__(self, db_path: str, repo_root: str):

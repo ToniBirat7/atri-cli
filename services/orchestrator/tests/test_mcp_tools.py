@@ -1,9 +1,6 @@
 """Unit tests for MCP tool sandboxing and intent detection."""
 import os
 import sys
-import json
-import tempfile
-import threading
 from pathlib import Path
 
 import pytest
@@ -150,7 +147,6 @@ def test_todo_write_requires_content(mcp_mod):
 def test_write_and_read_roundtrip(mcp_mod, tmp_path, monkeypatch):
     """write_file → read_text_file roundtrip must preserve content."""
     # Allow tmp_path as a valid dir for this test
-    from unittest.mock import patch
     target = "test_roundtrip_xyz.txt"
     content = "Hello from atri tests\nLine 2\n"
 

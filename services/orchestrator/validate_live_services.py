@@ -4,9 +4,7 @@ Phase 1 Validation Report - Comprehensive Testing
 Tests live services and GPU utilization
 """
 import subprocess
-import sys
 import os
-import json
 import time
 import asyncio
 import httpx
@@ -139,10 +137,10 @@ async def test_gpu_status():
         
         if result.returncode == 0:
             info = result.stdout.strip()
-            print(f"  ok GPU Status:")
+            print("  ok GPU Status:")
             print(f"    {info}")
         else:
-            print(f"  warning nvidia-smi not available")
+            print("  warning nvidia-smi not available")
     except Exception as e:
         print(f"  warning GPU check skipped: {e}")
 

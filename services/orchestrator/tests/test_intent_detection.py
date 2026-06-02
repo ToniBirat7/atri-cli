@@ -137,7 +137,7 @@ def test_find_files_named_does_NOT_map_to_grep():
 # ── _correct_tool_calls_for_intent ────────────────────────────────────────────
 
 try:
-    from llm_adapter import ToolUse
+    from llm_adapter import ToolUse  # noqa: F401 — availability probe
     _HAS_TOOLUSE = True
 except ImportError:
     _HAS_TOOLUSE = False

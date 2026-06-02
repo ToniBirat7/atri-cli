@@ -19,7 +19,12 @@ Phase 5: Circuit-breaker, retry logic, observability.
 Phase 7: Full observability with structured logging and tracing.
 """
 
-from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable
+from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable, TYPE_CHECKING
+
+if TYPE_CHECKING:  # resolve forward-ref string annotations for type checkers only
+    from llm_adapter import LLMAdapter, ToolUse
+    from tool_registry import ToolRegistry
+    from mcp_orchestrator import MCPOrchestrator
 from dataclasses import dataclass, field
 from enum import Enum
 """
@@ -43,7 +48,8 @@ import hashlib
 import time
 from pathlib import Path
 try:
-    from ..mcp.diff_engine import DiffEngine
+    # Side-effect probe: ensure services.mcp is importable in the package layout.
+    from ..mcp.diff_engine import DiffEngine  # noqa: F401
 except ImportError:
     import sys
     import os
@@ -52,13 +58,14 @@ except ImportError:
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
     try:
-        from services.mcp.diff_engine import DiffEngine
+        # Side-effect probe: confirm services.mcp is importable; if not, add the
+        # mcp dir to sys.path so later tool-execution imports resolve.
+        import services.mcp.diff_engine  # noqa: F401
     except ImportError:
         # Fallback for different execution contexts
         _mcp_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mcp"))
         if _mcp_path not in sys.path:
             sys.path.insert(0, _mcp_path)
-        from diff_engine import DiffEngine
 
 try:
     from .logging_context import get_request_id, set_turn_id, get_turn_id
@@ -881,10 +888,8 @@ class AgentLoop:
                                     after_content = None
                                     if routed_tool_name == "edit_diff":
                                         # Parse unified diff to compute preview without mutating the file
-                                        import difflib as _difflib
                                         diff_text = validated_input.get("diff", "")
                                         try:
-                                            lines = before_content.splitlines(keepends=True)
                                             patched: list[str] = []
                                             for patch_line in diff_text.splitlines(keepends=True):
                                                 if patch_line.startswith("+") and not patch_line.startswith("+++"):

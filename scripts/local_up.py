@@ -270,9 +270,14 @@ def _download_model(model_path: Path) -> None:
 
 
 def _ensure_model(repo_dir: Path) -> Path:
+    # Prefer any model already present (E2B in repo, or one via ATRI_MODEL_PATH)
+    # — don't download the 16 GB 26B just because that specific file is absent.
+    existing = _resolve_local_model(repo_dir)
+    if existing is not None and existing.exists():
+        return existing
+    # Nothing available — download the default (26B) as a last resort.
     model_path = repo_dir / MODEL_REL_PATH
-    if not model_path.exists():
-        _download_model(model_path)
+    _download_model(model_path)
     return model_path
 
 
@@ -763,7 +768,7 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
 
     print("\n[local-up] Startup summary:")
     print(f"  mode: {mode}")
-    print(f"  reasoning: enabled")
+    print("  reasoning: enabled")
     print(f"  flash attention: {'enabled' if flash_attn else 'disabled'}")
     print(f"  context size: {ctx_size}")
     print(f"  llama health: {'ok' if llama_ok else 'failed'}")

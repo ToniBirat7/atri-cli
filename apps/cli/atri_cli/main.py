@@ -29,7 +29,6 @@ from .telemetry import SessionTelemetry
 from .tui import DashboardFrame, TUIRenderer, TIMELINE_VERBOSITY_LEVELS, TurnStatus
 from .rich_tui import RichTUI
 from .service_manager import ServiceManager
-from .renderer import DifferentialRenderer
 from .diff_renderer import render_diff_for_tool_result
 
 try:
@@ -2040,8 +2039,6 @@ def _cleanup(mode: str, assume_yes: bool) -> None:
 def _stop_services():
     """Explicitly stop background services."""
     manager = ServiceManager()
-    status = manager.status()
-    
     _RICH.render_info("Stopping Atri Code services...")
     
     # We need to manually terminate existing processes by port since we might not 'own' them in this instance

@@ -52,7 +52,6 @@ class OrchestratorDatabase:
         self._scheme = urlparse(database_url).scheme or "sqlite"
         self._db_path = self._resolve_sqlite_path(database_url) if self._scheme == "sqlite" else None
         self._postgres_dsn = self._resolve_postgres_dsn(database_url) if self._scheme in {"postgresql", "postgres"} else None
-        self._lock = asyncio.Lock()
 
     @staticmethod
     def _utc_now() -> str:

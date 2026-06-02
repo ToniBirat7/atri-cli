@@ -10,7 +10,7 @@ _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(_ORCH_DIR))
 
-from skills_loader import discover_skills, get_skill_body, Skill
+from skills_loader import discover_skills, get_skill_body
 
 
 SKILL_MD_CONTENT = """\
