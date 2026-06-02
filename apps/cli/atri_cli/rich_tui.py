@@ -651,6 +651,95 @@ class RichTUI:
         except (EOFError, KeyboardInterrupt):
             return False
 
+    @staticmethod
+    def _format_tool_confirmation_detail(tool_name: str, tool_input: dict) -> str:
+        """Human-readable preview of what a tool will do, for the confirm prompt."""
+        ti = tool_input or {}
+
+        def _clip(value: Any, limit: int = 400) -> str:
+            text = str(value)
+            return text if len(text) <= limit else text[:limit] + " …"
+
+        if tool_name in {"edit_file", "edit_file_hashline"}:
+            old = ti.get("exact_text_to_replace") or ti.get("old_text") or ti.get("edits") or ""
+            new = ti.get("new_text_content") or ti.get("new_text") or ""
+            path = ti.get("target_file_path") or ti.get("path") or "?"
+            lines = [f"file: {path}"]
+            if old:
+                lines += [f"- {l}" for l in _clip(old).splitlines()[:8]]
+            if new:
+                lines += [f"+ {l}" for l in _clip(new).splitlines()[:8]]
+            return "\n".join(lines)
+        if tool_name == "edit_diff":
+            return f"file: {ti.get('target_file_path', '?')}\n{_clip(ti.get('diff', ''))}"
+        if tool_name in {"write_file", "write_json_file", "append_file", "create_file"}:
+            body = ti.get("content") or ti.get("data") or ""
+            return f"file: {ti.get('target_file_path', '?')}\n{_clip(body)}"
+        if tool_name in {"delete_path", "delete_file", "remove_file"}:
+            rec = " (recursive)" if ti.get("recursive") else ""
+            return f"delete: {ti.get('target_path') or ti.get('path') or '?'}{rec}"
+        if tool_name in {"move_file", "rename_file"}:
+            return f"{ti.get('source_path', '?')}  →  {ti.get('destination_path', '?')}"
+        if tool_name in {"bash_exec", "run_shell", "run_command"}:
+            return f"$ {_clip(ti.get('command') or ti.get('cmd') or '?')}"
+        if tool_name in {"create_directory", "create_project"}:
+            return f"create: {ti.get('target_directory_path') or ti.get('target_project_path') or '?'}"
+        # Fallback: dump args
+        return "\n".join(f"{k}: {_clip(v, 200)}" for k, v in ti.items()) or "(no arguments)"
+
+    def render_tool_confirmation(
+        self, tool_name: str, tool_input: dict, risk_tier: str = "yellow"
+    ) -> str:
+        """Interactive confirmation for a state-changing tool.
+
+        Returns 'allow' (run once), 'always' (auto-approve this tool for the
+        session), or 'deny'.
+        """
+        _tier_color = {"red": "bright_red", "yellow": "bright_yellow", "green": "bright_green"}
+        _tier_icon = {"red": "⛔ Destructive", "yellow": "✎ Edit", "green": "✓ Safe"}
+        color = _tier_color.get(risk_tier, "bright_yellow")
+        icon = _tier_icon.get(risk_tier, "⚠ Confirm")
+        detail = self._format_tool_confirmation_detail(tool_name, tool_input)
+
+        if not RICH_AVAILABLE:
+            print(f"\n  [{icon}] {tool_name}\n  {detail}")
+            resp = input("  Allow? [y]es / [a]lways / [N]o: ").strip().lower()
+            if resp in {"a", "always"}:
+                return "always"
+            return "allow" if resp in {"y", "yes"} else "deny"
+
+        content = Text()
+        content.append(f"{icon}  ", style=f"bold {color}")
+        content.append(tool_name, style="bold bright_magenta")
+        if detail:
+            content.append("\n\n")
+            content.append(detail, style="white")
+        panel = Panel(
+            content,
+            title="Confirm tool call",
+            title_align="left",
+            border_style=color,
+            box=HEAVY,
+            padding=(0, 1),
+        )
+        self.console.print()
+        self.console.print(panel)
+        hint = Text("  ")
+        hint.append("y", style="bold bright_green")
+        hint.append(" allow once    ", style="dim")
+        hint.append("a", style="bold bright_cyan")
+        hint.append(" always allow    ", style="dim")
+        hint.append("n", style="bold bright_red")
+        hint.append(" deny", style="dim")
+        self.console.print(hint)
+        try:
+            resp = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "deny"
+        if resp in {"a", "always"}:
+            return "always"
+        return "allow" if resp in {"y", "yes"} else "deny"
+
     # ─── Slash command help ───────────────────────────────────────────────
 
     def render_help(self) -> None:
