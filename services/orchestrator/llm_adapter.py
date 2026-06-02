@@ -476,17 +476,28 @@ class LLMAdapter:
         if calls:
             return calls
 
-        # Bare JSON fallback — look for {"name": "...", "arguments": {...}} anywhere
-        bare_re = re.compile(r'\{"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}\s*\}')
-        for m in bare_re.finditer(text):
-            raw = self._strip_chatml_tokens(m.group(0))
+        # Bare JSON fallback — scan for balanced {...} objects anywhere in the text
+        # and keep the ones that look like tool calls. A flat regex (\{[^{}]*\})
+        # cannot balance braces, so it silently dropped tool calls with nested
+        # arguments (e.g. todo_write's {"todos": [{...}]}). raw_decode handles
+        # arbitrary nesting.
+        stripped = self._strip_chatml_tokens(text)
+        decoder = json.JSONDecoder()
+        idx = 0
+        length = len(stripped)
+        while idx < length:
+            if stripped[idx] != "{":
+                idx += 1
+                continue
             try:
-                obj = json.loads(raw)
+                obj, end = decoder.raw_decode(stripped, idx)
             except json.JSONDecodeError:
+                idx += 1
                 continue
             call = self._try_parse_tool_call_object(obj)
             if call:
                 calls.append(call)
+            idx = end if end > idx else idx + 1
 
         return calls
 
@@ -638,7 +649,9 @@ class LLMAdapter:
         messages = list(messages)  # shallow copy — don't mutate caller's list
         for i, msg in enumerate(messages):
             if msg.get("role") == "system":
-                messages[i] = {**msg, "content": msg["content"] + schema_text}
+                # content may be None/absent in some message dicts; coerce to ""
+                # so we don't raise TypeError mid-request.
+                messages[i] = {**msg, "content": (msg.get("content") or "") + schema_text}
                 return messages
 
         # No system message found — prepend one
