@@ -115,8 +115,18 @@ _TOOL_RISK_TIER: dict[str, str] = {
 def _tool_risk_tier(tool_name: str) -> str:
     return _TOOL_RISK_TIER.get(tool_name, "yellow")
 
+_INIT_PROMPT = (
+    "Explore this project and create a concise context file named ATRI.md at the "
+    "repository root. First call get_repo_map (or list_directory) to understand the "
+    "layout, then read README.md and one or two key source files. Then use write_file "
+    "to create ATRI.md with these sections: a one-paragraph overview of what the project "
+    "does, the tech stack, how to run it, and a short bulleted list of the main "
+    "directories and their purpose. Keep it under 40 lines. Confirm the path when done."
+)
+
 SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/help": "Show interactive command help",
+    "/init": "Analyze the project and generate an ATRI.md context file",
     "/mode": "Show or set permission mode",
     "/compact": "Toggle compact output mode",
     "/model": "List available models or set active model (/model <name>)",
@@ -1328,9 +1338,16 @@ def _run_interactive(
 
         if not user_input:
             continue
-            
+
+        # /init is a convenience that drives the agent to generate a project
+        # context file. Show "/init" but send the crafted exploration prompt.
+        _display_input = user_input
+        if user_input.strip() == "/init":
+            _RICH.render_info("Analyzing the project to generate ATRI.md …")
+            user_input = _INIT_PROMPT
+
         if not fullscreen_mode:
-            _RICH.render_user_message(user_input)
+            _RICH.render_user_message(_display_input)
         if user_input in {"/exit", "/quit"}:
             _print_success("Goodbye.")
             return
