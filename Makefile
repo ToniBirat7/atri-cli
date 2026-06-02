@@ -244,6 +244,10 @@ test: ## Run test suite (skips GPU-only tests)
 		fi && \
 		.venv/bin/python -m pytest tests/ -v -m "not gpu_only"
 
+eval: ## Run the live agentic eval battery against running services (REPEAT=n)
+	@echo "$(BLUE)Running agentic eval harness...$(NC)"
+	@services/orchestrator/.venv/bin/python scripts/eval_harness.py --repeat $(or $(REPEAT),1)
+
 test-cov: ## Run test suite with HTML coverage report
 	@echo "$(BLUE)Running tests with coverage...$(NC)"
 	@cd services/orchestrator && \
