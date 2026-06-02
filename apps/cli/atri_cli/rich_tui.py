@@ -224,36 +224,46 @@ class RichTUI:
 
     # ─── Tool call rendering ──────────────────────────────────────────────
 
+    # Human-readable verb per tool (Claude-Code style action labels).
+    _TOOL_VERBS = {
+        "read_text_file": "Read", "read_file": "Read", "read_multiple_files": "Read",
+        "write_file": "Write", "write_json_file": "Write", "create_file": "Write",
+        "append_file": "Append",
+        "edit_file": "Update", "edit_diff": "Update", "edit_file_hashline": "Update",
+        "list_directory": "List", "directory_tree": "Tree", "get_file_info": "Stat",
+        "grep_codebase": "Search", "search_files": "Search", "search_symbols": "Symbols",
+        "bash_exec": "Bash", "get_repo_map": "Map", "view_git_diff": "Diff",
+        "delete_path": "Delete", "move_file": "Move", "create_directory": "Mkdir",
+        "create_project": "Scaffold", "search_web": "Web", "fetch_url": "Fetch",
+        "todo_write": "Plan", "propose_plan": "Plan", "set_allowed_directory": "Workspace",
+    }
+
+    @classmethod
+    def _tool_key_arg(cls, tool_name: str, tool_input: dict) -> str:
+        """The single most relevant argument to show next to the verb."""
+        ti = tool_input or {}
+        for key in ("target_file_path", "path", "file_path", "target_path",
+                    "target_directory_path", "command", "cmd", "pattern", "query", "url"):
+            if ti.get(key):
+                val = str(ti[key])
+                return val if len(val) <= 72 else "…" + val[-71:]
+        # move: src → dst
+        if ti.get("source_path"):
+            return f"{ti.get('source_path')} → {ti.get('destination_path', '?')}"
+        return ""
+
     def render_tool_call(self, tool_name: str, tool_input: dict | None = None) -> None:
-        """Render a tool call in a magenta-bordered panel."""
+        """Render a tool call as a single compact action line: ● Verb arg."""
+        verb = self._TOOL_VERBS.get(tool_name, tool_name)
+        arg = self._tool_key_arg(tool_name, tool_input or {})
         if not RICH_AVAILABLE:
-            print(f"  Tool: {tool_name}")
-            if tool_input:
-                for k, v in tool_input.items():
-                    val = str(v)[:80]
-                    print(f"     {k}: {val}")
+            print(f"  • {verb} {arg}".rstrip())
             return
-
-        content = Text()
-        if tool_input:
-            for key, value in tool_input.items():
-                content.append(f"  {key}: ", style="bold bright_white")
-                val_str = str(value)
-                if len(val_str) > 120:
-                    val_str = val_str[:117] + "..."
-                content.append(f"{val_str}\n", style="white")
-        else:
-            content.append("  (no arguments)\n", style="dim")
-
-        panel = Panel(
-            content,
-            title=f"Tool: {tool_name}",
-            title_align="left",
-            border_style="bright_magenta",
-            box=ROUNDED,
-            padding=(0, 1),
-        )
-        self.console.print(panel)
+        line = Text("  ● ", style="bold bright_magenta")
+        line.append(verb, style="bold bright_white")
+        if arg:
+            line.append(f"  {arg}", style="dim")
+        self.console.print(line, highlight=False)
 
     @staticmethod
     def _detect_language(tool_name: str, result: str, tool_input: dict | None = None) -> str | None:
@@ -295,6 +305,44 @@ class RichTUI:
             return "json" if stripped.startswith("{") else None
         return None
 
+    @staticmethod
+    def _result_summary(tool_name: str, result: str) -> str:
+        """One-line summary of a tool result (count, output head, or 'ok')."""
+        import json as _json
+        s = (result or "").strip()
+        try:
+            obj = _json.loads(s)
+            if isinstance(obj, dict):
+                if isinstance(obj.get("line_count"), int):
+                    return f"{obj['line_count']} lines"
+                for key, noun in (("matches", "matches"), ("entries", "items"),
+                                  ("symbols", "symbols"), ("results", "results")):
+                    if isinstance(obj.get(key), list):
+                        return f"{len(obj[key])} {noun}"
+                if "output" in obj:
+                    out = str(obj["output"]).strip().splitlines()
+                    head = out[0] if out else ""
+                    return (head[:78] + "…") if len(head) > 78 else (head or "ok")
+                if obj.get("applied") is True:
+                    return f"applied ({obj.get('matches', 1)} match)"
+                if obj.get("ok") is True:
+                    return "ok"
+        except (ValueError, TypeError):
+            pass
+        # Large results get distilled/truncated so json.loads fails — extract
+        # common signals by regex from whatever prefix we have.
+        import re as _re
+        m = _re.search(r'"line_count"\s*:\s*(\d+)', s)
+        if m:
+            return f"{m.group(1)} lines"
+        m = _re.search(r'"path"\s*:\s*"([^"]+)"', s)
+        if m:
+            return f"read {m.group(1)}"
+        if "Full result at:" in s or "truncated" in s.lower():
+            return "large result (truncated)"
+        first = s.splitlines()[0] if s else ""
+        return (first[:78] + "…") if len(first) > 78 else (first or "done")
+
     def render_tool_result(
         self,
         tool_name: str,
@@ -302,37 +350,38 @@ class RichTUI:
         success: bool = True,
         tool_input: dict | None = None,
     ) -> None:
-        """Render a tool result with syntax highlighting when content type is detected."""
+        """Render a tool result as a compact continuation line under the call.
+
+        Success → a dim `└ <summary>`. Errors are always shown (a few lines).
+        In 'debug' timeline verbosity, the full syntax-highlighted panel is shown.
+        """
         if not RICH_AVAILABLE:
-            status = "ok" if success else "error"
-            print(f"  {status} {tool_name}: {result[:200]}")
+            print(f"    └ {'ok' if success else 'error'}: {(result or '')[:160]}")
             return
 
-        border = "green" if success else "red"
-        status_label = "[OK]" if success else "[ERROR]"
-
-        if self._compact_mode:
-            self.console.print(f"  [bold {border}]{status_label}[/] {tool_name}", highlight=False)
+        if not success:
+            # Errors matter — surface the message (first few lines) in red.
+            err_lines = (result or "Unknown error").strip().splitlines()[:4]
+            line = Text("    └ ", style="dim")
+            line.append("error: ", style="bold red")
+            line.append(" ".join(l.strip() for l in err_lines)[:200], style="red")
+            self.console.print(line, highlight=False)
             return
 
+        # Compact success summary (default).
+        if self.timeline_verbosity != "debug":
+            line = Text("    └ ", style="dim")
+            line.append(self._result_summary(tool_name, result), style="green")
+            self.console.print(line, highlight=False)
+            return
+
+        # debug verbosity: full panel with syntax highlighting.
         max_chars = 2000
         display = result if len(result) <= max_chars else result[:max_chars] + f"\n… ({len(result) - max_chars} chars omitted)"
-
         lang = self._detect_language(tool_name, result, tool_input)
-        if lang:
-            content = Syntax(display, lang, theme="monokai", word_wrap=True, background_color="default")
-        else:
-            content = Text(display, style="white")
-
-        panel = Panel(
-            content,
-            title=f"{status_label} {tool_name}",
-            title_align="left",
-            border_style=border,
-            box=ROUNDED,
-            padding=(0, 1),
-        )
-        self.console.print(panel)
+        content = Syntax(display, lang, theme="monokai", word_wrap=True, background_color="default") if lang else Text(display, style="white")
+        self.console.print(Panel(content, title=f"[OK] {tool_name}", title_align="left",
+                                 border_style="green", box=ROUNDED, padding=(0, 1)))
 
     # ─── Assistant response ───────────────────────────────────────────────
 
