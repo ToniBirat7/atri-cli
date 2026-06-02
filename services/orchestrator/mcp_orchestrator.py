@@ -193,13 +193,25 @@ class MCPOrchestrator:
         current.update(fields)
         servers[server_name] = current
 
-    def _error_detail_from_exception(self, exc: BaseException) -> MCPErrorDetail:
+    def _error_detail_from_exception(
+        self, exc: BaseException, context: str = "server"
+    ) -> MCPErrorDetail:
         if isinstance(exc, asyncio.TimeoutError):
             return MCPErrorDetail(code="MCP_TOOL_TIMEOUT", message=str(exc), retryable=True)
-        if isinstance(exc, FileNotFoundError):
-            return MCPErrorDetail(code="MCP_SERVER_COMMAND_NOT_FOUND", message=str(exc), retryable=False)
         if isinstance(exc, PermissionError):
             return MCPErrorDetail(code="MCP_PERMISSION_DENIED", message=str(exc), retryable=False)
+        # During tool execution, FileNotFoundError/ValueError are about the tool's
+        # arguments (a missing file, bad input) — NOT a missing server command or a
+        # bad server config. Use accurate, tool-scoped codes so telemetry and the
+        # recommended fix aren't misleading.
+        if context == "tool":
+            if isinstance(exc, FileNotFoundError):
+                return MCPErrorDetail(code="MCP_FILE_NOT_FOUND", message=str(exc), retryable=False)
+            if isinstance(exc, ValueError):
+                return MCPErrorDetail(code="MCP_TOOL_INVALID_INPUT", message=str(exc), retryable=False)
+            return MCPErrorDetail(code="MCP_TOOL_EXECUTION_ERROR", message=str(exc), retryable=True)
+        if isinstance(exc, FileNotFoundError):
+            return MCPErrorDetail(code="MCP_SERVER_COMMAND_NOT_FOUND", message=str(exc), retryable=False)
         if isinstance(exc, ValueError):
             return MCPErrorDetail(code="MCP_INVALID_CONFIGURATION", message=str(exc), retryable=False)
         return MCPErrorDetail(code="MCP_INTERNAL_ERROR", message=str(exc), retryable=True)
@@ -213,6 +225,12 @@ class MCPOrchestrator:
             return "Grant file/execute permissions for MCP module and workspace"
         if error_code == "MCP_TOOL_TIMEOUT":
             return "Increase tool timeout or reduce workload for MCP tools"
+        if error_code == "MCP_FILE_NOT_FOUND":
+            return "Check the file path is correct and within the allowed directory"
+        if error_code == "MCP_TOOL_INVALID_INPUT":
+            return "Re-issue the tool call with valid arguments (see the error message)"
+        if error_code == "MCP_TOOL_EXECUTION_ERROR":
+            return "Inspect the tool error message and adjust the request"
         return "Inspect orchestrator logs for MCP startup details"
 
     async def initialize_server_with_retry(self, config: MCPServerConfig) -> Dict[str, Any]:
@@ -683,8 +701,11 @@ class MCPOrchestrator:
                     raise
                 except Exception as exc:
                     last_error = exc
-                    error = self._error_detail_from_exception(exc)
-                    if attempt >= max_retries:
+                    error = self._error_detail_from_exception(exc, context="tool")
+                    # Don't retry non-retryable tool errors (missing file, bad input,
+                    # permission denied): the same call fails again, and retrying a
+                    # side-effecting tool risks double-applying it.
+                    if attempt >= max_retries or not error.retryable:
                         logger.error(
                             json.dumps(
                                 {
