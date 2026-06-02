@@ -700,6 +700,35 @@ class AgentLoop:
                     turn.tool_calls = [tc.tool_name for tc in tool_calls]
 
                     if not tool_calls:
+                        # Malformed tool-call recovery: the model tried to call a tool
+                        # but the JSON didn't parse, so the raw block would otherwise
+                        # leak into the answer. Nudge a clean retry within a budget.
+                        _malformed_retries = getattr(self.state, "_malformed_tool_retries", 0)
+                        if (
+                            self._looks_like_unparsed_tool_call(content)
+                            and _malformed_retries < 2
+                            and self.state.turn < self.max_turns
+                        ):
+                            self.state._malformed_tool_retries = _malformed_retries + 1
+                            self.state.messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Your previous tool call could not be parsed (invalid JSON — "
+                                    "likely unbalanced braces or unescaped quotes inside a string). "
+                                    "Re-issue it as ONE valid JSON object exactly like "
+                                    '{"name": "<tool>", "arguments": {"<arg>": "<value>"}} with every '
+                                    "string fully quoted and inner quotes escaped. Output only that JSON."
+                                ),
+                            })
+                            turn.outcome = TurnOutcome.NO_TOOL_CALLS
+                            self.state.turns_history.append(turn)
+                            _log_event("agent_loop.turn.malformed_tool_retry", turn=self.state.turn)
+                            await self._emit_event(
+                                event_callback,
+                                {"type": "tool_retry", "turn": self.state.turn, "reason": "malformed_tool_call"},
+                            )
+                            continue
+
                         # Zero-tool synthetic injection: if no successful tool calls yet AND the
                         # prompt clearly implies a specific tool, synthesize a ToolUse and re-enter
                         # the normal execution path. This ensures tool_call_start events are emitted
@@ -1257,6 +1286,26 @@ class AgentLoop:
             return self.state.final_response or "", self.state
         finally:
             set_turn_id(None)
+
+    @staticmethod
+    def _looks_like_unparsed_tool_call(content: str) -> bool:
+        """True if content looks like a tool-call attempt that failed to parse.
+
+        The 2B model sometimes emits malformed tool-call JSON (unbalanced braces,
+        unescaped quotes in shell commands). extract_tool_calls then returns
+        nothing and the raw JSON would leak into the user-facing answer. Detect
+        that so the loop can nudge a clean retry instead.
+        """
+        if not content:
+            return False
+        text = content.strip()
+        if "<|tool_call>" in text or "tool_call>call:" in text:
+            return True
+        if "```json" in text and '"name"' in text:
+            return True
+        if re.search(r'"name"\s*:\s*"[\w.\-]+"', text) and '"arguments"' in text:
+            return True
+        return False
 
     def _tool_requires_confirmation(self, tool_name: str) -> bool:
         """Whether this tool must be confirmed before running, per permission_mode.
