@@ -7,11 +7,42 @@ Loads from environment variables and config files.
 
 from pydantic import BaseModel, Field, AliasChoices
 from typing import Optional, List
+import logging
 import os
 import json
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+_config_logger = logging.getLogger("orchestrator.config")
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var, falling back to default on missing/invalid input.
+
+    A typo'd numeric env var (e.g. LLM_MAX_TOKENS=auto) must not crash startup —
+    log a warning and use the default so the service still boots.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        _config_logger.warning("Invalid int for %s=%r; using default %s", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back to default on missing/invalid input."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        _config_logger.warning("Invalid float for %s=%r; using default %s", name, raw, default)
+        return default
 
 
 class LLMConfig(BaseModel):
@@ -403,25 +434,25 @@ class OrchestratorConfig(BaseModel):
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
                 api_key=os.getenv("LLM_API_KEY"),
                 model=os.getenv("LLM_MODEL", "local-model"),
-                temperature=float(os.getenv("LLM_TEMPERATURE", "0.6")),
-                top_p=float(os.getenv("LLM_TOP_P", "0.95")),
-                top_k=int(os.getenv("LLM_TOP_K", "64")),
-                max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
-                timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "300")),
+                temperature=_env_float("LLM_TEMPERATURE", 0.6),
+                top_p=_env_float("LLM_TOP_P", 0.95),
+                top_k=_env_int("LLM_TOP_K", 64),
+                max_tokens=_env_int("LLM_MAX_TOKENS", 2048),
+                timeout_seconds=_env_int("LLM_TIMEOUT_SECONDS", 300),
                 parallel_tool_calls=os.getenv("LLM_PARALLEL_TOOL_CALLS", "true").lower() == "true",
             ),
             mcp=MCPConfig(
                 servers=mcp_servers,
                 default_transport=os.getenv("MCP_DEFAULT_TRANSPORT", "stdio"),
-                tool_timeout_seconds=int(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "10")),
-                max_tool_call_retries=int(os.getenv("MCP_MAX_TOOL_CALL_RETRIES", "2")),
-                startup_max_attempts=int(os.getenv("MCP_STARTUP_MAX_ATTEMPTS", "3")),
-                startup_initial_backoff_seconds=float(os.getenv("MCP_STARTUP_INITIAL_BACKOFF_SECONDS", "1.0")),
-                startup_max_backoff_seconds=float(os.getenv("MCP_STARTUP_MAX_BACKOFF_SECONDS", "8.0")),
-                discovery_cache_ttl_seconds=int(os.getenv("MCP_DISCOVERY_CACHE_TTL_SECONDS", "30")),
+                tool_timeout_seconds=_env_int("MCP_TOOL_TIMEOUT_SECONDS", 10),
+                max_tool_call_retries=_env_int("MCP_MAX_TOOL_CALL_RETRIES", 2),
+                startup_max_attempts=_env_int("MCP_STARTUP_MAX_ATTEMPTS", 3),
+                startup_initial_backoff_seconds=_env_float("MCP_STARTUP_INITIAL_BACKOFF_SECONDS", 1.0),
+                startup_max_backoff_seconds=_env_float("MCP_STARTUP_MAX_BACKOFF_SECONDS", 8.0),
+                discovery_cache_ttl_seconds=_env_int("MCP_DISCOVERY_CACHE_TTL_SECONDS", 30),
                 use_proxy=os.getenv("MCP_USE_PROXY", "false").lower() == "true",
-                max_tools_before_deferred=int(os.getenv("MCP_MAX_TOOLS_BEFORE_DEFERRED", "50")),
-                tool_cache_ttl_seconds=int(os.getenv("MCP_TOOL_CACHE_TTL_SECONDS", "3600")),
+                max_tools_before_deferred=_env_int("MCP_MAX_TOOLS_BEFORE_DEFERRED", 50),
+                tool_cache_ttl_seconds=_env_int("MCP_TOOL_CACHE_TTL_SECONDS", 3600),
                 external_servers=[
                     s.strip()
                     for s in os.getenv("MCP_EXTERNAL_SERVERS", "").split(",")
@@ -429,17 +460,17 @@ class OrchestratorConfig(BaseModel):
                 ],
             ),
             agent_loop=AgentLoopConfig(
-                max_turns=int(os.getenv("AGENT_MAX_TURNS", "10")),
-                max_tool_calls_per_turn=int(os.getenv("AGENT_MAX_TOOL_CALLS_PER_TURN", "3")),
+                max_turns=_env_int("AGENT_MAX_TURNS", 10),
+                max_tool_calls_per_turn=_env_int("AGENT_MAX_TOOL_CALLS_PER_TURN", 3),
                 enable_tool_use=os.getenv("AGENT_ENABLE_TOOL_USE", "true").lower() == "true",
                 thinking_mode=os.getenv("AGENT_THINKING_MODE", "tool_calls_off"),
                 stream_responses=os.getenv("AGENT_STREAM_RESPONSES", "false").lower() == "true",
-                context_trim_threshold=int(os.getenv("AGENT_CONTEXT_TRIM_THRESHOLD", "40")),
-                compaction_threshold_pct=float(os.getenv("AGENT_COMPACTION_THRESHOLD_PCT", "0.80")),
-                temperature_min=float(os.getenv("AGENT_TEMPERATURE_MIN", "0.3")),
-                temperature_max=float(os.getenv("AGENT_TEMPERATURE_MAX", "0.6")),
-                idle_compact_threshold_pct=float(os.getenv("AGENT_IDLE_COMPACT_THRESHOLD_PCT", "0.70")),
-                idle_compact_min_turns=int(os.getenv("AGENT_IDLE_COMPACT_MIN_TURNS", "3")),
+                context_trim_threshold=_env_int("AGENT_CONTEXT_TRIM_THRESHOLD", 40),
+                compaction_threshold_pct=_env_float("AGENT_COMPACTION_THRESHOLD_PCT", 0.80),
+                temperature_min=_env_float("AGENT_TEMPERATURE_MIN", 0.3),
+                temperature_max=_env_float("AGENT_TEMPERATURE_MAX", 0.6),
+                idle_compact_threshold_pct=_env_float("AGENT_IDLE_COMPACT_THRESHOLD_PCT", 0.70),
+                idle_compact_min_turns=_env_int("AGENT_IDLE_COMPACT_MIN_TURNS", 3),
             ),
             prompt_policy=PromptPolicyConfig(
                 default_profile=os.getenv("PROMPT_POLICY_DEFAULT_PROFILE", "general-purpose"),
@@ -469,7 +500,7 @@ class OrchestratorConfig(BaseModel):
             security=SecurityConfig(
                 api_key=os.getenv("ORCHESTRATOR_API_KEY"),
                 admin_api_key=os.getenv("ORCHESTRATOR_ADMIN_API_KEY"),
-                rate_limit_per_minute=int(os.getenv("ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", "0")),
+                rate_limit_per_minute=_env_int("ORCHESTRATOR_RATE_LIMIT_PER_MINUTE", 0),
                 allow_unauthenticated_health=os.getenv("ORCHESTRATOR_ALLOW_UNAUTHENTICATED_HEALTH", "true").lower() == "true",
             ),
             hooks=HookConfig(
@@ -482,7 +513,7 @@ class OrchestratorConfig(BaseModel):
                 managed_path=os.getenv("ORCHESTRATOR_MANAGED_SETTINGS_PATH"),
             ),
             memory=MemoryConfig(
-                min_turns_for_mining=int(os.getenv("MEMORY_MIN_TURNS_FOR_MINING", "10")),
+                min_turns_for_mining=_env_int("MEMORY_MIN_TURNS_FOR_MINING", 10),
                 skills_dir=os.getenv("MEMORY_SKILLS_DIR", "~/.atri/skills"),
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
