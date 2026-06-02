@@ -597,43 +597,57 @@ def append_file(target_file_path: str, content: str) -> dict[str, Any]:
 
 @mcp.tool
 def edit_file(
-    target_file_path: str,
-    exact_text_to_replace: str,
-    new_text_content: str,
+    target_file_path: Optional[str] = None,
+    exact_text_to_replace: Optional[str] = None,
+    new_text_content: Optional[str] = None,
     dry_run: bool = False,
-    # Alias params: Gemma 4 sometimes sends these instead of the canonical names above.
-    # They are silently accepted here for resilience; prefer the canonical names.
+    # Alias params: small models (Gemma 4 E2B) cannot reliably reproduce the
+    # canonical names, so accept every common variant. All are OPTIONAL in the
+    # schema — a wrong-but-recognised name still resolves instead of failing
+    # schema validation before the body runs (the old bug). Canonical wins.
     old_text: Optional[str] = None,
+    old_string: Optional[str] = None,
     new_text: Optional[str] = None,
+    replacement_text: Optional[str] = None,
+    new_string: Optional[str] = None,
+    content: Optional[str] = None,
     path: Optional[str] = None,
+    file_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Replace text in a file.
+    Replace an exact block of text in a file.
 
-    REQUIRED: 'target_file_path' is the path to the file.
-    REQUIRED: 'exact_text_to_replace' is the EXACT block of text to find and replace.
-              NOTE: use 'exact_text_to_replace', NOT 'old_text' or 'old_content'.
-    REQUIRED: 'new_text_content' is the replacement text.
-              NOTE: use 'new_text_content', NOT 'new_text'.
+    REQUIRED: 'target_file_path' — path to the file (aliases: path, file_path).
+    REQUIRED: 'exact_text_to_replace' — the EXACT text to find (aliases: old_text, old_string).
+    REQUIRED: 'new_text_content' — the replacement text (aliases: new_text, replacement_text, new_string, content).
     """
-    # Resolve field aliases produced by Gemma 4 so the tool works even when the model
-    # sends shortened names.  Canonical names take priority over aliases.
-    if not target_file_path and path:
-        target_file_path = path
-    if not exact_text_to_replace and old_text:
-        exact_text_to_replace = old_text
-    if not new_text_content and new_text:
-        new_text_content = new_text
+    # Resolve field aliases. Canonical names take priority; first non-empty alias wins.
+    def _first(*values: Optional[str]) -> Optional[str]:
+        for v in values:
+            if v is not None and v != "":
+                return v
+        return None
 
-    # Map to internal logic
-    _path = target_file_path
-    _old_text = exact_text_to_replace
-    _new_text = new_text_content
+    _path = _first(target_file_path, path, file_path)
+    _old_text = _first(exact_text_to_replace, old_text, old_string)
+    # new text may legitimately be empty (deletion), so treat "" as provided.
+    _new_candidates = [new_text_content, new_text, replacement_text, new_string, content]
+    _new_text = next((v for v in _new_candidates if v is not None), None)
 
     if not _path:
         raise ValueError(
-            "Missing required argument: 'target_file_path'. "
-            "Also check: use 'exact_text_to_replace', not 'old_text' or 'old_content'."
+            "Missing required argument 'target_file_path' (path to the file). "
+            "Accepted aliases: path, file_path."
+        )
+    if _old_text is None:
+        raise ValueError(
+            "Missing required argument 'exact_text_to_replace' (the exact text to find). "
+            "Accepted aliases: old_text, old_string."
+        )
+    if _new_text is None:
+        raise ValueError(
+            "Missing required argument 'new_text_content' (the replacement text). "
+            "Accepted aliases: new_text, replacement_text, new_string, content."
         )
 
     if _old_text == "":

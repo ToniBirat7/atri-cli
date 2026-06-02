@@ -221,12 +221,16 @@ def detect_gpu() -> dict:
 
 
 def compute_launch_config(
-    gpu: dict, cpu: dict, ram: dict, model_size_mb: int = 3100
+    gpu: dict, cpu: dict, ram: dict, model_size_mb: int = 3100, is_moe: bool = False
 ) -> dict:
     """Compute optimal llama-server launch parameters based on hardware."""
     gpu_detected = gpu.get("detected", False)
     vendor = gpu.get("vendor", "none")
     vram_mb = gpu.get("vram_mb", 0)
+    # A model fits in VRAM when its weights plus ~500 MB of overhead are smaller
+    # than available VRAM. Otherwise it must spill to system RAM via unified
+    # memory (NVIDIA) and/or --n-cpu-moe (MoE), which changes the ctx strategy.
+    fits_in_vram = gpu_detected and vram_mb > 0 and (model_size_mb + 500) <= vram_mb
 
     # Context size: scaled to available VRAM.
     # Gemma 4 E2B Q4_K_M ~3.1 GB; q8_0 KV cache ~0.25 GB per 8K ctx.
@@ -253,10 +257,12 @@ def compute_launch_config(
         else:
             ctx_size = 4096
 
-    # With GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe, expert layers spill to
-    # CPU RAM so GPU VRAM is used mainly for attention + KV cache. On NVIDIA with
-    # 32 GB system RAM the model fits; allow 32K ctx even when VRAM looks tight.
-    if vendor == "nvidia" and gpu_detected and ctx_size < 32768:
+    # When the model does NOT fit in VRAM (e.g. 26B MoE on a 6 GB card), it spills
+    # to system RAM via GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe. There the
+    # GPU holds mainly attention + KV cache, so we can afford a larger context.
+    # When the model DOES fit in VRAM (e.g. the 2B E2B decoder) we must NOT inflate
+    # ctx past what the VRAM tiers above allow, or the KV cache will OOM the card.
+    if vendor == "nvidia" and gpu_detected and not fits_in_vram and ctx_size < 32768:
         ctx_size = 32768
 
     # GPU layers
@@ -310,12 +316,14 @@ def compute_launch_config(
         "flash_attn": flash_attn,
         "kv_cache_type_k": kv_cache_type_k,
         "kv_cache_type_v": kv_cache_type_v,
-        "mlock": gpu_detected,  # lock model pages into RAM when GPU is active
-        # For MoE models: route expert computation to CPU threads when GPU is active.
-        # --n-cpu-moe N frees VRAM (expert layers spill to CPU RAM via unified memory)
-        # and unlocks the GPU for attention + KV cache, significantly increasing TPS.
-        # Use full cpu_count (not recommended_threads) — expert dispatch is I/O-bound.
-        "n_cpu_moe": cpu.get("cpu_count", 0) if gpu_detected else 0,
+        "mlock": fits_in_vram,  # lock pages only when the whole model fits in VRAM
+        # For MoE models that don't fit in VRAM: offload expert layers to CPU RAM.
+        # --n-cpu-moe N keeps the experts of N layers on the CPU, freeing VRAM for
+        # attention + KV cache. We offload aggressively (999 = all expert layers;
+        # llama-server clamps to the real layer count) since a 26B MoE dwarfs a
+        # 6 GB card. Dense models (E2B) have no experts, so this is 0.
+        "n_cpu_moe": 999 if (is_moe and gpu_detected and not fits_in_vram) else 0,
+        "is_moe": is_moe,
         "enable_thinking": True,
     }
 
@@ -360,13 +368,53 @@ def compute_cmake_args(gpu: dict, cpu: dict) -> list[str]:
     return args
 
 
+def _detect_model_profile() -> tuple[int, bool]:
+    """Find the GGUF that will actually be served and return (size_mb, is_moe).
+
+    Scans the same locations service_manager._find_model() searches, honouring
+    ATRI_MODEL_PATH / ATRI_MODEL_DIR. Falls back to the 2B E2B size when no
+    model is present yet (e.g. pre-download during install).
+    """
+    candidates: list[Path] = []
+    explicit = os.environ.get("ATRI_MODEL_PATH", "")
+    if explicit:
+        candidates.append(Path(explicit))
+
+    install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
+    repo_root = Path(__file__).resolve().parent.parent
+    model_dirs = [
+        Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
+        repo_root / "models",
+    ]
+    for mdir in model_dirs:
+        if mdir.is_dir():
+            for gguf in sorted(mdir.glob("*.gguf")):
+                if "mmproj" not in gguf.name.lower():
+                    candidates.append(gguf)
+
+    for model in candidates:
+        try:
+            if model.is_file():
+                size_mb = int(model.stat().st_size / (1024 * 1024))
+                name = model.name.lower()
+                is_moe = any(tag in name for tag in ("moe", "a4b", "-26b", "-27b", "x7b", "8x"))
+                return size_mb, is_moe
+        except OSError:
+            continue
+
+    return 3100, False  # default: 2B E2B decoder, dense
+
+
 def detect_all() -> dict:
     """Run full hardware detection and return complete config."""
     os_info = detect_os()
     cpu_info = detect_cpu()
     ram_info = detect_ram()
     gpu_info = detect_gpu()
-    launch_config = compute_launch_config(gpu_info, cpu_info, ram_info, model_size_mb=15800)
+    model_size_mb, is_moe = _detect_model_profile()
+    launch_config = compute_launch_config(
+        gpu_info, cpu_info, ram_info, model_size_mb=model_size_mb, is_moe=is_moe
+    )
     cmake_args = compute_cmake_args(gpu_info, cpu_info)
 
     return {
