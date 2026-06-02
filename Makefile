@@ -8,6 +8,10 @@ LLAMA_CHAT_TEMPLATE_KWARGS := {"enable_thinking":$(ENABLE_THINKING)}
 GEMMA4_TEMPLATE_FILE := runtime/llm/templates/gemma4-e2b.jinja
 LLAMA_TEMPLATE_FLAG := $(shell if [ -f "$(GEMMA4_TEMPLATE_FILE)" ]; then echo "--chat-template-file $(GEMMA4_TEMPLATE_FILE)"; fi)
 
+# Model path (override: make llama MODEL=models/your-model.gguf). For the 26B
+# MoE (needs --n-cpu-moe/--mmproj/unified memory) use `make cli-up` or `atri`,
+# which auto-detect and optimise per model; this direct target is dense-only.
+MODEL ?= models/gemma-4-E2B-it-Q4_K_M.gguf
 # llama.cpp runtime/build knobs
 # -t: physical cores for generation (memory-bandwidth-bound); -tb: all threads for batch (compute-bound)
 LLAMA_THREADS ?= 6
@@ -81,7 +85,7 @@ web-up: ## Auto-detect GPU/CPU, build, and start Web-focused pipeline
 dev-up: env ## Start all services (llama + orchestrator + frontend)
 	@echo "$(GREEN)Starting Atri Code services...$(NC)"
 	@echo "$(BLUE)1. Starting llama.cpp on port $(LLAMA_PORT)$(NC)"
-	@(cd runtime/llm/llama.cpp && ./build/bin/llama-server -m ../../../models/gemma-4-e2b-it-Q4_K_M.gguf --jinja $(if $(LLAMA_TEMPLATE_FLAG),$(LLAMA_TEMPLATE_FLAG),) --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --threads-batch $(LLAMA_BATCH_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --cache-type-k $(LLAMA_CTK) --cache-type-v $(LLAMA_CTV) --flash-attn --cache-prompt --cram $(LLAMA_CRAM) --no-mmap --parallel 1 --api-key secret > ../../../llama.log 2>&1 &)
+	@(cd runtime/llm/llama.cpp && ./build/bin/llama-server -m $(abspath $(MODEL)) --jinja $(if $(LLAMA_TEMPLATE_FLAG),$(LLAMA_TEMPLATE_FLAG),) --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --threads-batch $(LLAMA_BATCH_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --cache-type-k $(LLAMA_CTK) --cache-type-v $(LLAMA_CTV) --flash-attn --cache-prompt --cram $(LLAMA_CRAM) --no-mmap --parallel 1 --api-key secret > ../../../llama.log 2>&1 &)
 	@sleep 3
 	@echo "$(BLUE)2. Starting orchestrator on port $(ORCHESTRATOR_PORT)$(NC)"
 	@(cd services/orchestrator && \
@@ -133,11 +137,11 @@ llama: env ## Start llama.cpp server only
 		echo "$(RED)Error: llama-server not found. Build llama.cpp first.$(NC)"; \
 		exit 1; \
 	fi
-	@if [ ! -f "models/gemma-4-e2b-it-Q4_K_M.gguf" ]; then \
-		echo "$(RED)Error: Model not found at models/gemma-4-e2b-it-Q4_K_M.gguf$(NC)"; \
+	@if [ ! -f "$(MODEL)" ]; then \
+		echo "$(RED)Error: Model not found at $(MODEL)$(NC)"; \
 		exit 1; \
 	fi
-	@cd runtime/llm/llama.cpp && ./build/bin/llama-server -m ../../../models/gemma-4-e2b-it-Q4_K_M.gguf --jinja $(if $(LLAMA_TEMPLATE_FLAG),$(LLAMA_TEMPLATE_FLAG),) --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --threads-batch $(LLAMA_BATCH_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --cache-type-k $(LLAMA_CTK) --cache-type-v $(LLAMA_CTV) --flash-attn --cache-prompt --cram $(LLAMA_CRAM) --no-mmap --parallel 1 --api-key secret
+	@cd runtime/llm/llama.cpp && ./build/bin/llama-server -m $(abspath $(MODEL)) --jinja $(if $(LLAMA_TEMPLATE_FLAG),$(LLAMA_TEMPLATE_FLAG),) --chat-template-kwargs '$(LLAMA_CHAT_TEMPLATE_KWARGS)' --port $(LLAMA_PORT) --threads $(LLAMA_THREADS) --threads-batch $(LLAMA_BATCH_THREADS) --n-gpu-layers $(LLAMA_N_GPU_LAYERS) --ctx-size $(LLAMA_CTX_SIZE) --cache-type-k $(LLAMA_CTK) --cache-type-v $(LLAMA_CTV) --flash-attn --cache-prompt --cram $(LLAMA_CRAM) --no-mmap --parallel 1 --api-key secret
 orchestrator: ## Start orchestrator API only (requires llama.cpp running)
 	@echo "$(GREEN)Starting orchestrator...$(NC)"
 	@cd services/orchestrator && \
@@ -289,9 +293,9 @@ llama-build-gpu: ## Rebuild llama.cpp with CUDA support for NVIDIA GPUs
 
 .PHONY: _check_model
 _check_model:
-	@if [ ! -f "models/gemma-4-e2b-it-Q4_K_M.gguf" ]; then \
+	@if [ ! -f "$(MODEL)" ]; then \
 		echo "$(RED)Error: Model file not found$(NC)"; \
-		echo "Expected: models/gemma-4-e2b-it-Q4_K_M.gguf"; \
+		echo "Expected: $(MODEL)"; \
 		echo ""; \
 		echo "Download from: https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF"; \
 		exit 1; \
