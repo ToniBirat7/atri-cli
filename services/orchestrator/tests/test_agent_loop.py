@@ -224,6 +224,114 @@ async def test_max_turns_stops_loop():
     assert max_turns_outcomes or state.turn == MAX
 
 
+# ── Permission gating ───────────────────────────────────────────────────────────
+
+def _mk_loop(mode: str) -> AgentLoop:
+    return AgentLoop(
+        max_turns=2,
+        enable_tool_use=True,
+        config=_make_test_config(),
+        hook_registry=HookRegistry(),
+        permission_mode=mode,
+    )
+
+
+def test_tool_requires_confirmation_by_mode():
+    """Confirmation gating must follow the permission mode for each tool class."""
+    default = _mk_loop("default")
+    assert default._tool_requires_confirmation("delete_path") is True
+    assert default._tool_requires_confirmation("bash_exec") is True
+    assert default._tool_requires_confirmation("edit_file") is True
+    assert default._tool_requires_confirmation("read_text_file") is False
+    assert default._tool_requires_confirmation("list_directory") is False
+
+    accept = _mk_loop("acceptEdits")
+    assert accept._tool_requires_confirmation("delete_path") is True   # dangerous → confirm
+    assert accept._tool_requires_confirmation("bash_exec") is True
+    assert accept._tool_requires_confirmation("edit_file") is False    # edits auto-approved
+    assert accept._tool_requires_confirmation("read_text_file") is False
+
+    bypass = _mk_loop("bypassPermissions")
+    assert bypass._tool_requires_confirmation("delete_path") is False
+    assert bypass._tool_requires_confirmation("bash_exec") is False
+    assert bypass._tool_requires_confirmation("edit_file") is False
+
+
+class _DeleteToolRegistry(FakeToolRegistry):
+    def resolve_tool_call(self, name: str):
+        return ("local-mcp", name)
+
+
+class _DeleteThenAnswerLLM(FakeLLMAdapter):
+    """Emits one delete_path tool call, then a plain final answer."""
+
+    async def chat_completion(self, messages, tools=None, temperature=None, enable_thinking=False):
+        self.call_count += 1
+        if self.call_count == 1:
+            return {
+                "choices": [{
+                    "message": {"role": "assistant", "content": "",
+                        "tool_calls": [{"id": "call_del", "type": "function",
+                            "function": {"name": "delete_path", "arguments": '{"target_path": "x.txt"}'}}]},
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "OK, I won't delete it.", "tool_calls": None},
+                "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    async def extract_tool_calls(self, completion) -> list:
+        msg = completion["choices"][0]["message"]
+        calls = msg.get("tool_calls") or []
+        return [_FakeToolUse(c["function"]["name"], {"target_path": "x.txt"}, id=c["id"]) for c in calls]
+
+
+@pytest.mark.asyncio
+async def test_default_mode_denied_tool_not_executed():
+    """A denied confirmation must prevent the tool from executing."""
+    loop = _mk_loop("default")
+    mcp = FakeMCPOrchestrator()
+
+    async def on_event(payload):
+        # Simulate the client declining the confirmation.
+        if payload.get("type") == "tool_confirmation_requested":
+            await loop.confirmation_queue.put({"request_id": payload["request_id"], "approved": False})
+
+    await loop.run(
+        user_message="delete x.txt",
+        llm_adapter=_DeleteThenAnswerLLM(),
+        mcp_orchestrator=mcp,
+        tool_registry=_DeleteToolRegistry(),
+        event_callback=on_event,
+    )
+
+    assert not any(c["tool"] == "delete_path" for c in mcp.calls), "denied tool must not run"
+
+
+@pytest.mark.asyncio
+async def test_default_mode_approved_tool_executes():
+    """An approved confirmation must let the tool execute."""
+    loop = _mk_loop("default")
+    mcp = FakeMCPOrchestrator()
+
+    async def on_event(payload):
+        if payload.get("type") == "tool_confirmation_requested":
+            await loop.confirmation_queue.put({"request_id": payload["request_id"], "approved": True})
+
+    await loop.run(
+        user_message="delete x.txt",
+        llm_adapter=_DeleteThenAnswerLLM(),
+        mcp_orchestrator=mcp,
+        tool_registry=_DeleteToolRegistry(),
+        event_callback=on_event,
+    )
+
+    assert any(c["tool"] == "delete_path" for c in mcp.calls), "approved tool must run"
+
+
 # ── GPU-only marker (placeholder) ───────────────────────────────────────────────
 
 @pytest.mark.gpu_only
