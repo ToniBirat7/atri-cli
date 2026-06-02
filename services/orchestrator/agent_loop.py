@@ -109,6 +109,25 @@ TOOL_RESULT_MAX_INLINE = 2048  # 2KB threshold
 _TOOL_RESULTS_DIR = Path.home() / ".atri" / "tool_results"
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Permission gating: which tools change state and need confirmation ─────────
+# Names match the actual FastMCP tools in services/mcp/main.py.
+# Edits (file content / creation) vs dangerous (deletes / shell / moves).
+_EDIT_TOOLS = {
+    "edit_file", "write_file", "append_file", "edit_diff", "edit_file_hashline",
+    "write_json_file", "create_directory", "create_project",
+    # tolerate plausible aliases the router/model may surface
+    "create_file", "apply_patch",
+}
+_DANGEROUS_TOOLS = {
+    "delete_path", "move_file", "bash_exec",
+    # plausible aliases
+    "delete_file", "remove_file", "rename_file", "run_shell", "run_command",
+}
+# Confirmation wait is bounded so a non-interactive client (no /confirm
+# responder) denies-and-continues instead of hanging forever.
+_CONFIRMATION_TIMEOUT_SECONDS = 300.0
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _log_event(event: str, **fields: Any) -> None:
     payload: Dict[str, Any] = {
@@ -907,6 +926,52 @@ class AgentLoop:
                                 validated_input = _hook_input  # may have been modified
                             # ─────────────────────────────────────────────────────
 
+                            # ── Permission gating: confirm state-changing tools ──
+                            # default mode confirms edits + dangerous ops; acceptEdits
+                            # confirms only dangerous ops; bypassPermissions confirms
+                            # nothing. Without this, e.g. delete_file ran unprompted.
+                            if self._tool_requires_confirmation(routed_tool_name):
+                                import uuid as _uuid
+                                _confirm_id = _uuid.uuid4().hex[:12]
+                                _approved = await self._await_confirmation(
+                                    _confirm_id, tool_call.tool_name, validated_input, event_callback
+                                )
+                                if not _approved:
+                                    _deny_msg = (
+                                        f"The user declined the '{tool_call.tool_name}' tool call. "
+                                        "Do not call it again; explain or propose an alternative instead."
+                                    )
+                                    turn.metadata.setdefault("tool_events", []).append({
+                                        "tool_name": tool_call.tool_name,
+                                        "routed_server": routed_server,
+                                        "routed_tool_name": routed_tool_name,
+                                        "input": tool_call.tool_input,
+                                        "output": _deny_msg,
+                                        "status": "denied",
+                                    })
+                                    self.state.messages.append(
+                                        llm_adapter.format_tool_result(
+                                            tool_call.tool_name, _deny_msg, tool_call.id
+                                        )
+                                    )
+                                    await self._emit_event(
+                                        event_callback,
+                                        {
+                                            "type": "tool_call_result",
+                                            "turn": self.state.turn,
+                                            "tool_name": tool_call.tool_name,
+                                            "status": "denied",
+                                            "error": _deny_msg,
+                                        },
+                                    )
+                                    _log_event(
+                                        "agent_loop.tool.denied",
+                                        tool_name=routed_tool_name,
+                                        permission_mode=self.permission_mode,
+                                    )
+                                    continue  # skip execution; move to next tool call
+                            # ─────────────────────────────────────────────────────
+
                             # Phase 4.3: mcp_proxy dispatch
                             if routed_tool_name == "mcp_proxy":
                                 result = await mcp_orchestrator.execute_proxy_call(
@@ -1192,6 +1257,60 @@ class AgentLoop:
             return self.state.final_response or "", self.state
         finally:
             set_turn_id(None)
+
+    def _tool_requires_confirmation(self, tool_name: str) -> bool:
+        """Whether this tool must be confirmed before running, per permission_mode.
+
+        bypassPermissions: never confirm. acceptEdits: confirm only dangerous
+        ops (deletes/shell/moves), auto-approve edits. default (and other
+        interactive modes): confirm every state-changing tool. Read-only tools
+        are never gated.
+        """
+        mode = (self.permission_mode or "default").strip().lower()
+        if mode == "bypasspermissions":
+            return False
+        is_edit = tool_name in _EDIT_TOOLS
+        is_dangerous = tool_name in _DANGEROUS_TOOLS
+        if mode == "acceptedits":
+            return is_dangerous
+        return is_edit or is_dangerous
+
+    async def _await_confirmation(
+        self, request_id: str, tool_name: str, tool_input: Any, event_callback
+    ) -> bool:
+        """Emit a confirmation request and wait for the user's decision.
+
+        The client (CLI/web) handles 'tool_confirmation_requested' and replies
+        via POST /confirm/{session_id}, which feeds self.confirmation_queue with
+        {"request_id", "approved"}. Returns False on timeout or denial so a
+        non-interactive caller fails safe instead of executing or hanging.
+        """
+        import time as _time
+
+        await self._emit_event(
+            event_callback,
+            {
+                "type": "tool_confirmation_requested",
+                "turn": self.state.turn,
+                "tool_name": tool_name,
+                "request_id": request_id,
+                "tool_input": tool_input,
+            },
+        )
+        deadline = _time.monotonic() + _CONFIRMATION_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                _log_event("agent_loop.confirmation.timeout", tool_name=tool_name)
+                return False
+            try:
+                response = await asyncio.wait_for(self.confirmation_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                _log_event("agent_loop.confirmation.timeout", tool_name=tool_name)
+                return False
+            # Ignore stale replies for other requests; keep waiting for ours.
+            if isinstance(response, dict) and response.get("request_id") == request_id:
+                return bool(response.get("approved"))
 
     def _latest_tool_observation(self) -> Optional[tuple[str, str]]:
         """Return (tool_name, result_text) for the most recent tool result.
