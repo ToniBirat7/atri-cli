@@ -295,9 +295,17 @@ if [ "$LLAMA_NEEDS_COMPILE" = "true" ]; then
     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_SRC"
     cmake_flags="-DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=OFF"
     if [ "$ACCEL" = "cuda" ] && [ -n "$COMPUTE_CAP" ]; then
-        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$COMPUTE_CAP -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
+        cmake_flags="$cmake_flags -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=$COMPUTE_CAP"
+        # Flash Attention requires compute capability >= 7.5 (Turing+). Older GPUs
+        # (e.g. Pascal cc 6.x) reject the kernel — only enable when supported.
+        if [ "${COMPUTE_CAP:-0}" -ge 75 ] 2>/dev/null; then
+            cmake_flags="$cmake_flags -DGGML_FLASH_ATTN=ON -DGGML_CUDA_FA_ALL_QUANTS=ON"
+        else
+            info "GPU compute capability ${COMPUTE_CAP} < 7.5 — building without Flash Attention."
+        fi
         # nvcc has a max supported GCC version. Auto-detect a compatible one if system GCC is too new.
-        SYS_GCC_VER=$(g++ --version 2>/dev/null | grep -oP '\(GCC\) \K\d+' | head -1 || echo "0")
+        # -dumpversion is reliable across g++ banner formats (the (GCC) regex was not).
+        SYS_GCC_VER=$(g++ -dumpversion 2>/dev/null | cut -d. -f1 || echo "0")
         if [ "${SYS_GCC_VER:-0}" -gt 14 ]; then
             CUDA_HOST_CXX=""
             for _ver in 14 13 12 11 10; do
