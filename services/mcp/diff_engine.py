@@ -107,36 +107,28 @@ class DiffEngine:
             tmp_orig.writelines(original)
             tmp_orig_path = tmp_orig.name
 
+        # Exact context match (--fuzz=0): a coding agent has read the file, so the
+        # diff context should match precisely. Refusing a fuzzy match is far safer
+        # than letting `patch` relocate a hunk to the wrong place and silently
+        # corrupt the file. We validate with --dry-run first and only apply if it
+        # would succeed cleanly (avoids non-atomic partial application).
+        base_cmd = ["patch", "-u", "-s", "--fuzz=0", tmp_orig_path, "-i", tmp_diff_path]
         try:
-            # -u for unified
-            # -s for silent
-            # --fuzz=3 to allow some mismatch in context
-            # -p0 to treat paths literally or rely on the fact that we provide the file path
-            result = subprocess.run(
-                ["patch", "-u", "-s", "--fuzz=3", tmp_orig_path, "-i", tmp_diff_path],
-                capture_output=True,
-                text=True
-            )
-            
+            dry = subprocess.run(base_cmd + ["--dry-run"], capture_output=True, text=True)
+            if dry.returncode != 0:
+                logger.error("Diff does not apply cleanly (dry-run): %s", (dry.stderr or dry.stdout).strip())
+                return None
+            result = subprocess.run(base_cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                logger.error(f"Patch command failed: {result.stderr}")
-                # Fallback: try without fuzz if the system patch doesn't support it
-                if "invalid option -- -" in result.stderr or "fuzz" in result.stderr:
-                     result = subprocess.run(
-                        ["patch", "-u", "-s", tmp_orig_path, "-i", tmp_diff_path],
-                        capture_output=True,
-                        text=True
-                    )
-                     if result.returncode != 0:
-                         return None
-                else:
-                    return None
-            
+                logger.error("Patch apply failed after clean dry-run: %s", result.stderr.strip())
+                return None
             with open(tmp_orig_path, "r") as f:
                 return f.readlines()
         finally:
-            if os.path.exists(tmp_diff_path): os.remove(tmp_diff_path)
-            if os.path.exists(tmp_orig_path): os.remove(tmp_orig_path)
+            # Clean the temp inputs plus any .orig/.rej siblings patch may leave.
+            for _p in (tmp_diff_path, tmp_orig_path, tmp_orig_path + ".orig", tmp_orig_path + ".rej"):
+                if os.path.exists(_p):
+                    os.remove(_p)
 
 if __name__ == "__main__":
     # Test

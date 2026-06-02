@@ -1276,7 +1276,10 @@ def bash_exec(
     if cwd:
         work_dir = _resolve_user_path(cwd)
     else:
-        allowed = _load_allowed_dirs()
+        # Use the runtime policy (honours set_allowed_directory per request), not
+        # the initial env-derived dirs — otherwise bash runs in a different cwd
+        # than the file tools after the orchestrator sets the workspace.
+        allowed = POLICY.get_allowed_dirs()
         work_dir = allowed[0] if allowed else Path.cwd()
 
     timeout = min(int(timeout_seconds), 120)
