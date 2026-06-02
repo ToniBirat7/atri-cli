@@ -626,6 +626,7 @@ def _handle_interactive_local_command(
     conversation_id: Optional[str] = None,
     plan_mode_ref: Optional[list] = None,  # mutable single-element list [bool] for plan_mode state
     client: Optional[Any] = None,
+    telemetry: Optional[Any] = None,
 ) -> bool:
     if user_input in {"/help", "/?"}:
         help_text = _interactive_help_text()
@@ -707,8 +708,18 @@ def _handle_interactive_local_command(
         return True
 
     if user_input == "/cost":
-        # Access telemetry from the outer scope — this is handled by printing
-        _RICH.render_info("Use --telemetry flag at startup or check session summary after exit.")
+        if telemetry is not None and (
+            getattr(telemetry, "total_turns", 0) or getattr(telemetry, "total_output_tokens", 0)
+        ):
+            _RICH.render_info(
+                f"Session usage — turns: {telemetry.total_turns}  "
+                f"input: {telemetry.total_input_tokens:,} tok  "
+                f"output: {telemetry.total_output_tokens:,} tok  "
+                f"tool calls: {telemetry.total_tool_calls}  "
+                f"elapsed: {telemetry.session_duration_seconds:.0f}s"
+            )
+        else:
+            _RICH.render_info("No usage yet this session — send a message first.")
         return True
 
     if user_input == "/clear":
@@ -834,29 +845,33 @@ def _handle_interactive_local_command(
         return True
 
     if user_input == "/skills":
+        # Scan the skills directories directly — robust and dependency-free
+        # (importing the orchestrator's skills_loader standalone is fragile).
+        # A skill is a directory containing SKILL.md.
         try:
-            import importlib.util as _ilu
-            _sl_candidates = [
-                Path(__file__).parent.parent.parent / "services" / "orchestrator" / "skills_loader.py",
-            ]
-            _sl_mod = None
-            for _p in _sl_candidates:
-                if _p.exists():
-                    _spec = _ilu.spec_from_file_location("skills_loader", str(_p))
-                    if _spec and _spec.loader:
-                        _sl_mod = _ilu.module_from_spec(_spec)
-                        _spec.loader.exec_module(_sl_mod)
-                        break
-            if _sl_mod:
-                skills = _sl_mod.discover_skills()
-                if skills:
-                    _RICH.render_info(f"{len(skills)} skill(s) found:")
-                    for s in skills.values():
-                        print(f"    * {s.name}: {s.description}")
-                else:
-                    _RICH.render_info("No skills found. Place SKILL.md files in ~/.atri/skills/<name>/")
+            skill_dirs = [Path.home() / ".atri" / "skills", Path.cwd() / ".atri" / "skills"]
+            found: list[tuple[str, str]] = []
+            for sd in skill_dirs:
+                if not sd.is_dir():
+                    continue
+                for skill_md in sorted(sd.glob("*/SKILL.md")):
+                    name = skill_md.parent.name
+                    desc = ""
+                    try:
+                        for line in skill_md.read_text(encoding="utf-8").splitlines():
+                            s = line.strip()
+                            if s.lower().startswith("description:"):
+                                desc = s.split(":", 1)[1].strip()
+                                break
+                    except OSError:
+                        pass
+                    found.append((name, desc))
+            if found:
+                _RICH.render_info(f"{len(found)} skill(s) found:")
+                for name, desc in found:
+                    print(f"    * {name}{(': ' + desc) if desc else ''}")
             else:
-                _RICH.render_warning("Skills loader not available.")
+                _RICH.render_info("No skills found. Place SKILL.md files in ~/.atri/skills/<name>/")
         except Exception as _e:
             _RICH.render_warning(f"Error loading skills: {_e}")
         return True
@@ -1325,6 +1340,7 @@ def _run_interactive(
             conversation_id=active_conversation_id,
             plan_mode_ref=plan_mode_ref,
             client=client,
+            telemetry=telemetry,
         ):
             if fullscreen_mode:
                 _render_interactive_dashboard(
