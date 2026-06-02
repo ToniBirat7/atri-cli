@@ -71,9 +71,9 @@ except ImportError:
     from hooks import HookRegistry, hook_registry as _default_hook_registry, register_builtin_hooks, BLOCK as _HOOK_BLOCK
 
 try:
-    from .compaction import should_compact, compact_messages, should_idle_compact
+    from .compaction import should_compact, compact_messages
 except ImportError:
-    from compaction import should_compact, compact_messages, should_idle_compact
+    from compaction import should_compact, compact_messages
 
 try:
     from .session_tree import SessionTree, new_entry as new_session_entry
@@ -1159,26 +1159,15 @@ class AgentLoop:
                     )
                 )
 
-            # ── E.2: Idle compaction at turn boundary ─────────────────────────
-            _idle_ctx_size = int(
-                getattr(getattr(self.config, "llm", None), "max_tokens", 0) or 0
-            ) or 16384
-            _idle_prompt_tokens = sum(
-                len(str(m.get("content", ""))) // 4
-                for m in self.state.messages
-            )
-            if should_idle_compact(_idle_prompt_tokens, _idle_ctx_size, self.state.turn):
-                logger.info(
-                    "Turn %s: idle compaction triggered (tokens~%d, ctx=%d)",
-                    self.state.turn, _idle_prompt_tokens, _idle_ctx_size,
-                )
-                asyncio.create_task(compact_messages(
-                    self.state.messages, llm_adapter, _idle_ctx_size, event_callback,
-                ))
-                await self._emit_event(
-                    event_callback, {"type": "context_compacted", "source": "idle"}
-                )
-            # ──────────────────────────────────────────────────────────────────
+            # NOTE: a previous "idle compaction" block ran here at end-of-run via
+            # asyncio.create_task(compact_messages(...)). It was removed: it never
+            # assigned the returned compacted list back (compact_messages returns a
+            # new list, it does not mutate in place), so it did real LLM work on the
+            # shared adapter — racing the next request — discarded the result, and
+            # emitted a misleading context_compacted event. self.state.messages is
+            # also ephemeral per request (the next request reloads history from the
+            # DB), so compacting it at end-of-run accomplished nothing. Proper
+            # context management happens via the in-loop should_compact path.
 
             self.state.status = "completed"
             _log_event(
@@ -1200,19 +1189,31 @@ class AgentLoop:
         finally:
             set_turn_id(None)
 
+    def _latest_tool_observation(self) -> Optional[tuple[str, str]]:
+        """Return (tool_name, result_text) for the most recent tool result.
+
+        Tool results are appended by llm_adapter.format_tool_result as a
+        role=='user' message of the form 'Observation from <tool>:\\n<result>'
+        (peg-native models do not understand the 'tool' role). Scanning for
+        role=='tool' here would never match — that was a latent bug.
+        """
+        for msg in reversed(self.state.messages):
+            if msg.get("role") != "user":
+                continue
+            content = str(msg.get("content", ""))
+            match = re.match(r"Observation from ([^:\n]+):\n?(.*)", content, re.DOTALL)
+            if match:
+                return match.group(1).strip(), match.group(2)
+        return None
+
     def _fallback_from_latest_tool_result(self) -> Optional[str]:
         """Build a deterministic user-facing response from the most recent tool result."""
-        latest_tool_msg: Optional[Dict[str, Any]] = None
-        for msg in reversed(self.state.messages):
-            if msg.get("role") == "tool":
-                latest_tool_msg = msg
-                break
-
-        if not latest_tool_msg:
+        observation = self._latest_tool_observation()
+        if not observation:
             return None
 
-        tool_name = latest_tool_msg.get("name", "tool")
-        content = str(latest_tool_msg.get("content", "")).strip()
+        tool_name, content = observation
+        content = content.strip()
 
         if tool_name == "list_directory":
             summary = self._summarize_list_directory_result(
@@ -1236,12 +1237,9 @@ class AgentLoop:
         # Only trigger fallback if the last tool was a filesystem-oriented tool
         # (where the model might be tempted to just echo 'ls')
         filesystem_tools = {"list_directory", "ls", "find", "tree", "dir", "search_files"}
-        latest_tool = ""
-        for msg in reversed(self.state.messages):
-            if msg.get("role") == "tool":
-                latest_tool = msg.get("name", "")
-                break
-        
+        observation = self._latest_tool_observation()
+        latest_tool = observation[0] if observation else ""
+
         if latest_tool not in filesystem_tools:
             return None
 
@@ -1570,7 +1568,8 @@ class AgentLoop:
                             continue
                         arguments = function_payload.get("arguments") or "{}"
                         parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments
-                        path = str((parsed_args or {}).get("path") or "").strip()
+                        # list_directory's canonical arg is target_path; accept path too.
+                        path = str((parsed_args or {}).get("target_path") or (parsed_args or {}).get("path") or "").strip()
                         if path:
                             return path
                     except Exception:
