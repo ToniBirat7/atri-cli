@@ -84,13 +84,18 @@ _TOOL_RISK_TIER: dict[str, str] = {
     # red: destructive / irreversible
     "bash_exec": "red",
     "write_file": "red",
-    "delete_file": "red",
+    "delete_path": "red",   # the real FastMCP delete tool
+    "delete_file": "red",   # alias
+    "move_file": "red",     # can overwrite the destination
+    "rename_file": "red",
     # yellow: mutating but recoverable
     "edit_file": "yellow",
     "edit_diff": "yellow",
+    "edit_file_hashline": "yellow",
+    "append_file": "yellow",
+    "write_json_file": "yellow",
     "create_directory": "yellow",
-    "move_file": "yellow",
-    "rename_file": "yellow",
+    "create_project": "yellow",
     "create_file": "yellow",
     # green: read-only / safe
     "read_text_file": "green",
@@ -1258,6 +1263,8 @@ def _run_interactive(
     turn_number = 0
     effective_output_format = "stream-json" if stream_json else output_format
     prompt_session = _build_prompt_toolkit_session()
+    # Tools the user chose to "always allow" this session (auto-approve confirmations).
+    always_allow_tools: set[str] = set()
 
     while True:
         if fullscreen_mode:
@@ -1372,30 +1379,40 @@ def _run_interactive(
                     event_type = str(event["event"].get("type") or "")
                     
                     if event_type == "tool_confirmation_requested":
-                        # E.5: Confirmation bus — render prompt and POST response to /confirm/{session_id}
+                        # Confirmation bus — prompt the user, POST decision to /confirm/{session_id}.
                         ev = event["event"]
                         tool_name = ev.get("tool_name", "unknown")
                         tool_input = ev.get("tool_input", {})
                         request_id = ev.get("request_id", "")
-                        _RICH.render_warning(
-                            f"Tool confirmation required: [bold]{tool_name}[/bold]\n"
-                            + "\n".join(f"  {k}: {v}" for k, v in tool_input.items())
-                        )
-                        try:
-                            choice = input("Allow? [y/N]: ").strip().lower()
-                        except (EOFError, KeyboardInterrupt):
-                            choice = "n"
-                        approved = choice in ("y", "yes")
+
+                        if tool_name in always_allow_tools:
+                            approved = True
+                        else:
+                            # Stop the live spinner/status before reading stdin.
+                            _status_clear()
+                            _RICH.stop_thinking()
+                            decision = _RICH.render_tool_confirmation(
+                                tool_name, tool_input, risk_tier=_tool_risk_tier(tool_name)
+                            )
+                            if decision == "always":
+                                always_allow_tools.add(tool_name)
+                                approved = True
+                            else:
+                                approved = decision == "allow"
+
+                        # Deliver the decision via the same client transport (urllib),
+                        # surfacing failures instead of silently hanging the agent.
                         if active_conversation_id:
                             try:
-                                import httpx as _httpx
-                                _httpx.post(
-                                    f"{client.base_url}/confirm/{active_conversation_id}",
-                                    json={"request_id": request_id, "approved": approved},
-                                    timeout=5,
+                                client.request_json(
+                                    "POST",
+                                    f"/confirm/{active_conversation_id}",
+                                    {"request_id": request_id, "approved": approved},
                                 )
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                _RICH.render_warning(f"Failed to send confirmation: {exc}")
+                        else:
+                            _RICH.render_warning("No active session to confirm against; denying.")
 
                     if event_type == "turn_review_requested":
                         review_result, final_content = _handle_diff_review(event["event"])
