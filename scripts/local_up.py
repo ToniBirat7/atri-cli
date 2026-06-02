@@ -34,6 +34,47 @@ PRIMARY_LAUNCHER = "atri"
 COMPAT_LAUNCHER = "atri-cli"
 ALIAS_LAUNCHER = "tarbar"
 
+_MOE_TAGS = ("moe", "a4b", "-26b", "-27b", "x7b", "8x")
+
+
+def _model_is_moe(model: Path) -> bool:
+    name = model.name.lower()
+    return any(tag in name for tag in _MOE_TAGS)
+
+
+def _resolve_local_model(repo_dir: Path) -> Path | None:
+    """Model-agnostic resolution: ATRI_MODEL_PATH, then any gguf in models/.
+
+    Prefers the E2B decoder by name (matches service_manager/_find_model) so the
+    make path agrees with the CLI path on which model is the default.
+    """
+    env = os.environ.get("ATRI_MODEL_PATH", "")
+    if env and Path(env).exists():
+        return Path(env)
+    mdir = repo_dir / "models"
+    if mdir.is_dir():
+        for name in ("gemma-4-E2B-it-Q4_K_M.gguf", "gemma-4-e2b-it-Q4_K_M.gguf"):
+            if (mdir / name).exists():
+                return mdir / name
+        for gguf in sorted(mdir.glob("*.gguf")):
+            if "mmproj" not in gguf.name.lower():
+                return gguf
+    return None
+
+
+def _resolve_local_mmproj(model: Path) -> Path | None:
+    explicit = os.environ.get("ATRI_MMPROJ_PATH", "")
+    if explicit and Path(explicit).exists():
+        return Path(explicit)
+    for d in (model.parent, model.parent.parent / "models"):
+        if d.is_dir():
+            p = d / "mmproj-BF16.gguf"
+            if p.exists():
+                return p
+            for g in sorted(d.glob("mmproj*.gguf")):
+                return g
+    return None
+
 
 def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
@@ -613,23 +654,33 @@ def _wait_health(url: str, timeout_sec: int = 60) -> bool:
 
 
 def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config: dict | None = None) -> None:
-    model_path = repo_dir / MODEL_REL_PATH
-    if not model_path.exists():
+    model_path = _resolve_local_model(repo_dir)
+    if model_path is None or not model_path.exists():
         raise RuntimeError(
-            "Model file missing after download attempt: "
-            f"{model_path}\n"
-            f"Expected download source: {MODEL_DOWNLOAD_URL}"
+            "No model found. Place a .gguf in models/ or set ATRI_MODEL_PATH.\n"
+            f"For the default decoder, download from: {MODEL_DOWNLOAD_URL}"
         )
+    is_moe = _model_is_moe(model_path)
 
     _write_orchestrator_env(repo_dir)
     py = _python_bin(repo_dir)
     llama_bin = _llama_server_bin(repo_dir)
 
-    # Load launch config from hardware detection
-    launch = {}
+    # Regenerate the launch config for THIS model — dense vs MoE need different
+    # ctx / n_cpu_moe / mlock, so a config left over from another model is wrong.
+    import json as _json
     config_path = repo_dir / "runtime" / "llm" / "launch_config.json"
+    launch = {}
+    try:
+        gen_env = os.environ.copy()
+        gen_env["ATRI_MODEL_PATH"] = str(model_path)
+        subprocess.run(
+            [str(py), str(repo_dir / "scripts" / "detect_hardware.py"), "--save"],
+            env=gen_env, capture_output=True, text=True, timeout=30, cwd=str(repo_dir),
+        )
+    except Exception:
+        pass
     if config_path.exists():
-        import json as _json
         launch = _json.loads(config_path.read_text(encoding="utf-8"))
     elif hw_config:
         launch = hw_config.get("launch_config", {})
@@ -642,14 +693,23 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
     kv_k = launch.get("kv_cache_type_k", "q8_0" if use_gpu else "f16")
     kv_v = launch.get("kv_cache_type_v", "q8_0" if use_gpu else "f16")
 
-    # B.4: Use official Gemma 4 jinja template file if available
-    template_file = repo_dir / "runtime" / "llm" / "templates" / "gemma4-e2b.jinja"
+    # Prefer the tool-calling template (matches service_manager); fall back to
+    # the e2b template, downloading it if needed.
+    template_file = repo_dir / "runtime" / "templates" / "gemma4-tooluse.jinja"
     if not template_file.exists():
-        _download_gemma4_template(template_file)
+        template_file = repo_dir / "runtime" / "llm" / "templates" / "gemma4-e2b.jinja"
+        if not template_file.exists():
+            _download_gemma4_template(template_file)
 
     llama_cmd = [
         str(llama_bin),
         "-m", str(model_path),
+    ]
+    # MoE models need the vision projector + expert offload to fit a small card.
+    mmproj = _resolve_local_mmproj(model_path) if is_moe else None
+    if mmproj is not None:
+        llama_cmd += ["--mmproj", str(mmproj)]
+    llama_cmd += [
         "--jinja",
         *(["--chat-template-file", str(template_file)] if template_file.exists() else []),
         "--host", "127.0.0.1",
@@ -663,13 +723,26 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
         "--api-key", "secret",
     ]
     if flash_attn:
-        llama_cmd.append("--flash-attn")
+        llama_cmd += ["--flash-attn", "on"]
+    if launch.get("no_mmap", is_moe):
+        llama_cmd.append("--no-mmap")
+    if launch.get("mlock", False):
+        llama_cmd.append("--mlock")
+    n_cpu_moe = int(launch.get("n_cpu_moe", 999 if is_moe else 0) or 0)
+    if is_moe and n_cpu_moe > 0:
+        llama_cmd += ["--n-cpu-moe", str(n_cpu_moe)]
 
-    print(f"[local-up] Starting llama server (ctx={ctx_size}, gpu_layers={n_gpu_layers}, flash_attn={flash_attn})...")
+    # Experts spill to system RAM via unified memory when the model exceeds VRAM.
+    llama_env = os.environ.copy()
+    llama_env["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
+
+    print(f"[local-up] Starting llama server (model={model_path.name}, moe={is_moe}, "
+          f"ctx={ctx_size}, gpu_layers={n_gpu_layers}, n_cpu_moe={n_cpu_moe if is_moe else 0})...")
     _spawn(
         llama_cmd,
         cwd=repo_dir / "runtime/llm/llama.cpp",
         log_path=repo_dir / "llama.log",
+        env=llama_env,
     )
 
     print("[local-up] Starting orchestrator...")
