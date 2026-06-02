@@ -72,6 +72,31 @@ echo ""
 # forced to wait 5-15 min before being asked about their model.
 header "Model setup"
 
+# Model-agnostic: pick the small dense decoder (default, fast, fits a modest
+# GPU) or the large MoE (more capable, CPU-offloaded). The runtime detects and
+# optimises whichever model is installed (see scripts/detect_hardware.py).
+if [ -n "$_TTY" ]; then
+    echo "  Which model do you want to run?"
+    echo "    1) Gemma 4 E2B      — 2B dense, ~3 GB, fast, fits a 6 GB GPU   (default)"
+    echo "    2) Gemma 4 26B MoE  — ~16 GB, more capable, needs ~32 GB RAM + CPU offload"
+    _read -p "  Choice [1/2] (default 1): " _model_choice
+else
+    _model_choice="${ATRI_MODEL_CHOICE:-1}"
+fi
+
+if [[ "$_model_choice" == "2" ]]; then
+    ATRI_MODEL_FILENAME="${ATRI_MODEL_FILENAME:-gemma-4-26B-A4B-it-UD-Q4_K_M.gguf}"
+    ATRI_MODEL_URL="${ATRI_MODEL_URL:-https://huggingface.co/unsloth/gemma-4-27B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf}"
+    NEEDS_MMPROJ=1
+    MODEL_SIZE_HINT="~16 GB"
+else
+    ATRI_MODEL_FILENAME="${ATRI_MODEL_FILENAME:-gemma-4-E2B-it-Q4_K_M.gguf}"
+    ATRI_MODEL_URL="${ATRI_MODEL_URL:-}"   # custom decoder — provide a local path
+    NEEDS_MMPROJ=0
+    MODEL_SIZE_HINT="~3 GB"
+fi
+ok "Selected model: $ATRI_MODEL_FILENAME ($MODEL_SIZE_HINT)"
+
 MODEL_PATH=""
 MMPROJ_PATH=""
 MODEL_DEST="$MODEL_DIR/$ATRI_MODEL_FILENAME"
@@ -93,17 +118,24 @@ _prompt_existing_path() {
 }
 
 if [ -n "$_TTY" ]; then
-    _read -p "  Do you already have the Gemma 4 27B MoE models downloaded? [y/N] " _has_model
+    _read -p "  Do you already have $ATRI_MODEL_FILENAME locally? [Y/n] " _has_model
 else
-    _has_model="n"
+    _has_model="${ATRI_HAS_MODEL:-n}"
 fi
 
-if [[ "$_has_model" =~ ^[Yy] ]]; then
-    info "Enter paths to your model files (Tab completion works):"
-    _prompt_existing_path "main model  (gemma-4-26B-A4B-it-UD-Q4_K_M.gguf)" MODEL_PATH
-    _prompt_existing_path "vision proj (mmproj-BF16.gguf)" MMPROJ_PATH
+if [[ ! "$_has_model" =~ ^[Nn] ]] && [ -n "$_TTY" ]; then
+    info "Enter the path to your model file (Tab completion works):"
+    _prompt_existing_path "main model ($ATRI_MODEL_FILENAME)" MODEL_PATH
+    if [ "$NEEDS_MMPROJ" = "1" ]; then
+        _prompt_existing_path "vision proj ($ATRI_MMPROJ_FILENAME)" MMPROJ_PATH
+    fi
+elif [ -f "$MODEL_DEST" ]; then
+    info "Model already present at $MODEL_DEST"
+elif [ -n "$ATRI_MODEL_URL" ]; then
+    info "$ATRI_MODEL_FILENAME ($MODEL_SIZE_HINT) will be downloaded"
 else
-    info "Main model (~15.8 GB) + vision proj (~1.1 GB) will be downloaded"
+    die "No local model and no download URL for $ATRI_MODEL_FILENAME.
+  Re-run interactively and provide a path, or set ATRI_MODEL_URL=<gguf url>."
 fi
 
 # ─── Cleanup trap (only fires on error) ────────────────────────────────────
@@ -395,23 +427,31 @@ if [ -n "$MODEL_PATH" ]; then
     ok "Model linked: $(basename "$MODEL_DEST") → $MODEL_PATH"
 elif [ -f "$MODEL_DEST" ]; then
     ok "Model already present: $MODEL_DEST"
-else
-    info "Downloading Gemma 4 27B MoE model (~15.8 GB) ..."
+elif [ -n "$ATRI_MODEL_URL" ]; then
+    info "Downloading $ATRI_MODEL_FILENAME ($MODEL_SIZE_HINT) ..."
     curl -fL --progress-bar -o "$MODEL_DEST" "$ATRI_MODEL_URL" \
         || { rm -f "$MODEL_DEST"; die "Model download failed. Check your connection and re-run installer."; }
     ok "Model downloaded: $MODEL_DEST"
+else
+    die "No model available. Provide a local path (re-run interactively) or set ATRI_MODEL_URL."
 fi
 
-# Vision projector (mmproj)
-if [ -n "$MMPROJ_PATH" ]; then
-    ln -sfn "$MMPROJ_PATH" "$MMPROJ_DEST"
-    ok "mmproj linked: $(basename "$MMPROJ_DEST") → $MMPROJ_PATH"
-elif [ -f "$MMPROJ_DEST" ]; then
-    ok "mmproj already present: $MMPROJ_DEST"
+# Vision projector (mmproj) — only the multimodal MoE build needs it.
+if [ "$NEEDS_MMPROJ" = "1" ]; then
+    if [ -n "$MMPROJ_PATH" ]; then
+        ln -sfn "$MMPROJ_PATH" "$MMPROJ_DEST"
+        ok "mmproj linked: $(basename "$MMPROJ_DEST") → $MMPROJ_PATH"
+    elif [ -f "$MMPROJ_DEST" ]; then
+        ok "mmproj already present: $MMPROJ_DEST"
+    elif [ -n "$ATRI_MMPROJ_URL" ]; then
+        info "Downloading vision projector (~1.1 GB) ..."
+        curl -fL --progress-bar -o "$MMPROJ_DEST" "$ATRI_MMPROJ_URL" \
+            || { warn "mmproj download failed — vision features unavailable. Re-run installer to retry."; rm -f "$MMPROJ_DEST"; }
+    else
+        warn "No mmproj path/URL — vision features unavailable (text generation still works)."
+    fi
 else
-    info "Downloading vision projector (~1.1 GB) ..."
-    curl -fL --progress-bar -o "$MMPROJ_DEST" "$ATRI_MMPROJ_URL" \
-        || { warn "mmproj download failed — vision features unavailable. Re-run installer to retry."; rm -f "$MMPROJ_DEST"; }
+    info "Text-only decoder — skipping vision projector."
 fi
 
 # ─── Uninstall script ──────────────────────────────────────────────────────
