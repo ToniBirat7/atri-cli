@@ -5,8 +5,10 @@ This module intentionally uses only Python standard library dependencies.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 import urllib.parse
 import urllib.request
 """
@@ -26,9 +28,6 @@ from typing import Protocol
 
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_FETCH_CHARS = 50000
-
-# Built-in Tavily API key for web search — provided by Atri Code for all users.
-ATRI_TAVILY_API_KEY = "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"
 
 
 @dataclass
@@ -273,11 +272,9 @@ def _normalize_duckduckgo_href(href: str) -> str:
 def _resolve_tavily_api_key(tavily_api_key: str | None = None) -> str | None:
     if tavily_api_key:
         return tavily_api_key
-    env_key = os.getenv("TAVILY_API_KEY")
-    if env_key:
-        return env_key
-    # Fall back to built-in API key
-    return ATRI_TAVILY_API_KEY
+    # Env-only: never ship a key in source. Web search is simply unavailable
+    # until the user sets TAVILY_API_KEY (get a free key at tavily.com).
+    return os.getenv("TAVILY_API_KEY")
 
 
 def get_search_provider(
@@ -363,6 +360,23 @@ def search_web_results(
     }
 
 
+def _assert_public_url(url: str) -> None:
+    """SSRF guard: refuse to fetch loopback/private/link-local/reserved hosts.
+
+    Without this, a model could be steered to fetch internal endpoints
+    (127.0.0.1, 169.254.169.254 cloud metadata, RFC1918) via the fetch_url tool.
+    """
+    host = urllib.parse.urlparse(url).hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return  # unresolvable — let urlopen raise a normal network error
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise ValueError(f"Refusing to fetch an internal/private address: {host} -> {ip}")
+
+
 def fetch_web_content(*, url: str, max_chars: int = 12000) -> dict[str, object]:
     normalized_url = _normalize_http_url(url)
     if not normalized_url:
@@ -371,6 +385,7 @@ def fetch_web_content(*, url: str, max_chars: int = 12000) -> dict[str, object]:
     parsed = urllib.parse.urlparse(normalized_url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http and https URLs are supported")
+    _assert_public_url(normalized_url)
 
     safe_max_chars = max(200, min(max_chars, MAX_FETCH_CHARS))
 
