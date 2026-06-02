@@ -108,7 +108,7 @@ class RichTUI:
         self,
         api_url: str = "http://127.0.0.1:8001",
         permission_mode: str = "default",
-        model: str = "Gemma 4 27B MoE",
+        model: str = "local model",
         reasoning: bool = True,
     ) -> None:
         """Render the startup welcome banner."""
