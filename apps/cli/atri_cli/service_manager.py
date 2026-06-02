@@ -592,8 +592,9 @@ class ServiceManager:
                 print(f"  Stopped {service}")
 
     def status(self) -> dict:
-        """Return status of all services."""
+        """Return status of all services + the active model and its optimisation."""
         config = self._get_launch_config()
+        model = self._find_model()
         return {
             "llama_server": {
                 "running": self.llama_running,
@@ -605,6 +606,10 @@ class ServiceManager:
                 "url": f"http://127.0.0.1:{self.orch_port}",
                 "owns": self._owns_orch,
             },
+            "model": model.name if model else None,
+            "is_moe": config.get("is_moe", False),
+            "n_cpu_moe": config.get("n_cpu_moe", 0),
+            "mlock": config.get("mlock", False),
             "gpu": config.get("gpu_name", ""),
             "ctx_size": config.get("recommended_ctx_size", 0),
             "flash_attn": config.get("flash_attn", False),
