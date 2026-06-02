@@ -2,7 +2,6 @@ import os
 import sqlite3
 import hashlib
 import logging
-import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime

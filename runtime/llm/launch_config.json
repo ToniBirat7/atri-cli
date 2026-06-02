@@ -17,5 +17,7 @@
   "mlock": true,
   "n_cpu_moe": 0,
   "is_moe": false,
-  "enable_thinking": true
+  "enable_thinking": true,
+  "model_path": "/run/media/tonibirat/New Volume/AI_ML_Complete/Agentic_AI/models/gemma-4-E2B-it-Q4_K_M.gguf",
+  "model_size_mb": 2962
 }

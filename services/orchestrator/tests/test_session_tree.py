@@ -12,7 +12,7 @@ _ORCH_DIR = Path(__file__).resolve().parent.parent
 if str(_ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(_ORCH_DIR))
 
-from session_tree import SessionTree, SessionEntry, new_entry
+from session_tree import SessionTree, new_entry
 
 
 @pytest.fixture

@@ -13,7 +13,10 @@ Phase 4: Multi-server support with namespaced tool routing.
 Phase 5: Retry logic, circuit-breaker, timeout handling.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # resolve forward-ref string annotations for type checkers only
+    from tool_registry import ToolRegistry
 import json
 import logging
 from dataclasses import dataclass

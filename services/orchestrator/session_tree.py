@@ -8,7 +8,6 @@ Sessions stored as append-only JSONL: .atri/sessions/<session_id>.jsonl
 from __future__ import annotations
 import json
 import logging
-import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone

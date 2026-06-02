@@ -3,7 +3,7 @@ import pytest
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from llm_adapter import LLMAdapter, ToolUse
+from llm_adapter import LLMAdapter
 from config import LLMConfig
 
 

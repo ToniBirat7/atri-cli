@@ -11,7 +11,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import HTTPException, Request
 

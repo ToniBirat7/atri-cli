@@ -1,6 +1,4 @@
 """Snapshot tests for prompt_policy profiles."""
-import datetime
-import re
 
 import pytest
 

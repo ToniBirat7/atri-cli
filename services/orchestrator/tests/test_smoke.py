@@ -23,7 +23,6 @@ def test_prompt_policy_profiles_exist():
 
 def test_no_orphan_imports():
     """Deleted modules must not be importable from the package."""
-    import importlib
     for mod in ("verification_service", "worktree_manager"):
         try:
             importlib.import_module(mod)
