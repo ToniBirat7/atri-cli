@@ -394,9 +394,10 @@ def _write_orchestrator_env(repo_dir: Path) -> None:
                 "LLM_MODEL=local-model",
                 "LLM_TEMPERATURE=0.6",
                 "LLM_MAX_TOKENS=4096",
-                "LLM_TIMEOUT_SECONDS=120",
+                "LLM_TIMEOUT_SECONDS=300",
                 "MCP_DEFAULT_TRANSPORT=stdio",
                 "MCP_TOOL_TIMEOUT_SECONDS=15",
+                "MCP_ALLOW_HIDDEN=true",
                 "AGENT_MAX_TURNS=10",
                 "AGENT_MAX_TOOL_CALLS_PER_TURN=3",
                 "AGENT_ENABLE_TOOL_USE=true",
@@ -404,6 +405,10 @@ def _write_orchestrator_env(repo_dir: Path) -> None:
                 "AGENT_STREAM_RESPONSES=false",
                 f"ORCHESTRATOR_DATABASE_URL={db_url}",
                 "ORCHESTRATOR_ENABLE_PERSISTENCE=true",
+                "ORCHESTRATOR_AUTH_MODE=hybrid",
+                "ORCHESTRATOR_JWT_SECRET=",
+                "ORCHESTRATOR_API_KEY=",
+                "ORCHESTRATOR_ADMIN_API_KEY=",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
                 "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
@@ -563,7 +568,7 @@ def _download_gemma4_template(dest: Path) -> None:
         print(f"[local-up] Warning: Gemma 4 template download failed ({exc}); using built-in jinja.")
 
 
-def _spawn(cmd: list[str], cwd: Path, log_path: Path) -> None:
+def _spawn(cmd: list[str], cwd: Path, log_path: Path, env: dict | None = None) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fp = open(log_path, "ab")
     kwargs = {
@@ -572,11 +577,26 @@ def _spawn(cmd: list[str], cwd: Path, log_path: Path) -> None:
         "stderr": log_fp,
         "close_fds": True,
     }
+    if env is not None:
+        kwargs["env"] = env
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
     subprocess.Popen(cmd, **kwargs)
+
+
+def _orchestrator_env() -> dict:
+    """Child environment for uvicorn with stale auth vars stripped.
+
+    A leftover ORCHESTRATOR_API_KEY / JWT_SECRET in the launching shell would
+    otherwise make the daemon require auth the anonymous CLI never sends (401).
+    Removing them lets services/orchestrator/.env be authoritative.
+    """
+    env = os.environ.copy()
+    for leaked in ("ORCHESTRATOR_API_KEY", "ORCHESTRATOR_ADMIN_API_KEY", "ORCHESTRATOR_JWT_SECRET"):
+        env.pop(leaked, None)
+    return env
 
 
 def _wait_health(url: str, timeout_sec: int = 60) -> bool:
@@ -657,6 +677,7 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
         [str(py), "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", "8001"],
         cwd=repo_dir / "services/orchestrator",
         log_path=repo_dir / "orchestrator.log",
+        env=_orchestrator_env(),
     )
 
     if mode in {"full", "web"}:
