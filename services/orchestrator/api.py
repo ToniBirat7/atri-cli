@@ -347,6 +347,13 @@ tool_registry: Optional[ToolRegistry] = None
 agent_loop: Optional[AgentLoop] = None
 # E.5: Per-session confirmation queues for decoupled tool confirmation bus
 _active_confirmation_queues: Dict[str, asyncio.Queue] = {}
+# Serializes agent execution. The AgentLoop singleton, the MCP server's global
+# allowed-directory, and the model-router override are all shared mutable state
+# mutated per request; llama-server also serves a single (--parallel 1) slot.
+# This lock makes overlapping /chat and /chat/stream requests queue instead of
+# clobbering each other's turn limits, permission mode, sandbox, or model.
+# Uncontended (zero cost) for the normal single-user, one-request-at-a-time flow.
+_agent_request_lock = asyncio.Lock()
 conversation_store: Optional[OrchestratorDatabase] = None
 request_authenticator: Optional[RequestAuthenticator] = None
 rate_limiter: Optional[DistributedRateLimiter] = None
@@ -640,6 +647,10 @@ async def _run_agent_request(
     if conversation_store is not None:
         await conversation_store.ensure_conversation(conversation_id, prompt_profile)
 
+    # Serialize the critical section below — it mutates shared singleton state
+    # (agent_loop fields, MCP allowed-directory, model-router override) that
+    # concurrent requests would otherwise corrupt. Released in the finally.
+    await _agent_request_lock.acquire()
     original_max_turns = agent_loop.max_turns
     original_permission_mode = agent_loop.permission_mode
     _model_override_applied = False
@@ -861,6 +872,7 @@ async def _run_agent_request(
         # Phase 5.2: clear model override after request completes
         if _model_override_applied and model_router is not None:
             model_router.clear_override()
+        _agent_request_lock.release()
 
 
 @app.on_event("startup")
