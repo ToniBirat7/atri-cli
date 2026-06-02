@@ -947,7 +947,11 @@ class AgentLoop:
                             # ─────────────────────────────────────────────────────
 
                             # ── Phase 5.5: Context distillation ───────────────────
-                            _distill_turn_id = f"{self.state.turn}_{tool_call.tool_name}"
+                            # Include the tool-call id so two calls to the same
+                            # tool in one turn don't share a distilled-result file
+                            # (which would make the first call's "Full result at:"
+                            # pointer resolve to the second call's content).
+                            _distill_turn_id = f"{self.state.turn}_{tool_call.tool_name}_{tool_call.id}"
                             if isinstance(result, str):
                                 result = self._maybe_distill_result(result, _distill_turn_id)
                             elif isinstance(result, dict):
