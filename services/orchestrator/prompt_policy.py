@@ -29,8 +29,10 @@ If you do not call a tool, do not pretend you did.
 If you have not called a tool, you do not know the answer.
 - All file paths must be RELATIVE to the project root (e.g. services/orchestrator/config.py). \
 NEVER use absolute paths starting with /.
-- edit_file requires the parameter 'exact_text_to_replace' — never 'old_text' or 'old_content'.
-- If a tool call fails, report the error honestly. Do not retry with invented output.
+- edit_file takes exactly three params: 'target_file_path', 'exact_text_to_replace' (the text to find), \
+and 'new_text_content' (the replacement). Example: \
+edit_file(target_file_path="a.py", exact_text_to_replace="x = 1", new_text_content="x = 2").
+- If a tool call fails, read the error message — it lists the accepted parameter names — and retry with those exact names.
 """.strip()
 
 
@@ -157,7 +159,7 @@ def build_system_prompt(
             2. To list files → call list_directory. NEVER list files from memory.
             3. To run a shell command → call bash_exec. NEVER show fake terminal output.
             4. To search code → call grep_codebase. NEVER guess which files contain something.
-            5. To edit a file → call edit_file with exact_text_to_replace. NEVER write fake diffs.
+            5. To edit a file → call edit_file with exactly: target_file_path, exact_text_to_replace (text to find), new_text_content (replacement). NEVER write fake diffs.
             6. For math, explanations, or questions with no file/shell requirement → answer directly.
             7. If you are unsure which tool to use, call list_directory first.
             """

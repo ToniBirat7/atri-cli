@@ -2242,10 +2242,13 @@ def main() -> None:
     _TUI.set_timeline_verbosity(args.timeline_verbosity)
 
     def _graceful_exit(signum=None, frame=None):
-        """Handle Ctrl+C cleanly."""
+        """Handle Ctrl+C cleanly.
+
+        Leave llama-server + orchestrator running as warm daemons so the next
+        `atri` invocation responds instantly. Use `atri stop` to kill them.
+        """
         print()  # newline after ^C
-        _RICH.render_info("Shutting down...")
-        svc.shutdown()
+        _RICH.render_info("Exiting. Services stay warm — run 'atri stop' to shut them down.")
         raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _graceful_exit)
@@ -2377,8 +2380,8 @@ def main() -> None:
     except RuntimeError as exc:
         _emit_error(output_format, str(exc))
         raise SystemExit(1)
-    finally:
-        svc.shutdown()
+    # Note: services are intentionally left running as warm daemons between
+    # invocations (see ServiceManager docstring). `atri stop` shuts them down.
 
 
 if __name__ == "__main__":

@@ -389,7 +389,12 @@ class OrchestratorConfig(BaseModel):
     def from_env(cls) -> "OrchestratorConfig":
         """Load configuration from environment variables."""
         env_path = Path(__file__).resolve().parent / ".env"
-        load_dotenv(dotenv_path=env_path, override=True)
+        # override=False keeps 12-factor precedence: a real environment variable
+        # (Docker/CI/systemd secret injection) wins over the .env file. The CLI
+        # daemon launcher (service_manager.start_orchestrator) strips stale
+        # auth vars from the child environment so .env stays authoritative for
+        # local anonymous dev without breaking explicit production overrides.
+        load_dotenv(dotenv_path=env_path, override=False)
 
         mcp_servers = _safe_parse_json_array(os.getenv("MCP_SERVERS_JSON", "[]"))
 

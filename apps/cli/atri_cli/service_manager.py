@@ -185,17 +185,35 @@ class ServiceManager:
             self.repo_root / "models",
         ]
 
-        preferred = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+        # Default target is the text-only Gemma 4 E2B decoder: it fits entirely
+        # in modest VRAM (e.g. 6 GB RTX 3060) for fast, reliable responses.
+        # The larger 26B MoE is opt-in via ATRI_MODEL_PATH / ATRI_MODEL_DIR.
+        preferred = [
+            "gemma-4-E2B-it-Q4_K_M.gguf",
+            "gemma-4-e2b-it-Q4_K_M.gguf",
+            "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        ]
         for mdir in model_dirs:
-            p = mdir / preferred
-            if p.exists():
-                return p
+            for name in preferred:
+                p = mdir / name
+                if p.exists():
+                    return p
             # Fall back to any gguf that isn't the vision projector
             for gguf in sorted(mdir.glob("*.gguf")):
                 if "mmproj" not in gguf.name.lower():
                     return gguf
 
         return None
+
+    @staticmethod
+    def _is_moe_model(model: Path) -> bool:
+        """Heuristic: does this GGUF use Mixture-of-Experts layers?
+
+        Only MoE models accept --n-cpu-moe; passing it to a dense model
+        (e.g. the 2B E2B decoder) makes llama-server reject the flag.
+        """
+        name = model.name.lower()
+        return any(tag in name for tag in ("moe", "a4b", "-26b", "-27b", "x7b", "8x"))
 
     def _find_mmproj(self) -> Optional[Path]:
         """Find the multimodal projector (mmproj) file."""
@@ -299,7 +317,7 @@ class ServiceManager:
                 "ORCHESTRATOR_ADMIN_API_KEY=",
                 "LOG_LEVEL=INFO",
                 "ENABLE_OBSERVABILITY=true",
-                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3-26b",
+                "PROMPT_POLICY_DEFAULT_PROFILE=agent-v3",
             ]) + "\n",
             encoding="utf-8",
         )
@@ -327,7 +345,10 @@ class ServiceManager:
                 )
             return False
 
-        mmproj = self._find_mmproj()
+        is_moe = self._is_moe_model(model)
+        # Vision projector only matters for the multimodal MoE build; the
+        # text-only E2B decoder runs without it.
+        mmproj = self._find_mmproj() if is_moe else None
 
         config = self._get_launch_config()
 
@@ -375,7 +396,7 @@ class ServiceManager:
         if config.get("mlock", True):
             cmd.append("--mlock")
         n_cpu_moe = config.get("n_cpu_moe", 0)
-        if n_cpu_moe > 0:
+        if is_moe and n_cpu_moe > 0:
             cmd.extend(["--n-cpu-moe", str(n_cpu_moe)])
 
         log_path = self.repo_root / "llama.log"
@@ -423,9 +444,33 @@ class ServiceManager:
         log_path = self.repo_root / "orchestrator.log"
         log_fp = open(log_path, "ab")
 
+        # Strip auth vars that may have leaked in from a previous dev shell.
+        # If a stale ORCHESTRATOR_API_KEY/JWT_SECRET is inherited here, the
+        # daemon would require auth the (anonymous) CLI never sends -> HTTP 401.
+        # Removing them lets the orchestrator's .env (blank by default) be the
+        # single source of truth via load_dotenv(override=False).
+        env = os.environ.copy()
+        for leaked in (
+            "ORCHESTRATOR_API_KEY",
+            "ORCHESTRATOR_ADMIN_API_KEY",
+            "ORCHESTRATOR_JWT_SECRET",
+        ):
+            env.pop(leaked, None)
+
+        # Auto-select the prompt profile to match the model that start_llama
+        # serves: the richer agent-v3-26b for the MoE build, the leaner agent-v3
+        # (tuned for the 2B E2B decoder) otherwise. Set as a real env var so it
+        # wins over a stale .env value (config uses load_dotenv override=False).
+        model = self._find_model()
+        if model is not None:
+            env["PROMPT_POLICY_DEFAULT_PROFILE"] = (
+                "agent-v3-26b" if self._is_moe_model(model) else "agent-v3"
+            )
+
         proc = subprocess.Popen(
             [py, "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", str(self.orch_port)],
             cwd=str(orch_dir),
+            env=env,
             stdout=log_fp,
             stderr=log_fp,
             start_new_session=True,
