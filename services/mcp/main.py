@@ -1461,10 +1461,13 @@ def _load_ts_language(lang: str) -> Any:
 
 @mcp.tool()
 def search_symbols(
-    query: str,
+    query: Optional[str] = None,
     path: str = ".",
     language: str = "auto",
     kinds: list[str] | None = None,
+    # Aliases: small models reach for 'symbol'/'name' instead of 'query'.
+    symbol: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Search for code symbols (functions, classes, methods) by name pattern.
@@ -1472,13 +1475,20 @@ def search_symbols(
     available, falls back to regex grep.
 
     Args:
-        query: Symbol name pattern (supports * and ? glob wildcards)
+        query: Symbol name pattern (supports * and ? glob wildcards). Aliases: symbol, name.
         path: Directory or file to search (default: current directory)
         language: Language hint ('python','typescript','javascript','go','rust','auto')
         kinds: Symbol types to find ('function','class','method','variable'). Default: all
     """
     import fnmatch
     import re
+
+    query = query or symbol or name
+    if not query:
+        raise ValueError(
+            "Missing required argument 'query' (the symbol name pattern). "
+            "Accepted aliases: symbol, name."
+        )
 
     if kinds is None:
         kinds = ["function", "class", "method", "variable"]
