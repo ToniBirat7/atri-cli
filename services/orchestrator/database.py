@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,7 +94,25 @@ class OrchestratorDatabase:
             raise RuntimeError("Use _connect_postgres for PostgreSQL connections")
         connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
+        # Wait up to 5s on a locked DB instead of failing immediately, so a
+        # concurrent reader (sessions list/show) doesn't drop a turn write.
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    @contextmanager
+    def _session(self):
+        """Yield a sqlite connection inside a transaction, then CLOSE it.
+
+        sqlite3.Connection.__exit__ commits/rolls back but does NOT close the
+        connection — using `with self._connect()` directly leaked a file
+        descriptor per call. This wraps connect + transaction + close.
+        """
+        connection = self._connect()
+        try:
+            with connection:  # commit on success, rollback on exception
+                yield connection
+        finally:
+            connection.close()
 
     def _connect_postgres(self):
         if psycopg is None:
@@ -161,7 +180,7 @@ class OrchestratorDatabase:
                         )
                     connection.commit()
             else:
-                with self._connect() as connection:
+                with self._session() as connection:
                     connection.executescript(
                         """
                         PRAGMA journal_mode=WAL;
@@ -227,7 +246,7 @@ class OrchestratorDatabase:
                         )
                     connection.commit()
             else:
-                with self._connect() as connection:
+                with self._session() as connection:
                     connection.execute(
                         """
                         INSERT INTO conversations (conversation_id, prompt_profile, created_at, updated_at)
@@ -316,7 +335,7 @@ class OrchestratorDatabase:
                         )
                     connection.commit()
             else:
-                with self._connect() as connection:
+                with self._session() as connection:
                     cursor = connection.execute(
                         """
                         INSERT INTO turns (
@@ -396,7 +415,7 @@ class OrchestratorDatabase:
                             for row in rows
                         ]
 
-            with self._connect() as connection:
+            with self._session() as connection:
                 rows = connection.execute(
                     """
                     SELECT conversation_id, prompt_profile, created_at, updated_at
@@ -444,7 +463,7 @@ class OrchestratorDatabase:
                             updated_at=row[3],
                         )
 
-            with self._connect() as connection:
+            with self._session() as connection:
                 row = connection.execute(
                     """
                     SELECT conversation_id, prompt_profile, created_at, updated_at
@@ -500,7 +519,7 @@ class OrchestratorDatabase:
                             for row in rows
                         ]
 
-            with self._connect() as connection:
+            with self._session() as connection:
                 rows = connection.execute(
                     """
                     SELECT id, conversation_id, request_id, turn_index, user_message,
@@ -534,7 +553,13 @@ class OrchestratorDatabase:
         if not self.enabled:
             return []
 
-        turns = await self.list_turns(conversation_id=conversation_id, limit=max_turns)
+        # list_turns is ORDER BY id ASC, so passing limit=max_turns returned the
+        # OLDEST turns — a long conversation would resume with its earliest
+        # context instead of its most recent. Load a generous recent window and
+        # keep the latest max_turns. (Very long sessions are also compacted by
+        # the agent loop, so this window is more than enough.)
+        window = max(200, max_turns * 10)
+        turns = await self.list_turns(conversation_id=conversation_id, limit=window)
         messages: list[dict[str, str]] = []
         for turn in turns[-max_turns:]:
             messages.append({"role": "user", "content": turn.user_message})
@@ -591,7 +616,7 @@ class OrchestratorDatabase:
                     connection.commit()
                     return True
 
-            with self._connect() as connection:
+            with self._session() as connection:
                 source = connection.execute(
                     """
                     SELECT prompt_profile, created_at, updated_at

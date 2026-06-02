@@ -354,6 +354,9 @@ _active_confirmation_queues: Dict[str, asyncio.Queue] = {}
 # clobbering each other's turn limits, permission mode, sandbox, or model.
 # Uncontended (zero cost) for the normal single-user, one-request-at-a-time flow.
 _agent_request_lock = asyncio.Lock()
+# Strong refs to fire-and-forget background tasks (memory mining) so the GC
+# doesn't collect them mid-flight; entries are discarded on completion.
+_background_tasks: set = set()
 conversation_store: Optional[OrchestratorDatabase] = None
 request_authenticator: Optional[RequestAuthenticator] = None
 rate_limiter: Optional[DistributedRateLimiter] = None
@@ -812,13 +815,17 @@ async def _run_agent_request(
                 {"role": "assistant", "content": response},
             ]
             if len(_all_messages) > 20 and llm_adapter is not None:
-                def _log_mining_error(task: asyncio.Task) -> None:
+                def _mining_done(task: asyncio.Task) -> None:
+                    _background_tasks.discard(task)
                     if not task.cancelled() and task.exception():
                         logger.error("session memory mining failed", exc_info=task.exception())
                 _mining_task = asyncio.create_task(
                     maybe_mine_session(_all_messages, llm_adapter, session_id=conversation_id)
                 )
-                _mining_task.add_done_callback(_log_mining_error)
+                # Hold a strong reference until done — without it the event loop
+                # keeps only a weak ref and the GC can cancel the task mid-flight.
+                _background_tasks.add(_mining_task)
+                _mining_task.add_done_callback(_mining_done)
         except Exception:
             pass  # never let mining break the response
 
