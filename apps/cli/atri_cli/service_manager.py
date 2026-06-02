@@ -109,27 +109,46 @@ class ServiceManager:
         return _check_health(self.orch_health_url)
 
     def _get_launch_config(self) -> dict:
-        """Load launch_config.json or return defaults."""
+        """Load (or regenerate) launch_config.json for the CURRENT model.
+
+        The config is model-specific (n_cpu_moe, ctx, mlock differ for a dense
+        2B vs a 26B MoE). A cached config is reused only if it was computed for
+        the model we're about to serve; otherwise it's regenerated. This is what
+        makes the launcher model-agnostic — switching models picks up the right
+        optimisation flags instead of reusing the previous model's config.
+        """
         config_path = self.repo_root / "runtime" / "llm" / "launch_config.json"
+        model = self._find_model()
+        model_path = str(model) if model else ""
+
+        cached: Optional[dict] = None
         if config_path.exists():
             try:
-                return json.loads(config_path.read_text(encoding="utf-8"))
+                cached = json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                cached = None
+        if cached is not None and model_path and cached.get("model_path", "") == model_path:
+            return cached
 
-        # Generate config if detect_hardware.py exists
+        # Model changed (or no cached config): regenerate for the current model.
         detect_script = self.repo_root / "scripts" / "detect_hardware.py"
         if detect_script.exists():
             try:
-                result = subprocess.run(
+                env = os.environ.copy()
+                if model_path:
+                    env["ATRI_MODEL_PATH"] = model_path
+                subprocess.run(
                     [sys.executable, str(detect_script), "--save"],
                     capture_output=True, text=True, timeout=30, check=True,
-                    cwd=str(self.repo_root),
+                    cwd=str(self.repo_root), env=env,
                 )
                 if config_path.exists():
                     return json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
+
+        if cached is not None:
+            return cached  # last resort: stale config beats nothing
 
         # Conservative defaults used when detect_hardware.py hasn't run yet.
         # detect_hardware.py writes launch_config.json with device-specific values.
@@ -215,23 +234,31 @@ class ServiceManager:
         name = model.name.lower()
         return any(tag in name for tag in ("moe", "a4b", "-26b", "-27b", "x7b", "8x"))
 
-    def _find_mmproj(self) -> Optional[Path]:
-        """Find the multimodal projector (mmproj) file."""
+    def _find_mmproj(self, model: Optional[Path] = None) -> Optional[Path]:
+        """Find the multimodal projector (mmproj) file.
+
+        Searches, in order: ATRI_MMPROJ_PATH, the selected model's own directory
+        (so a model on an external drive finds its sibling mmproj), then the
+        standard model dirs. This keeps mmproj discovery model-location agnostic.
+        """
         explicit = os.environ.get("ATRI_MMPROJ_PATH", "")
         if explicit and Path(explicit).exists():
             return Path(explicit)
 
         install_root = Path(os.environ.get("ATRI_INSTALL_ROOT", Path.home() / ".local/share/atri"))
-        model_dirs = [
-            Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
-            self.repo_root / "models",
-        ]
+        model_dirs: list[Path] = []
+        if model is not None:
+            model_dirs.append(model.parent)  # mmproj usually ships beside the model
+        model_dirs.append(Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))))
+        model_dirs.append(self.repo_root / "models")
 
         for mdir in model_dirs:
+            if not mdir.is_dir():
+                continue
             p = mdir / "mmproj-BF16.gguf"
             if p.exists():
                 return p
-            for gguf in mdir.glob("mmproj*.gguf"):
+            for gguf in sorted(mdir.glob("mmproj*.gguf")):
                 return gguf
 
         return None
@@ -347,8 +374,8 @@ class ServiceManager:
 
         is_moe = self._is_moe_model(model)
         # Vision projector only matters for the multimodal MoE build; the
-        # text-only E2B decoder runs without it.
-        mmproj = self._find_mmproj() if is_moe else None
+        # text-only E2B decoder runs without it. Search beside the model too.
+        mmproj = self._find_mmproj(model) if is_moe else None
 
         config = self._get_launch_config()
 

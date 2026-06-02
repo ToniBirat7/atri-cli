@@ -258,12 +258,23 @@ def compute_launch_config(
             ctx_size = 4096
 
     # When the model does NOT fit in VRAM (e.g. 26B MoE on a 6 GB card), it spills
-    # to system RAM via GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe. There the
-    # GPU holds mainly attention + KV cache, so we can afford a larger context.
-    # When the model DOES fit in VRAM (e.g. the 2B E2B decoder) we must NOT inflate
-    # ctx past what the VRAM tiers above allow, or the KV cache will OOM the card.
-    if vendor == "nvidia" and gpu_detected and not fits_in_vram and ctx_size < 32768:
-        ctx_size = 32768
+    # to system RAM via GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 + --n-cpu-moe: the expert
+    # weights live in RAM and the GPU holds attention + KV cache. Scale context to
+    # the RAM left AFTER the model so we don't OOM — blindly forcing 32K could
+    # exhaust RAM on a machine where the model barely fits. When the model DOES fit
+    # in VRAM (e.g. the 2B E2B decoder) we keep the VRAM-based ctx above so the KV
+    # cache doesn't OOM the card.
+    if vendor == "nvidia" and gpu_detected and not fits_in_vram:
+        total_ram = ram.get("total_ram_mb", 8192)
+        ram_headroom = total_ram - model_size_mb - 2048  # OS + activation overhead
+        if ram_headroom >= 12000:
+            ctx_size = 32768
+        elif ram_headroom >= 6000:
+            ctx_size = 16384
+        elif ram_headroom >= 3000:
+            ctx_size = 8192
+        else:
+            ctx_size = 4096
 
     # GPU layers
     n_gpu_layers = 999 if gpu_detected else 0
@@ -368,8 +379,8 @@ def compute_cmake_args(gpu: dict, cpu: dict) -> list[str]:
     return args
 
 
-def _detect_model_profile() -> tuple[int, bool]:
-    """Find the GGUF that will actually be served and return (size_mb, is_moe).
+def _detect_model_profile() -> tuple[int, bool, str]:
+    """Find the GGUF that will actually be served: (size_mb, is_moe, path).
 
     Scans the same locations service_manager._find_model() searches, honouring
     ATRI_MODEL_PATH / ATRI_MODEL_DIR. Falls back to the 2B E2B size when no
@@ -386,11 +397,14 @@ def _detect_model_profile() -> tuple[int, bool]:
         Path(os.environ.get("ATRI_MODEL_DIR", str(install_root / "models"))),
         repo_root / "models",
     ]
+    # Prefer the E2B decoder by name (matches service_manager._find_model), then
+    # any other non-projector gguf — so detection agrees with what gets served.
+    preferred = ("gemma-4-e2b-it-q4_k_m.gguf", "gemma-4-e2b-it-q4_k_m.gguf")
     for mdir in model_dirs:
         if mdir.is_dir():
-            for gguf in sorted(mdir.glob("*.gguf")):
-                if "mmproj" not in gguf.name.lower():
-                    candidates.append(gguf)
+            ggufs = [g for g in sorted(mdir.glob("*.gguf")) if "mmproj" not in g.name.lower()]
+            ggufs.sort(key=lambda g: (g.name.lower() not in preferred, g.name))
+            candidates.extend(ggufs)
 
     for model in candidates:
         try:
@@ -398,11 +412,11 @@ def _detect_model_profile() -> tuple[int, bool]:
                 size_mb = int(model.stat().st_size / (1024 * 1024))
                 name = model.name.lower()
                 is_moe = any(tag in name for tag in ("moe", "a4b", "-26b", "-27b", "x7b", "8x"))
-                return size_mb, is_moe
+                return size_mb, is_moe, str(model)
         except OSError:
             continue
 
-    return 3100, False  # default: 2B E2B decoder, dense
+    return 3100, False, ""  # default: 2B E2B decoder, dense
 
 
 def detect_all() -> dict:
@@ -411,10 +425,14 @@ def detect_all() -> dict:
     cpu_info = detect_cpu()
     ram_info = detect_ram()
     gpu_info = detect_gpu()
-    model_size_mb, is_moe = _detect_model_profile()
+    model_size_mb, is_moe, model_path = _detect_model_profile()
     launch_config = compute_launch_config(
         gpu_info, cpu_info, ram_info, model_size_mb=model_size_mb, is_moe=is_moe
     )
+    # Record which model this config was computed for, so the launcher can detect
+    # a model switch and regenerate instead of reusing a stale (wrong) config.
+    launch_config["model_path"] = model_path
+    launch_config["model_size_mb"] = model_size_mb
     cmake_args = compute_cmake_args(gpu_info, cpu_info)
 
     return {
