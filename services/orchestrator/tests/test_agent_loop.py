@@ -332,6 +332,25 @@ async def test_default_mode_approved_tool_executes():
     assert any(c["tool"] == "delete_path" for c in mcp.calls), "approved tool must run"
 
 
+# ── Malformed tool-call detection ────────────────────────────────────────────────
+
+def test_looks_like_unparsed_tool_call():
+    """Detect tool-call attempts that failed to parse (so the loop can retry)."""
+    f = AgentLoop._looks_like_unparsed_tool_call
+    # fenced JSON tool call
+    assert f('```json\n{"name": "bash_exec", "arguments": {"command": "ls"}}\n```') is True
+    # native Gemma marker
+    assert f("<|tool_call>call:list_directory{target_path:<|\".\"|>}") is True
+    # bare name+arguments (even if the JSON is malformed)
+    assert f('{"name": "edit_file", "arguments": {"target_file_path": "a.py"') is True
+    # plain prose answers are not tool calls
+    assert f("The answer is 42.") is False
+    assert f("Here is a summary of the file.") is False
+    assert f("") is False
+    # JSON that isn't a tool call shape
+    assert f('{"foo": 1, "bar": 2}') is False
+
+
 # ── GPU-only marker (placeholder) ───────────────────────────────────────────────
 
 @pytest.mark.gpu_only
