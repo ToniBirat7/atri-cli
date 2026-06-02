@@ -534,6 +534,7 @@ def _build_payload(
     allowed_directory: Optional[str],
     plan_mode: bool = False,
     model_override: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> dict:
     payload = {"message": message}
     if conversation_id:
@@ -544,6 +545,8 @@ def _build_payload(
         payload["plan_mode"] = True
     if model_override:
         payload["model_override"] = model_override
+    if permission_mode:
+        payload["permission_mode"] = permission_mode
     return payload
 
 
@@ -1133,7 +1136,16 @@ def _run_print_mode(
     output_format: str = "text",
     stream_json: bool = False,
 ) -> None:
-    payload = _build_payload(prompt, conversation_id, allowed_directory)
+    # Print mode is non-interactive: there is no human to answer a tool
+    # confirmation prompt, so "default" (which confirms edits) would stall until
+    # the server's confirmation timeout. Auto-accept edits; dangerous ops
+    # (delete/shell) stay gated. Explicit non-default modes are respected.
+    _print_permission_mode = (
+        "acceptEdits" if permission_state.mode == "default" else permission_state.mode
+    )
+    payload = _build_payload(
+        prompt, conversation_id, allowed_directory, permission_mode=_print_permission_mode
+    )
     _print_stream_response(
         client,
         payload,
@@ -1299,6 +1311,7 @@ def _run_interactive(
             allowed_directory,
             plan_mode=plan_mode_ref[0],
             model_override=_pending_model_override,
+            permission_mode=permission_state.mode,
         )
         # Clear model override after injecting into payload (one-shot)
         if _pending_model_override:
