@@ -732,7 +732,16 @@ def _start_services_by_mode(repo_dir: Path, use_gpu: bool, mode: str, hw_config:
     if launch.get("no_mmap", is_moe):
         llama_cmd.append("--no-mmap")
     if launch.get("mlock", False):
-        llama_cmd.append("--mlock")
+        # Only lock if RLIMIT_MEMLOCK can hold the model; otherwise --mlock fails
+        # with a warning and changes nothing (systemd caps memlock at 8 MB by default).
+        try:
+            import resource as _res
+            _soft, _ = _res.getrlimit(_res.RLIMIT_MEMLOCK)
+            _mlock_ok = (_soft == _res.RLIM_INFINITY) or (_soft >= int(model_path.stat().st_size * 0.95))
+        except Exception:
+            _mlock_ok = True
+        if _mlock_ok:
+            llama_cmd.append("--mlock")
     n_cpu_moe = int(launch.get("n_cpu_moe", 999 if is_moe else 0) or 0)
     if is_moe and n_cpu_moe > 0:
         llama_cmd += ["--n-cpu-moe", str(n_cpu_moe)]

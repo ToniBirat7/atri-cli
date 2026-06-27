@@ -311,6 +311,21 @@ def compute_launch_config(
     raw_threads = cpu.get("recommended_threads", 4)
     threads = min(6, raw_threads) if gpu_detected else raw_threads
 
+    # mlock: lock model pages into RAM so they are never paged out. Always good
+    # when the whole model fits in VRAM. ALSO required for a RAM-resident MoE that
+    # spills its experts to system RAM via unified memory: without --mlock those
+    # expert pages get evicted under memory pressure and throughput sags (measured
+    # ~22 vs ~26 tok/s on the 26B-A4B). Only enable it for the MoE-spill case when
+    # there is enough RAM to lock the model without starving the OS (≥6 GB
+    # headroom), so low-RAM devices never thrash — keeps this model-agnostic.
+    total_ram_mb = ram.get("total_ram_mb", 8192)
+    mlock = fits_in_vram or (
+        is_moe
+        and gpu_detected
+        and not fits_in_vram
+        and (total_ram_mb - model_size_mb) >= 6000
+    )
+
     config = {
         "gpu_detected": gpu_detected,
         "gpu_vendor": vendor,
@@ -327,7 +342,7 @@ def compute_launch_config(
         "flash_attn": flash_attn,
         "kv_cache_type_k": kv_cache_type_k,
         "kv_cache_type_v": kv_cache_type_v,
-        "mlock": fits_in_vram,  # lock pages only when the whole model fits in VRAM
+        "mlock": mlock,  # see computation above (VRAM-fit OR RAM-resident MoE)
         # For MoE models that don't fit in VRAM: offload expert layers to CPU RAM.
         # --n-cpu-moe N keeps the experts of N layers on the CPU, freeing VRAM for
         # attention + KV cache. We offload aggressively (999 = all expert layers;
