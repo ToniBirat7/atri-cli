@@ -9,17 +9,17 @@
 
 ### LLM (llama-server connection)
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` | **Must be patched to :8080** for current launch config |
-| `LLM_API_KEY` | — | Must match `--api-key` on llama-server |
-| `LLM_MODEL` | `local-model` | Sent in requests; llama-server ignores it |
-| `LLM_TEMPERATURE` | `0.6` | Agent tool-call turns; use 1.0 for creative chat |
-| `LLM_TOP_P` | `0.95` | Nucleus sampling |
-| `LLM_TOP_K` | `64` | Top-k cutoff |
-| `LLM_MAX_TOKENS` | `2048` (code default) | Max tokens per response |
-| `LLM_TIMEOUT_SECONDS` | `30` (code default) | **Patch to 300 for 26B model** |
-| `LLM_PARALLEL_TOOL_CALLS` | `true` | Allow multiple tools per turn |
+| Variable                  | Default                    | Notes                                                  |
+| ------------------------- | -------------------------- | ------------------------------------------------------ |
+| `LLM_BASE_URL`            | `http://127.0.0.1:8000/v1` | **Must be patched to :8080** for current launch config |
+| `LLM_API_KEY`             | —                          | Must match `--api-key` on llama-server                 |
+| `LLM_MODEL`               | `local-model`              | Sent in requests; llama-server ignores it              |
+| `LLM_TEMPERATURE`         | `0.6`                      | Agent tool-call turns; use 1.0 for creative chat       |
+| `LLM_TOP_P`               | `0.95`                     | Nucleus sampling                                       |
+| `LLM_TOP_K`               | `64`                       | Top-k cutoff                                           |
+| `LLM_MAX_TOKENS`          | `2048` (code default)      | Max tokens per response                                |
+| `LLM_TIMEOUT_SECONDS`     | `30` (code default)        | **Patch to 300 for 26B model**                         |
+| `LLM_PARALLEL_TOOL_CALLS` | `true`                     | Allow multiple tools per turn                          |
 
 ### Agent loop
 

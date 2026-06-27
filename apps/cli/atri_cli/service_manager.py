@@ -24,6 +24,31 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+try:
+    import resource  # POSIX only; gate --mlock on the RLIMIT_MEMLOCK ceiling
+except ImportError:  # pragma: no cover - non-POSIX
+    resource = None  # type: ignore
+
+
+def _memlock_allows(size_bytes: int) -> bool:
+    """True if RLIMIT_MEMLOCK can actually lock `size_bytes` in RAM.
+
+    Most Linux desktops cap memlock at systemd's DefaultLimitMEMLOCK (8 MB), which
+    makes ``--mlock`` on a multi-GB model fail (locks 0 bytes — only a warning) and
+    wastes the attempt. Only pass ``--mlock`` when the soft limit can hold the model;
+    otherwise the model stays pageable (and the user can raise the limit via
+    /etc/security/limits.d to get guaranteed locking).
+    """
+    if resource is None or size_bytes <= 0:
+        return resource is not None
+    try:
+        soft, _hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    except (ValueError, OSError):
+        return True
+    if soft == resource.RLIM_INFINITY:
+        return True
+    return soft >= int(size_bytes * 0.95)
+
 
 def _find_repo_root() -> Path:
     """Walk up from this file to find the repo root (contains runtime/ and services/)."""
@@ -420,7 +445,14 @@ class ServiceManager:
         if flash:
             cmd.extend(["--flash-attn", "on"])
         if config.get("mlock", True):
-            cmd.append("--mlock")
+            try:
+                model_bytes = model.stat().st_size
+            except OSError:
+                model_bytes = 0
+            # Only lock if the OS memlock ceiling can hold the model — otherwise
+            # --mlock fails with a warning and changes nothing (see _memlock_allows).
+            if _memlock_allows(model_bytes):
+                cmd.append("--mlock")
         n_cpu_moe = config.get("n_cpu_moe", 0)
         if is_moe and n_cpu_moe > 0:
             cmd.extend(["--n-cpu-moe", str(n_cpu_moe)])

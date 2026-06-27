@@ -51,6 +51,7 @@ runtime/llm/llama.cpp/
 
 # Logs and runtime files
 *.log
+*.log.*
 logs/
 benchmark_reports/
 *.pid
@@ -92,3 +93,9 @@ Thumbs.db
 # Test/prune artifacts
 services/orchestrator/tests/harness_report.json
 .internal/
+
+# Bench campaign reports
+scripts/bench/reports/
+
+# Generated runtime state (regenerated on startup, machine-specific)
+services/orchestrator/runtime/state/mcp_tool_cache.json

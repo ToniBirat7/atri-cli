@@ -34,12 +34,20 @@ def test_dense_model_fits_vram():
 
 
 def test_moe_model_offloads_experts():
-    """A 26B MoE doesn't fit 6GB VRAM: offload experts to CPU, no mlock."""
+    """A 26B MoE doesn't fit 6GB VRAM: offload experts to CPU, lock RAM-resident pages."""
     cfg = compute_launch_config(_NVIDIA_6GB, _CPU, _RAM_30GB, model_size_mb=16000, is_moe=True)
     assert cfg["is_moe"] is True
     assert cfg["n_cpu_moe"] == 999          # offload all expert layers
-    assert cfg["mlock"] is False            # too big to lock
+    # 30GB RAM comfortably holds the 16GB model → lock pages so the experts
+    # (RAM-resident via unified memory) never page out. Measured 22→26 tok/s.
+    assert cfg["mlock"] is True
     assert cfg["recommended_ctx_size"] >= 8192
+
+
+def test_moe_no_mlock_on_tight_ram():
+    """A 26B MoE on a 16GB-RAM box must NOT mlock — would starve the OS (no headroom)."""
+    cfg = compute_launch_config(_NVIDIA_6GB, _CPU, _RAM_16GB, model_size_mb=16000, is_moe=True)
+    assert cfg["mlock"] is False
 
 
 def test_moe_ctx_scales_down_on_tight_ram():
