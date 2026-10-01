@@ -2,13 +2,13 @@
 
 **Local-first agentic coding CLI — Claude Code capabilities, running entirely on your GPU.**
 
-Atri Code is a production-grade agentic coding assistant powered by **Gemma 4 E2B** via llama.cpp. It brings the full Claude Code experience (multi-turn ReAct loop, MCP tool execution, file editing, web search, session branching, PLAN mode) without sending a single byte of your code to the cloud.
+Atri Code is a production-grade agentic coding assistant powered by **Gemma 4** via llama.cpp: the E2B model by default, or the 26B A4B Mixture-of-Experts model with its expert weights offloaded to system RAM. It brings the full Claude Code experience (multi-turn ReAct loop, MCP tool execution, file editing, web search, session branching, PLAN mode) without sending a single byte of your code to the cloud.
 
 ---
 
-> **Next Milestone — Gemma 4 26B A4B MoE**
+> **Gemma 4 26B A4B MoE on a small GPU**
 >
-> The next major model upgrade targets `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` — a 25B-parameter Mixture-of-Experts model with vision support, 16K context window, and llama.cpp-optimized sparse inference (~4B parameters active per token). Higher quants (Q6_K / Q8_0) will be the recommended tier for users with 16GB+ VRAM.
+> Pick option 2 in the installer to run `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` (~16 GB), a Mixture-of-Experts model with vision support and about 4B parameters active per token. When the model does not fit in VRAM (for example on a 6 GB card), the launcher keeps attention and the KV cache on the GPU and offloads the expert layers to system RAM with `--n-cpu-moe`. Plan for about 32 GB of RAM.
 
 ---
 
@@ -17,7 +17,7 @@ Atri Code is a production-grade agentic coding assistant powered by **Gemma 4 E2
 | Feature | Status |
 |---------|--------|
 | Multi-turn ReAct agent loop with tool budget controls | Implemented |
-| 32 MCP tools — filesystem, bash, git, grep, todo, web search | Implemented |
+| 40 MCP tools - filesystem, bash, git, grep, todo, memory, web search | Implemented |
 | PLAN mode — present a plan before executing | Implemented |
 | Session tree — fork/branch conversations, append-only JSONL | Implemented |
 | Auto-compaction — context distillation at token threshold | Implemented |
@@ -79,11 +79,12 @@ Baseline dev hardware: AMD Ryzen 5 6600H, NVIDIA RTX 3060 Mobile (6GB VRAM), 32G
 
 | Model | Size | Source |
 |-------|------|--------|
-| `gemma-4-e2b-it-Q4_K_M.gguf` | ~2.5 GB | [lmstudio-ai/gemma-4-e2b-it-GGUF on HuggingFace](https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF) |
+| `gemma-4-e2b-it-Q4_K_M.gguf` (default) | ~2.5 GB | [lmstudio-ai/gemma-4-e2b-it-GGUF on HuggingFace](https://huggingface.co/lmstudio-ai/gemma-4-e2b-it-GGUF) |
+| `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` (installer option 2) | ~16 GB | [unsloth/gemma-4-27B-it-GGUF on HuggingFace](https://huggingface.co/unsloth/gemma-4-27B-it-GGUF) |
 
 Place the model file at `models/gemma-4-e2b-it-Q4_K_M.gguf`. The installer fetches it automatically on first run.
 
-**Requirements:** 4GB+ VRAM recommended. CPU-only inference is supported but slow (~5 tok/s on 6-core).
+**Requirements:** 4GB+ VRAM recommended for E2B. CPU-only inference is supported but slow (~5 tok/s on 6-core). The 26B MoE needs about 32 GB of system RAM for the offloaded expert weights.
 
 ---
 
@@ -110,7 +111,7 @@ Place the model file at `models/gemma-4-e2b-it-Q4_K_M.gguf`. The installer fetch
 │    ├─────────────────────────────────────┐                          │
 │    ▼                                     ▼                          │
 │  llama-server  :8000                  MCP server (in-process)       │
-│  Gemma 4 E2B (GGUF)                   32 tools:                    │
+│  Gemma 4 (GGUF)                       40 tools:                    │
 │  OpenAI-compat /v1                     filesystem, bash, git,       │
 │  Flash Attention, KV quant             grep, todo, web search       │
 │                                        diff_engine, repo_map        │
@@ -222,7 +223,7 @@ LLAMA_CUDA_ARCH=89 make llama-build-gpu  # RTX 40xx
 apps/cli/atri_cli/       TUI entry point, service manager, Rich renderer
 apps/frontend/           Next.js 15 web UI with SSE streaming chat
 services/orchestrator/   FastAPI brain — agent loop, LLM adapter, auth, MCP dispatch
-services/mcp/            FastMCP tool server — 32 tools
+services/mcp/            FastMCP tool server — 40 tools
 runtime/llm/llama.cpp/   llama.cpp build (git submodule)
 runtime/state/           SQLite DB, logs, runtime state
 models/                  GGUF model files
@@ -269,7 +270,7 @@ Full guide: [.wiki/troubleshooting.md](.wiki/troubleshooting.md)
 
 - [Installation](.wiki/installation.md) — per-platform setup, GPU variants, gotchas
 - [Architecture](.wiki/architecture.md) — full system diagram, event lifecycle
-- [MCP Tools](.wiki/mcp-tools.md) — all 32 tools, schemas, gotchas
+- [MCP Tools](.wiki/mcp-tools.md) — tool reference, schemas, gotchas
 - [TUI Guide](.wiki/tui.md) — slash commands, PLAN mode, diff viewer, shortcuts
 - [Skills](.wiki/skills.md) — user-defined skills, SKILL.md format, discovery
 - [Performance](.wiki/performance.md) — llama.cpp flags, KV cache tuning, VRAM tradeoffs
